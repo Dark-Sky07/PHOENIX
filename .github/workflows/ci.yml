@@ -19,6 +19,7 @@ on:
       - ".nvmrc"
       - ".github/workflows/ci.yml"
       - ".github/workflows/release.yml"
+      - ".github/workflows/docker.yml"
   push:
     branches:
       - "**"
@@ -36,6 +37,7 @@ on:
       - ".nvmrc"
       - ".github/workflows/ci.yml"
       - ".github/workflows/release.yml"
+      - ".github/workflows/docker.yml"
 
 permissions:
   contents: read
