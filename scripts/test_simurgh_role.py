@@ -68,6 +68,20 @@ class SimurghRoleTests(unittest.TestCase):
             (home / "relay.toml").write_text("mapping = [{listen = 1234}]\n", encoding="utf-8")
             self.assertEqual(role_module.choose_role(home, country="DE")["role"], "relay")
 
+    def test_interrupted_migration_with_both_configs_finishes_for_foreign_idle_relay(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            (home / "exit.toml").write_text("token = 'keep'\n", encoding="utf-8")
+            (home / "relay.toml").write_text(
+                'unpaired = true\ntoken = ""\nmapping = []\n[exit]\naddress = ""\n',
+                encoding="utf-8",
+            )
+            (home / "phoenix-role").write_text("relay\n", encoding="utf-8")
+            self.assertEqual(
+                role_module.choose_role(home, country="DE"),
+                {"role": "exit", "country": "DE", "migrate_relay": True},
+            )
+
     def test_explicit_role_override_is_validated(self):
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
