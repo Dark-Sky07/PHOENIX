@@ -258,7 +258,7 @@ PY
 
 open_simurgh_menu() {
     local simurgh_cli="/opt/phoenix-simurgh/simurgh"
-    if [[ ! -x "${simurgh_cli}" || ! -s "/etc/phoenix-simurgh/relay.toml" ]]; then
+    if [[ ! -x "${simurgh_cli}" || ( ! -s "/etc/phoenix-simurgh/relay.toml" && ! -s "/etc/phoenix-simurgh/exit.toml" ) ]]; then
         LOGE "Simurgh Tunnel is not installed or initialized. Rerun the PHOENIX installer and check its Simurgh health report."
         before_show_menu
         return 1

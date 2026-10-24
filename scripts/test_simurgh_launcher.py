@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import os
 import sys
 import types
 import unittest
@@ -14,7 +15,7 @@ from unittest.mock import Mock, patch
 SCRIPT = Path(__file__).with_name("phoenix-simurgh-launcher.py")
 
 
-def load_launcher():
+def load_launcher(role="relay"):
     package = types.ModuleType("simurgh")
     package.__path__ = []
     cli = types.ModuleType("simurgh.cli")
@@ -35,7 +36,7 @@ def load_launcher():
     spec = importlib.util.spec_from_file_location("phoenix_simurgh_launcher_test", SCRIPT)
     assert spec and spec.loader
     launcher = importlib.util.module_from_spec(spec)
-    with patch.dict(sys.modules, modules):
+    with patch.dict(sys.modules, modules), patch.dict(os.environ, {"PHOENIX_SIMURGH_ROLE": role}):
         spec.loader.exec_module(launcher)
     return launcher, cli, menu, systemd
 
@@ -54,8 +55,18 @@ class BundledMenuTests(unittest.TestCase):
             output = io.StringIO()
             with redirect_stdout(output):
                 menu.service_action("exit", "stop")
-            self.assertIn("only bundles the relay", output.getvalue())
+            self.assertIn("only manages the detected Simurgh role", output.getvalue())
             systemd.control.assert_called_once()
+
+    def test_foreign_role_controls_only_the_phoenix_exit_unit(self):
+        launcher, cli, menu, systemd = load_launcher("exit")
+        self.assertEqual(cli._service_names("exit"), ("phoenix-simurgh-exit",))
+        self.assertEqual(cli._service_names("relay"), ())
+        with patch.object(launcher, "running_in_docker", return_value=False):
+            self.assertIn("active", menu.service_state("simurgh-exit"))
+            systemd.service_state.assert_called_once_with("phoenix-simurgh-exit")
+            menu.service_action("exit", "restart")
+            systemd.control.assert_called_once_with("restart", ("phoenix-simurgh-exit",))
 
     def test_menu_refuses_to_restart_container_managed_service(self):
         launcher, _cli, menu, systemd = load_launcher()

@@ -51,6 +51,8 @@ jobs:
         run: python3 scripts/test_update_simurgh.py
       - name: Test bundled Simurgh menu service isolation
         run: python3 scripts/test_simurgh_launcher.py
+      - name: Test upstream-compatible Simurgh role detection
+        run: python3 scripts/test_simurgh_role.py
 
   go-test:
     runs-on: ubuntu-latest

@@ -22,7 +22,22 @@ API_LATEST = "https://api.github.com/repos/Dark-Sky07/Simurgh-Tunnel/releases/la
 REPO = "Dark-Sky07/Simurgh-Tunnel"
 APP_DIR = Path(os.environ.get("PHOENIX_SIMURGH_DIR", "/opt/phoenix-simurgh"))
 SERVICE_SYSTEMD = "phoenix-simurgh-relay.service"
-SERVICE_OPENRC = "phoenix-simurgh"
+SERVICE_OPENRC = "phoenix-simurgh-relay"
+SIMURGH_HOME = Path(os.environ.get("SIMURGH_HOME", "/etc/phoenix-simurgh"))
+
+
+def installed_role(home: Path = SIMURGH_HOME) -> str:
+    override = os.environ.get("PHOENIX_SIMURGH_ROLE", "").strip().lower()
+    if override in {"exit", "relay"}:
+        return override
+    marker = home / "phoenix-role"
+    if marker.is_file():
+        role = marker.read_text(encoding="utf-8").strip().lower()
+        if role in {"exit", "relay"}:
+            return role
+    if (home / "exit.toml").is_file() and not (home / "relay.toml").is_file():
+        return "exit"
+    return "relay"
 MAX_ARCHIVE_BYTES = 20 * 1024 * 1024
 MAX_EXTRACTED_BYTES = 40 * 1024 * 1024
 VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
@@ -242,11 +257,17 @@ def wait_for_health(timeout: float = 20.0) -> bool:
 
 
 class ServiceManager:
-    def __init__(self, kind: str):
+    def __init__(self, kind: str, role: str = "relay"):
+        if role not in {"exit", "relay"}:
+            raise UpdateError(f"unsupported Simurgh role: {role}")
         self.kind = kind
+        self.role = role
+        self.systemd_service = f"phoenix-simurgh-{role}.service"
+        self.openrc_service = f"phoenix-simurgh-{role}"
 
     @classmethod
-    def detect(cls) -> "ServiceManager":
+    def detect(cls, role: str | None = None) -> "ServiceManager":
+        role = role or installed_role()
         if shutil.which("systemctl"):
             result = subprocess.run(
                 ["systemctl", "show", "--property=Version"],
@@ -254,16 +275,22 @@ class ServiceManager:
                 timeout=10, check=False,
             )
             if result.returncode == 0:
-                return cls("systemd")
+                return cls("systemd", role)
         if shutil.which("rc-service") and shutil.which("rc-update"):
-            return cls("openrc")
+            manager = cls("openrc", role)
+            legacy_unit = Path("/etc/init.d/phoenix-simurgh")
+            role_unit = Path("/etc/init.d") / manager.openrc_service
+            if (role == "relay" and legacy_unit.is_file() and not role_unit.exists()
+                    and "PHOENIX bundled Simurgh panel" in legacy_unit.read_text(errors="replace")):
+                manager.openrc_service = "phoenix-simurgh"
+            return manager
         raise UpdateError("no supported systemd/OpenRC manager found; Simurgh was not changed")
 
     def _run(self, action: str) -> subprocess.CompletedProcess:
         if self.kind == "systemd":
-            command = ["systemctl", action, SERVICE_SYSTEMD]
+            command = ["systemctl", action, self.systemd_service]
         else:
-            command = ["rc-service", SERVICE_OPENRC, action]
+            command = ["rc-service", self.openrc_service, action]
         try:
             return subprocess.run(command, text=True, capture_output=True, timeout=30, check=False)
         except (OSError, subprocess.SubprocessError) as exc:
@@ -271,9 +298,9 @@ class ServiceManager:
 
     def is_active(self) -> bool:
         if self.kind == "systemd":
-            command = ["systemctl", "is-active", "--quiet", SERVICE_SYSTEMD]
+            command = ["systemctl", "is-active", "--quiet", self.systemd_service]
         else:
-            command = ["rc-service", SERVICE_OPENRC, "status"]
+            command = ["rc-service", self.openrc_service, "status"]
         try:
             return subprocess.run(
                 command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

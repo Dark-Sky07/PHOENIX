@@ -74,6 +74,7 @@ RUN apk add --no-cache --update \
 
 COPY --from=builder /app/build/ /app/
 COPY --from=simurgh /opt/phoenix-simurgh /opt/phoenix-simurgh
+COPY scripts/simurgh-role.py /opt/phoenix-simurgh/simurgh-role.py
 COPY --from=builder /app/DockerEntrypoint.sh /app/
 COPY --from=builder /app/x-ui.sh /usr/bin/x-ui
 COPY --from=builder /app/x-ui.sh /usr/bin/phoenix

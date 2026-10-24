@@ -91,6 +91,25 @@ def release_for(archive: Path, version: str, digest: str) -> dict:
     }
 
 
+class RoleAwareServiceTests(unittest.TestCase):
+    def test_exit_install_selects_its_own_service_for_updates(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            (home / "exit.toml").write_text("token = 'keep'\n", encoding="utf-8")
+            self.assertEqual(updater.installed_role(home), "exit")
+            manager = updater.ServiceManager("systemd", "exit")
+            self.assertEqual(manager.systemd_service, "phoenix-simurgh-exit.service")
+            self.assertEqual(manager.openrc_service, "phoenix-simurgh-exit")
+
+    def test_explicit_role_marker_wins_when_both_configs_exist(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            (home / "exit.toml").touch()
+            (home / "relay.toml").touch()
+            (home / "phoenix-role").write_text("exit\n", encoding="utf-8")
+            self.assertEqual(updater.installed_role(home), "exit")
+
+
 class ReleaseMetadataTests(unittest.TestCase):
     def test_release_metadata_requires_digest_and_official_asset_url(self):
         payload = {
@@ -222,10 +241,17 @@ class InstallerBootstrapTests(unittest.TestCase):
         self.assertIn("build_latest_simurgh.py", installer)
         self.assertIn('python3 "$work/build_latest_simurgh.py" "$APP_DIR/lib"', installer)
         self.assertNotIn('SIMURGH_VERSION="3.1.1"', installer)
+        self.assertIn("simurgh-role.py", installer)
+        self.assertIn("SIMURGH_ROLE", installer)
+        self.assertIn("--role exit", installer)
+        self.assertIn("--role relay", installer)
+        self.assertIn("listener.enabled = False", installer)
+        self.assertIn("config.push_enabled = False", installer)
         self.assertIn("verify_panel", installer)
         self.assertIn('"/healthz"', installer)
         self.assertIn('"/app.js"', installer)
         self.assertIn('"/app.css"', installer)
+        self.assertIn('health.get("role") != expected_role', installer)
         self.assertIn('Simurgh did not pass its health and UI checks', installer)
 
     def test_installer_passes_the_exact_phoenix_release_to_bootstrap(self):
@@ -240,7 +266,11 @@ class InstallerBootstrapTests(unittest.TestCase):
         entrypoint = (root / "DockerEntrypoint.sh").read_text(encoding="utf-8")
         for path in ("/healthz", "/app.js", "/app.css"):
             self.assertIn(path, entrypoint)
+        self.assertIn("simurgh-role.py", entrypoint)
         self.assertIn('d.get("product") == "Simurgh Tunnel"', entrypoint)
+        self.assertIn('os.environ["PHOENIX_SIMURGH_ROLE"]', entrypoint)
+        self.assertIn('listener.enabled = False', entrypoint)
+        self.assertIn('config.push_enabled = False', entrypoint)
         self.assertIn(") &", entrypoint)
         self.assertIn("exec /app/x-ui", entrypoint)
 
