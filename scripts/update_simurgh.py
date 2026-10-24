@@ -22,7 +22,22 @@ API_LATEST = "https://api.github.com/repos/Dark-Sky07/Simurgh-Tunnel/releases/la
 REPO = "Dark-Sky07/Simurgh-Tunnel"
 APP_DIR = Path(os.environ.get("PHOENIX_SIMURGH_DIR", "/opt/phoenix-simurgh"))
 SERVICE_SYSTEMD = "phoenix-simurgh-relay.service"
-SERVICE_OPENRC = "phoenix-simurgh"
+SERVICE_OPENRC = "phoenix-simurgh-relay"
+SIMURGH_HOME = Path(os.environ.get("SIMURGH_HOME", "/etc/phoenix-simurgh"))
+
+
+def installed_role(home: Path = SIMURGH_HOME) -> str:
+    override = os.environ.get("PHOENIX_SIMURGH_ROLE", "").strip().lower()
+    if override in {"exit", "relay"}:
+        return override
+    marker = home / "phoenix-role"
+    if marker.is_file():
+        role = marker.read_text(encoding="utf-8").strip().lower()
+        if role in {"exit", "relay"}:
+            return role
+    if (home / "exit.toml").is_file() and not (home / "relay.toml").is_file():
+        return "exit"
+    return "relay"
 MAX_ARCHIVE_BYTES = 20 * 1024 * 1024
 MAX_EXTRACTED_BYTES = 40 * 1024 * 1024
 VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
@@ -95,6 +110,10 @@ def fetch_latest_release() -> dict:
         raise UpdateError(f"GitHub returned HTTP {exc.code} while checking Simurgh updates") from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise UpdateError(f"cannot check for Simurgh updates ({exc}); nothing was changed") from exc
+
+
+def running_in_docker() -> bool:
+    return os.environ.get("XUI_IN_DOCKER", "").lower() == "true" or Path("/.dockerenv").exists()
 
 
 def read_installed_version(package_dir: Path) -> str:
@@ -238,11 +257,17 @@ def wait_for_health(timeout: float = 20.0) -> bool:
 
 
 class ServiceManager:
-    def __init__(self, kind: str):
+    def __init__(self, kind: str, role: str = "relay"):
+        if role not in {"exit", "relay"}:
+            raise UpdateError(f"unsupported Simurgh role: {role}")
         self.kind = kind
+        self.role = role
+        self.systemd_service = f"phoenix-simurgh-{role}.service"
+        self.openrc_service = f"phoenix-simurgh-{role}"
 
     @classmethod
-    def detect(cls) -> "ServiceManager":
+    def detect(cls, role: str | None = None) -> "ServiceManager":
+        role = role or installed_role()
         if shutil.which("systemctl"):
             result = subprocess.run(
                 ["systemctl", "show", "--property=Version"],
@@ -250,16 +275,22 @@ class ServiceManager:
                 timeout=10, check=False,
             )
             if result.returncode == 0:
-                return cls("systemd")
+                return cls("systemd", role)
         if shutil.which("rc-service") and shutil.which("rc-update"):
-            return cls("openrc")
+            manager = cls("openrc", role)
+            legacy_unit = Path("/etc/init.d/phoenix-simurgh")
+            role_unit = Path("/etc/init.d") / manager.openrc_service
+            if (role == "relay" and legacy_unit.is_file() and not role_unit.exists()
+                    and "PHOENIX bundled Simurgh panel" in legacy_unit.read_text(errors="replace")):
+                manager.openrc_service = "phoenix-simurgh"
+            return manager
         raise UpdateError("no supported systemd/OpenRC manager found; Simurgh was not changed")
 
     def _run(self, action: str) -> subprocess.CompletedProcess:
         if self.kind == "systemd":
-            command = ["systemctl", action, SERVICE_SYSTEMD]
+            command = ["systemctl", action, self.systemd_service]
         else:
-            command = ["rc-service", SERVICE_OPENRC, action]
+            command = ["rc-service", self.openrc_service, action]
         try:
             return subprocess.run(command, text=True, capture_output=True, timeout=30, check=False)
         except (OSError, subprocess.SubprocessError) as exc:
@@ -267,9 +298,9 @@ class ServiceManager:
 
     def is_active(self) -> bool:
         if self.kind == "systemd":
-            command = ["systemctl", "is-active", "--quiet", SERVICE_SYSTEMD]
+            command = ["systemctl", "is-active", "--quiet", self.systemd_service]
         else:
-            command = ["rc-service", SERVICE_OPENRC, "status"]
+            command = ["rc-service", self.openrc_service, "status"]
         try:
             return subprocess.run(
                 command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -402,30 +433,64 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Update only PHOENIX's bundled Simurgh service")
     parser.add_argument("--check", action="store_true", help="check for updates without installing")
     parser.add_argument("--yes", action="store_true", help="confirm the Simurgh service restart")
+    parser.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--app-dir", type=Path, default=APP_DIR, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
+    def report(payload: dict) -> None:
+        print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+
     if os.geteuid() != 0:
-        print("Run this command as root; no changes were made.", file=sys.stderr)
+        message = "Run this command as root; no changes were made."
+        if args.json:
+            report({"ok": False, "error": message})
+        else:
+            print(message, file=sys.stderr)
         return 1
-    if os.environ.get("XUI_IN_DOCKER", "").lower() == "true" or Path("/.dockerenv").exists():
-        print("Simurgh is bundled in the Docker image. Update/recreate the image; this command made no changes.")
+    if running_in_docker():
+        message = "Simurgh is bundled in the Docker image. Update/recreate the image; this command made no changes."
+        if args.json:
+            report({"ok": False, "error": message})
+        else:
+            print(message)
         return 1
 
     try:
         current = read_installed_version(args.app_dir / "lib" / "simurgh")
         release = fetch_latest_release()
-        print(f"Simurgh installed: v{current}; latest stable: v{release['version']}")
-        print(f"Release notes: {release['notes_url']}")
         latest_version = version_tuple(release["version"])
         installed_version = version_tuple(current)
-        if latest_version == installed_version:
-            print("Simurgh is already up to date.")
-            return 0
         if latest_version < installed_version:
             raise UpdateError("latest upstream is older than the installed version; refusing to downgrade")
+
+        result = {
+            "ok": True,
+            "update_available": latest_version > installed_version,
+            "version": current,
+            "latest": release["version"],
+            "tag": release["tag"],
+            "notes_url": release["notes_url"],
+            "restart_required": False,
+            "restarting": False,
+        }
+        if not result["update_available"]:
+            result["action"] = "up to date"
+            if args.json:
+                report(result)
+            else:
+                print(f"Simurgh installed: v{current}; latest stable: v{release['version']}")
+                print(f"Release notes: {release['notes_url']}")
+                print("Simurgh is already up to date.")
+            return 0
+
         if args.check:
-            print("A Simurgh update is available. No files or services were changed.")
+            result["action"] = "check only"
+            if args.json:
+                report(result)
+            else:
+                print(f"Simurgh installed: v{current}; latest stable: v{release['version']}")
+                print(f"Release notes: {release['notes_url']}")
+                print("A Simurgh update is available. No files or services were changed.")
             return 0
 
         if not args.yes:
@@ -437,10 +502,23 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
 
         manager = ServiceManager.detect()
-        print(apply_update(args.app_dir, release, manager))
+        message = apply_update(args.app_dir, release, manager)
+        result.update({
+            "action": "updated",
+            "message": message,
+            "restart_required": True,
+            "restarting": True,
+        })
+        if args.json:
+            report(result)
+        else:
+            print(message)
         return 0
     except (UpdateError, OSError, subprocess.SubprocessError) as exc:
-        print(f"Simurgh update failed: {exc}", file=sys.stderr)
+        if args.json:
+            report({"ok": False, "error": str(exc)})
+        else:
+            print(f"Simurgh update failed: {exc}", file=sys.stderr)
         return 1
 
 
