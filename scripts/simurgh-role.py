@@ -103,9 +103,14 @@ def choose_role(home: Path, country: Optional[str] = None, override: Optional[st
             return {"role": "exit", "country": detected, "migrate_relay": True}
         return {"role": "relay", "country": detected or "", "migrate_relay": False}
     if exit_exists and relay_exists:
-        # Preserve a deliberately configured dual-role home only when PHOENIX
-        # has a marker; without one keep the upstream CLI's relay default.
-        return {"role": saved or "relay", "country": country or "", "migrate_relay": False}
+        detected = country if country is not None else detect_country()
+        # An interrupted earlier migration can leave the staged exit config
+        # beside the old, idle relay config. Complete only that safe migration;
+        # preserve intentionally configured dual-role homes and active relays.
+        if detected != "IR" and is_unpaired_phoenix_relay(relay_path):
+            return {"role": "exit", "country": detected, "migrate_relay": True}
+        # Otherwise preserve the explicit role for a configured dual-role home.
+        return {"role": saved or "relay", "country": detected or "", "migrate_relay": False}
     if saved:
         return {"role": saved, "country": country or "", "migrate_relay": False}
 
