@@ -17,6 +17,7 @@ on:
       - "phoenix.sh"
       - "x-ui.sh"
       - ".github/workflows/release.yml"
+      - ".github/workflows/docker.yml"
   pull_request:
     paths:
       - "**.go"
@@ -29,6 +30,7 @@ on:
       - "phoenix.sh"
       - "x-ui.sh"
       - ".github/workflows/release.yml"
+      - ".github/workflows/docker.yml"
   schedule:
     - cron: "18 2 * * 2"
 
