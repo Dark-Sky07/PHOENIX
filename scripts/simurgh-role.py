@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Choose Simurgh's server role using the upstream installer's country rules."""
+"""Preserve Simurgh's installed role; require a manual choice for fresh installs."""
 from __future__ import annotations
 
 import argparse
@@ -78,10 +78,8 @@ def is_unpaired_phoenix_relay(path: Path) -> bool:
 
 def choose_role(home: Path, country: Optional[str] = None, override: Optional[str] = None) -> dict:
     explicit = (override or "").strip().lower()
-    if explicit:
-        if explicit not in VALID_ROLES:
-            raise ValueError("PHOENIX_SIMURGH_ROLE must be 'exit' or 'relay'")
-        return {"role": explicit, "country": country or "", "migrate_relay": False}
+    if explicit and explicit not in VALID_ROLES:
+        raise ValueError("PHOENIX_SIMURGH_ROLE must be 'exit' or 'relay'")
 
     marker = home / "phoenix-role"
     saved = marker.read_text(encoding="utf-8").strip().lower() if marker.is_file() else ""
@@ -95,10 +93,8 @@ def choose_role(home: Path, country: Optional[str] = None, override: Optional[st
         return {"role": "exit", "country": country or "", "migrate_relay": False}
     if relay_exists and not exit_exists:
         detected = country if country is not None else detect_country()
-        # A previous PHOENIX run may have persisted relay after a bad geo-IP
-        # response. Re-check country even when the marker is stale. If location
-        # is unknown, use the same safe exit default as a fresh non-interactive
-        # install, but migrate only a relay config with no pairing or traffic.
+        # Keep the narrowly scoped PHOENIX migration for an idle legacy relay;
+        # never use geolocation to choose a role on a fresh installation.
         if detected != "IR" and is_unpaired_phoenix_relay(relay_path):
             return {"role": "exit", "country": detected, "migrate_relay": True}
         return {"role": "relay", "country": detected or "", "migrate_relay": False}
@@ -109,16 +105,15 @@ def choose_role(home: Path, country: Optional[str] = None, override: Optional[st
         # preserve intentionally configured dual-role homes and active relays.
         if detected != "IR" and is_unpaired_phoenix_relay(relay_path):
             return {"role": "exit", "country": detected, "migrate_relay": True}
-        # Otherwise preserve the explicit role for a configured dual-role home.
         return {"role": saved or "relay", "country": detected or "", "migrate_relay": False}
     if saved:
         return {"role": saved, "country": country or "", "migrate_relay": False}
+    if explicit:
+        return {"role": explicit, "country": country or "", "migrate_relay": False}
 
-    detected = country if country is not None else detect_country()
-    # Match the upstream non-interactive installer: Iran is relay; any other
-    # known country is exit; when geo lookup is unavailable, default to exit.
-    role = "relay" if detected == "IR" else "exit"
-    return {"role": role, "country": detected or "", "migrate_relay": False}
+    # A new server has no reliable stored role. The native installer asks the
+    # operator; non-interactive Docker setups must pass PHOENIX_SIMURGH_ROLE.
+    return {"role": "", "country": "", "migrate_relay": False}
 
 
 def main(argv: Optional[list[str]] = None) -> int:

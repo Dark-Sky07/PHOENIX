@@ -12,6 +12,38 @@ if [[ "${EUID}" -ne 0 ]]; then
   say "Run as root; skipping the optional service installation."
   exit 0
 fi
+
+if [[ -n "${PHOENIX_SIMURGH_ROLE:-}" ]]; then
+  case "${PHOENIX_SIMURGH_ROLE,,}" in
+    exit|relay) PHOENIX_SIMURGH_ROLE="${PHOENIX_SIMURGH_ROLE,,}" ;;
+    *) say "PHOENIX_SIMURGH_ROLE must be 'exit' or 'relay'."; exit 1 ;;
+  esac
+  export PHOENIX_SIMURGH_ROLE
+else
+  saved_role=""
+  if [[ -r "$SIMURGH_HOME/phoenix-role" ]]; then
+    read -r saved_role < "$SIMURGH_HOME/phoenix-role" || true
+  fi
+  case "${saved_role,,}" in exit|relay) ;; *) saved_role="" ;; esac
+  if [[ ! -f "$SIMURGH_HOME/exit.toml" && ! -f "$SIMURGH_HOME/relay.toml" && -z "$saved_role" ]]; then
+    if [[ -r /dev/tty && -w /dev/tty ]]; then
+      printf '%s\n' "Choose the role for this Simurgh server:" \
+        "  1) Foreign / exit — this server hosts the destination services" \
+        "  2) Iran / relay — users connect to this server" > /dev/tty
+      read -r -p "Select 1 or 2: " ROLE_CHOICE </dev/tty || ROLE_CHOICE=""
+      case "${ROLE_CHOICE,,}" in
+        1|exit|foreign) PHOENIX_SIMURGH_ROLE="exit" ;;
+        2|relay|iran) PHOENIX_SIMURGH_ROLE="relay" ;;
+        *) say "No valid role was selected; Simurgh was not configured."; exit 1 ;;
+      esac
+      export PHOENIX_SIMURGH_ROLE
+    else
+      say "A fresh Simurgh install needs a role. Run this interactively or set PHOENIX_SIMURGH_ROLE=exit|relay; no Simurgh files or configuration were changed."
+      exit 1
+    fi
+  fi
+fi
+
 install_python_if_missing() {
   command -v python3 >/dev/null 2>&1 && return 0
   . /etc/os-release 2>/dev/null || true
@@ -104,9 +136,14 @@ role_info="$(SIMURGH_HOME="$SIMURGH_HOME" PYTHONPATH="$APP_DIR/lib${PYTHONPATH:+
   exit 1
 }
 SIMURGH_ROLE="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["role"])' <<<"$role_info")"
-DETECTED_COUNTRY="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("country", ""))' <<<"$role_info")"
 MIGRATE_RELAY="$(python3 -c 'import json,sys; print(str(json.load(sys.stdin)["migrate_relay"]).lower())' <<<"$role_info")"
-say "Role selection: country=${DETECTED_COUNTRY:-unknown}, role=$SIMURGH_ROLE."
+if [[ -z "$SIMURGH_ROLE" ]]; then
+  say "Could not determine a safe Simurgh role; no Simurgh service was changed."
+  exit 1
+fi
+PHOENIX_SIMURGH_ROLE="$SIMURGH_ROLE"
+export PHOENIX_SIMURGH_ROLE
+say "Selected or retained Simurgh role: $SIMURGH_ROLE."
 SERVICE_NAME="phoenix-simurgh-${SIMURGH_ROLE}"
 UNIT_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 CONFIG_FILE="$SIMURGH_HOME/${SIMURGH_ROLE}.toml"

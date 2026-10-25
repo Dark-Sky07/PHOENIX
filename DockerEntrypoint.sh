@@ -68,9 +68,10 @@ EOF
     fail2ban-client -x start
 fi
 
-# Start the separately configured, loopback-only Simurgh panel. The role is
-# selected using the same country rules as the upstream installer; foreign-role
-# installs keep tunnel listeners disabled until an administrator configures them.
+# Start the separately configured, loopback-only Simurgh panel. Fresh Docker
+# data volumes require PHOENIX_SIMURGH_ROLE=exit (foreign) or relay (Iran);
+# existing Simurgh configs remain authoritative. Foreign-role listeners stay
+# disabled until an administrator configures them.
 if [ -x /opt/phoenix-simurgh/simurgh ] && [ -f /opt/phoenix-simurgh/simurgh-role.py ] \
     && command -v python3 >/dev/null 2>&1; then
     mkdir -p /etc/phoenix-simurgh /var/log/phoenix-simurgh
@@ -79,14 +80,20 @@ if [ -x /opt/phoenix-simurgh/simurgh ] && [ -f /opt/phoenix-simurgh/simurgh-role
         python3 /opt/phoenix-simurgh/simurgh-role.py \
         --home /etc/phoenix-simurgh --json 2>/dev/null || true)"
     SIMURGH_ROLE="$(printf '%s' "$role_info" | python3 -c 'import json,sys; print(json.load(sys.stdin)["role"])' 2>/dev/null || true)"
-    DETECTED_COUNTRY="$(printf '%s' "$role_info" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("country", ""))' 2>/dev/null || true)"
     MIGRATE_RELAY="$(printf '%s' "$role_info" | python3 -c 'import json,sys; print(str(json.load(sys.stdin)["migrate_relay"]).lower())' 2>/dev/null || true)"
     case "$SIMURGH_ROLE" in
         exit|relay)
-            echo "[Simurgh] Role selection: country=${DETECTED_COUNTRY:-unknown}, role=$SIMURGH_ROLE."
+            echo "[Simurgh] Selected or retained role: $SIMURGH_ROLE."
             ;;
-        *) echo "[Simurgh] Role detection failed; PHOENIX will still start."; SIMURGH_ROLE="" ;;
+        *)
+            echo "[Simurgh] No role selected. For a new data volume set PHOENIX_SIMURGH_ROLE=exit (foreign) or relay (Iran); PHOENIX will still start without Simurgh."
+            SIMURGH_ROLE=""
+            ;;
     esac
+    if [ -n "$SIMURGH_ROLE" ]; then
+        PHOENIX_SIMURGH_ROLE="$SIMURGH_ROLE"
+        export PHOENIX_SIMURGH_ROLE
+    fi
 
     SIMURGH_CONFIG_OK=true
     SIMURGH_CONFIG_CREATED=false

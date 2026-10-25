@@ -18,12 +18,20 @@ SPEC.loader.exec_module(role_module)
 
 
 class SimurghRoleTests(unittest.TestCase):
-    def test_new_install_uses_country_and_safe_upstream_fallback(self):
-        with tempfile.TemporaryDirectory() as temporary:
+    def test_fresh_install_requires_manual_role_and_ignores_country(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(
+            role_module, "detect_country", side_effect=AssertionError("fresh installs must not geolocate")
+        ) as detect_country:
             home = Path(temporary)
-            self.assertEqual(role_module.choose_role(home, country="IR")["role"], "relay")
-            self.assertEqual(role_module.choose_role(home, country="DE")["role"], "exit")
-            self.assertEqual(role_module.choose_role(home, country="")["role"], "exit")
+            self.assertEqual(
+                role_module.choose_role(home),
+                {"role": "", "country": "", "migrate_relay": False},
+            )
+            self.assertEqual(role_module.choose_role(home, country="IR")["role"], "")
+            self.assertEqual(role_module.choose_role(home, country="DE")["role"], "")
+            self.assertEqual(role_module.choose_role(home, override="relay")["role"], "relay")
+            self.assertEqual(role_module.choose_role(home, override="exit")["role"], "exit")
+            detect_country.assert_not_called()
 
     def test_existing_configs_are_preserved_except_old_idle_foreign_relay(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -82,10 +90,12 @@ class SimurghRoleTests(unittest.TestCase):
                 {"role": "exit", "country": "DE", "migrate_relay": True},
             )
 
-    def test_explicit_role_override_is_validated(self):
+    def test_explicit_role_is_validated_but_does_not_override_existing_config(self):
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
             self.assertEqual(role_module.choose_role(home, country="DE", override="relay")["role"], "relay")
+            (home / "exit.toml").write_text("token = 'keep'\n", encoding="utf-8")
+            self.assertEqual(role_module.choose_role(home, override="relay")["role"], "exit")
             with self.assertRaises(ValueError):
                 role_module.choose_role(home, country="IR", override="unknown")
 
@@ -172,10 +182,23 @@ class SimurghRoleTests(unittest.TestCase):
             self.assertEqual(role_module.detect_country(), "IR")
             self.assertEqual(urlopen.call_count, 2)
 
-    def test_cli_reports_machine_readable_role(self):
-        with tempfile.TemporaryDirectory() as temporary, patch.dict(os.environ, {"SIMURGH_COUNTRY": "DE"}):
+    def test_cli_reports_that_fresh_role_is_unselected_without_geolocation(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(os.environ, {"SIMURGH_COUNTRY": "DE"}), \
+            patch.object(role_module, "detect_country", side_effect=AssertionError("unexpected geolocation")) as detect_country, \
+            patch("builtins.print") as printer:
             output = role_module.main(["--home", temporary, "--json"])
             self.assertEqual(output, 0)
+            self.assertEqual(json.loads(printer.call_args.args[0])["role"], "")
+            detect_country.assert_not_called()
+
+    def test_cli_uses_explicit_role_for_a_fresh_docker_volume(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(
+            os.environ, {"PHOENIX_SIMURGH_ROLE": "exit"}
+        ), patch.object(role_module, "detect_country", side_effect=AssertionError("unexpected geolocation")), \
+            patch("builtins.print") as printer:
+            output = role_module.main(["--home", temporary, "--json"])
+            self.assertEqual(output, 0)
+            self.assertEqual(json.loads(printer.call_args.args[0])["role"], "exit")
 
 
 if __name__ == "__main__":

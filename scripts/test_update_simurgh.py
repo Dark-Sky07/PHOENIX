@@ -243,6 +243,13 @@ class InstallerBootstrapTests(unittest.TestCase):
         self.assertNotIn('SIMURGH_VERSION="3.1.1"', installer)
         self.assertIn("simurgh-role.py", installer)
         self.assertIn("SIMURGH_ROLE", installer)
+        self.assertIn("Choose the role for this Simurgh server", installer)
+        self.assertIn("Foreign / exit", installer)
+        self.assertIn("Iran / relay", installer)
+        self.assertIn('read -r -p "Select 1 or 2: " ROLE_CHOICE </dev/tty', installer)
+        self.assertIn("PHOENIX_SIMURGH_ROLE=exit|relay", installer)
+        self.assertIn("no Simurgh files or configuration were changed", installer)
+        self.assertLess(installer.index("Choose the role for this Simurgh server"), installer.index('mkdir -p "$APP_DIR/lib"'))
         self.assertIn("--role exit", installer)
         self.assertIn("--role relay", installer)
         self.assertIn("listener.enabled = False", installer)
@@ -267,12 +274,17 @@ class InstallerBootstrapTests(unittest.TestCase):
         for path in ("/healthz", "/app.js", "/app.css"):
             self.assertIn(path, entrypoint)
         self.assertIn("simurgh-role.py", entrypoint)
+        self.assertIn("PHOENIX_SIMURGH_ROLE=exit (foreign) or relay (Iran)", entrypoint)
+        self.assertIn('PHOENIX_SIMURGH_ROLE="$SIMURGH_ROLE"', entrypoint)
         self.assertIn('d.get("product") == "Simurgh Tunnel"', entrypoint)
         self.assertIn('os.environ["PHOENIX_SIMURGH_ROLE"]', entrypoint)
         self.assertIn('listener.enabled = False', entrypoint)
         self.assertIn('config.push_enabled = False', entrypoint)
         self.assertIn(") &", entrypoint)
         self.assertIn("exec /app/x-ui", entrypoint)
+        compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
+        self.assertIn('PHOENIX_SIMURGH_ROLE: "exit"', compose)
+        self.assertIn("Existing Simurgh configs remain authoritative", compose)
 
     def test_simurgh_navigation_and_browser_title_use_the_requested_name(self):
         root = Path(__file__).resolve().parents[1]
