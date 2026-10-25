@@ -13,6 +13,32 @@ if [[ "${EUID}" -ne 0 ]]; then
   exit 0
 fi
 
+FRESH_SETUP_PANEL=false
+FRESH_SIMURGH_INSTALL=false
+saved_role=""
+if [[ -r "$SIMURGH_HOME/phoenix-role" ]]; then
+  read -r saved_role < "$SIMURGH_HOME/phoenix-role" || true
+fi
+case "${saved_role,,}" in exit|relay) ;; *) saved_role="" ;; esac
+if [[ ! -f "$SIMURGH_HOME/exit.toml" && ! -f "$SIMURGH_HOME/relay.toml" && -z "$saved_role" ]]; then
+  FRESH_SIMURGH_INSTALL=true
+fi
+
+systemd_is_running() {
+  command -v systemctl >/dev/null 2>&1 || return 1
+  systemctl show --property=Version >/dev/null 2>&1 || return 1
+  state="$(systemctl is-system-running 2>/dev/null || true)"
+  [[ "$state" == running || "$state" == degraded || "$state" == maintenance ]]
+}
+
+simurgh_panel_port_in_use() {
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltnH 2>/dev/null | awk '$4 ~ /:18787$/ { found=1 } END { exit !found }'
+  else
+    (exec 3<>/dev/tcp/127.0.0.1/18787) >/dev/null 2>&1
+  fi
+}
+
 if [[ -n "${PHOENIX_SIMURGH_ROLE:-}" ]]; then
   case "${PHOENIX_SIMURGH_ROLE,,}" in
     exit|relay) PHOENIX_SIMURGH_ROLE="${PHOENIX_SIMURGH_ROLE,,}" ;;
@@ -26,7 +52,49 @@ else
   fi
   case "${saved_role,,}" in exit|relay) ;; *) saved_role="" ;; esac
   if [[ ! -f "$SIMURGH_HOME/exit.toml" && ! -f "$SIMURGH_HOME/relay.toml" && -z "$saved_role" ]]; then
-    if [[ -r /dev/tty && -w /dev/tty ]]; then
+    if systemd_is_running; then
+      if systemctl is-active --quiet phoenix-simurgh-setup.service \
+          && [[ -f /etc/systemd/system/phoenix-simurgh-setup.service ]] \
+          && grep -q 'PHOENIX bundled Simurgh panel' /etc/systemd/system/phoenix-simurgh-setup.service; then
+        say "The authenticated Simurgh first-run panel is already running on loopback port 18787."
+        say "Use an SSH tunnel: ssh -L 18787:127.0.0.1:18787 <user>@<server>, then open http://127.0.0.1:18787/login."
+        exit 0
+      fi
+      unit_conflict=false
+      for unit in simurgh-setup simurgh-exit simurgh-relay; do
+        load_state="$(systemctl show --property=LoadState --value "$unit" 2>/dev/null || true)"
+        load_state="${load_state,,}"
+        load_state="${load_state#loadstate=}"
+        if [[ -n "$load_state" && "$load_state" != not-found && "$load_state" != *"could not be found"* ]]; then
+          unit_conflict=true
+          break
+        fi
+      done
+      for phoenix_unit in \
+          /etc/systemd/system/phoenix-simurgh-setup.service \
+          /etc/systemd/system/phoenix-simurgh-exit.service \
+          /etc/systemd/system/phoenix-simurgh-relay.service; do
+        if [[ -e "$phoenix_unit" ]] && ! grep -q 'PHOENIX bundled Simurgh panel' "$phoenix_unit"; then
+          unit_conflict=true
+          break
+        fi
+      done
+      for role in exit relay; do
+        if systemctl is-active --quiet "phoenix-simurgh-${role}.service"; then
+          unit_conflict=true
+          break
+        fi
+      done
+      if [[ "$unit_conflict" == true ]]; then
+        say "An existing Simurgh systemd unit was detected; leaving it untouched and refusing to create a competing first-run service."
+        exit 1
+      fi
+      if simurgh_panel_port_in_use; then
+        say "Local port 18787 is already in use; no Simurgh setup service or config was changed."
+        exit 1
+      fi
+      FRESH_SETUP_PANEL=true
+    elif [[ -r /dev/tty && -w /dev/tty ]]; then
       printf '%s\n' "Choose the role for this Simurgh server:" \
         "  1) Foreign / exit — this server hosts the destination services" \
         "  2) Iran / relay — users connect to this server" > /dev/tty
@@ -84,7 +152,7 @@ chmod 700 "$SIMURGH_HOME"
 # A fresh install uses the latest stable, SHA-256-verified upstream package.
 # Existing installations are left in place here and updated transactionally by
 # the PHOENIX updater after this service is healthy.
-if [[ ! -f "$APP_DIR/lib/simurgh/__init__.py" ]]; then
+if [[ ! -f "$APP_DIR/lib/simurgh/__init__.py" || "$FRESH_SIMURGH_INSTALL" == true ]]; then
   for helper in update_simurgh.py build_latest_simurgh.py simurgh-role.py; do
     if ! curl -fL --retry 2 --connect-timeout 10 \
       "https://raw.githubusercontent.com/${PHOENIX_REPO}/${PHOENIX_REF}/scripts/${helper}" \
@@ -129,6 +197,87 @@ exec python3 "$APP_DIR/launcher.py" "$@"
 SH
 chmod 755 "$APP_DIR/simurgh"
 chmod 644 "$APP_DIR/launcher.py"
+
+cleanup_phoenix_setup_service() {
+  setup_unit="/etc/systemd/system/phoenix-simurgh-setup.service"
+  alias_unit="/etc/systemd/system/simurgh-setup.service"
+  alias_target=""
+  if [[ -L "$alias_unit" ]]; then
+    alias_target="$(readlink -f "$alias_unit" 2>/dev/null || true)"
+  fi
+  if [[ -f "$setup_unit" ]] && grep -q 'PHOENIX bundled Simurgh panel' "$setup_unit"; then
+    systemctl disable --now phoenix-simurgh-setup.service >/dev/null 2>&1 || true
+    rm -f "$setup_unit"
+    if [[ "$alias_target" == "$setup_unit" ]]; then
+      rm -f "$alias_unit"
+    fi
+    systemctl daemon-reload >/dev/null 2>&1 || true
+  fi
+}
+
+if [[ "$FRESH_SETUP_PANEL" == true ]]; then
+  if ! SIMURGH_HOME="$SIMURGH_HOME" "$APP_DIR/simurgh" install >"$work/setup.log" 2>&1; then
+    cat "$work/setup.log"
+    cleanup_phoenix_setup_service
+    say "The authenticated first-run panel could not be installed; no role config was created. PHOENIX and Xray were left untouched."
+    exit 1
+  fi
+  if ! systemctl is-active --quiet phoenix-simurgh-setup.service; then
+    cat "$work/setup.log"
+    cleanup_phoenix_setup_service
+    say "The first-run panel service did not become active; no role config was created. Inspect journalctl -u phoenix-simurgh-setup.service."
+    exit 1
+  fi
+  if ! SIMURGH_HOME="$SIMURGH_HOME" PYTHONPATH="$APP_DIR/lib${PYTHONPATH:+:$PYTHONPATH}" python3 - <<'PY'
+import base64
+import json
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+base = "http://127.0.0.1:18787"
+state_path = Path("/etc/phoenix-simurgh/state.json")
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+deadline = time.monotonic() + 30
+last_error = "no response"
+while time.monotonic() < deadline:
+    try:
+        with opener.open(base + "/healthz", timeout=2) as response:
+            health = json.load(response)
+        if (health.get("ok") is not True or health.get("product") != "Simurgh Tunnel"
+                or health.get("role") != "setup"):
+            raise RuntimeError("setup health endpoint returned unexpected metadata")
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        auth = state.get("panel_auth") or {}
+        user, password = auth.get("user"), auth.get("password")
+        if not user or not password:
+            raise RuntimeError("first-run panel credentials were not initialized")
+        token = base64.b64encode(f"{user}:{password}".encode()).decode()
+        request = urllib.request.Request(
+            base + "/", headers={"Authorization": "Basic " + token})
+        with opener.open(request, timeout=3) as response:
+            html = response.read(256 * 1024).decode("utf-8", "replace")
+        if 'value="exit"' not in html or 'value="relay"' not in html:
+            raise RuntimeError("authenticated first-run role chooser is incomplete")
+        print(f"Simurgh first-run panel verified: v{health.get('version')} (authenticated role chooser OK).")
+        raise SystemExit(0)
+    except (OSError, ValueError, KeyError, RuntimeError, urllib.error.URLError) as exc:
+        last_error = str(exc)
+        time.sleep(0.5)
+print(f"Simurgh first-run panel check failed: {last_error}")
+raise SystemExit(1)
+PY
+  then
+    cleanup_phoenix_setup_service
+    say "The first-run panel failed its authenticated health check; its PHOENIX service was stopped. No role config was created."
+    exit 1
+  fi
+  cat "$work/setup.log"
+  say "Choose Exit or Relay in the authenticated Simurgh panel. It is loopback-only; from your computer run ssh -L 18787:127.0.0.1:18787 <user>@<server>, then open http://127.0.0.1:18787/login."
+  say "The Simurgh role service starts only after you choose. PHOENIX and Xray remain under their existing service managers."
+  exit 0
+fi
 
 role_info="$(SIMURGH_HOME="$SIMURGH_HOME" PYTHONPATH="$APP_DIR/lib${PYTHONPATH:+:$PYTHONPATH}" \
   python3 "$APP_DIR/simurgh-role.py" --home "$SIMURGH_HOME" --json)" || {
