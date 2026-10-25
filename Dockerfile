@@ -1,16 +1,4 @@
 # ========================================================
-# Stage: Latest verified Simurgh runtime package
-# ========================================================
-FROM --platform=$BUILDPLATFORM alpine AS simurgh
-RUN apk add --no-cache ca-certificates python3
-COPY scripts/update_simurgh.py scripts/build_latest_simurgh.py /tmp/simurgh-build/
-RUN mkdir -p /opt/phoenix-simurgh/lib \
-  && python3 /tmp/simurgh-build/build_latest_simurgh.py /opt/phoenix-simurgh/lib
-COPY scripts/phoenix-simurgh-launcher.py /opt/phoenix-simurgh/launcher.py
-RUN printf '%s\n' '#!/bin/sh' 'APP_DIR="/opt/phoenix-simurgh"' 'export PYTHONPATH="$APP_DIR/lib${PYTHONPATH:+:$PYTHONPATH}"' 'exec python3 "$APP_DIR/launcher.py" "$@"' > /opt/phoenix-simurgh/simurgh \
-  && chmod 755 /opt/phoenix-simurgh/simurgh
-
-# ========================================================
 # Stage: Frontend (Vite)
 # ========================================================
 FROM --platform=$BUILDPLATFORM node:22-alpine AS frontend
@@ -69,12 +57,9 @@ RUN apk add --no-cache --update \
   iproute2 \
   bash \
   curl \
-  openssl \
-  python3
+  openssl
 
 COPY --from=builder /app/build/ /app/
-COPY --from=simurgh /opt/phoenix-simurgh /opt/phoenix-simurgh
-COPY scripts/simurgh-role.py /opt/phoenix-simurgh/simurgh-role.py
 COPY --from=builder /app/DockerEntrypoint.sh /app/
 COPY --from=builder /app/x-ui.sh /usr/bin/x-ui
 COPY --from=builder /app/x-ui.sh /usr/bin/phoenix
@@ -100,6 +85,6 @@ ENV XUI_ENABLE_FAIL2BAN="true"
 ENV XUI_DB_TYPE=""
 ENV XUI_DB_DSN=""
 EXPOSE 2053
-VOLUME [ "/etc/x-ui", "/etc/phoenix-simurgh" ]
+VOLUME [ "/etc/x-ui" ]
 CMD [ "./x-ui" ]
 ENTRYPOINT [ "/app/DockerEntrypoint.sh" ]

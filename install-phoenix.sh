@@ -1607,54 +1607,6 @@ install_x-ui() {
         fi
     fi
 
-    # Install the independent, loopback-only Simurgh service. Its setup is
-    # best-effort so a missing optional dependency never interrupts PHOENIX.
-    simurgh_installer=/usr/bin/phoenix-simurgh-install
-    simurgh_launcher=/usr/bin/phoenix-simurgh-launcher.py
-    if curl -fLRo "$simurgh_installer" "https://raw.githubusercontent.com/${PHOENIX_REPO}/${tag_version}/scripts/install-simurgh-tunnel.sh" >/dev/null 2>&1 \
-        && curl -fLRo "$simurgh_launcher" "https://raw.githubusercontent.com/${PHOENIX_REPO}/${tag_version}/scripts/phoenix-simurgh-launcher.py" >/dev/null 2>&1; then
-        chmod +x "$simurgh_installer"
-        if ! PHOENIX_REF="$tag_version" PHOENIX_REPO="$PHOENIX_REPO" bash "$simurgh_installer"; then
-            echo -e "${yellow}Simurgh did not pass installation and health checks; PHOENIX and Xray remain running. Review the details above before opening its panel.${plain}"
-        fi
-    else
-        echo -e "${yellow}Simurgh installer unavailable; PHOENIX and Xray remain unchanged.${plain}"
-    fi
-
-    # Keep the separate Simurgh updater available to the PHOENIX management menu.
-    simurgh_updater=/usr/bin/phoenix-simurgh-update
-    simurgh_updater_tmp="$(mktemp /usr/bin/.phoenix-simurgh-update.XXXXXX 2>/dev/null)" || simurgh_updater_tmp=""
-    if [[ -n "$simurgh_updater_tmp" ]] && curl -fLRo "$simurgh_updater_tmp" "https://raw.githubusercontent.com/${PHOENIX_REPO}/${tag_version}/scripts/update_simurgh.py" >/dev/null 2>&1 && python3 - "$simurgh_updater_tmp" <<'PY'
-import ast
-import pathlib
-import sys
-ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-PY
-    then
-        chmod 755 "$simurgh_updater_tmp"
-        if ! mv -f "$simurgh_updater_tmp" "$simurgh_updater"; then
-            rm -f "$simurgh_updater_tmp"
-            echo -e "${yellow}Simurgh update option could not be installed; PHOENIX remains available.${plain}"
-        fi
-    else
-        [[ -z "$simurgh_updater_tmp" ]] || rm -f "$simurgh_updater_tmp"
-        echo -e "${yellow}Simurgh updater unavailable; it can be fetched when needed from the management menu.${plain}"
-    fi
-
-    # Keep the bundled Simurgh service on the latest stable upstream release
-    # after both fresh installs and PHOENIX updates. This updater only touches
-    # Simurgh and rolls back its package if validation or health checks fail.
-    if [[ "${XUI_IN_DOCKER:-}" != "true" && ! -e /.dockerenv && -x "$simurgh_updater" && -f /opt/phoenix-simurgh/lib/simurgh/__init__.py ]]; then
-        if command -v python3 >/dev/null 2>&1; then
-            echo -e "${blue}Checking for the latest Simurgh release...${plain}"
-            if ! python3 "$simurgh_updater" --yes; then
-                echo -e "${yellow}Simurgh could not be updated to the latest release; PHOENIX installation is complete and Simurgh files were preserved.${plain}"
-            fi
-        else
-            echo -e "${yellow}Python 3 is unavailable; Simurgh was not auto-updated. PHOENIX installation is complete.${plain}"
-        fi
-    fi
-
     echo -e "${green}PHOENIX ${tag_version}${plain} installation finished, it is running now..."
     echo -e ""
     echo -e "┌───────────────────────────────────────────────────────┐

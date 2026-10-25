@@ -55,11 +55,10 @@ export function usePageTitle() {
 
   useEffect(() => {
     const key = TITLE_KEYS[pathname];
-    const isSimurghPage = pathname === '/simurgh';
-    const pageTitle = isSimurghPage ? 'Simurgh Tunnel' : key ? t(key) : 'PHOENIX';
+    const pageTitle = key ? t(key) : 'PHOENIX';
     const title = hasCustomBrand && displayBrandName ? `${displayBrandName} - ${pageTitle}` : pageTitle;
     const host = window.location.hostname;
-    document.title = isSimurghPage ? pageTitle : host ? `${host} - ${title}` : title;
+    document.title = host ? `${host} - ${title}` : title;
 
     const favicon = document.querySelector<HTMLLinkElement>('link[rel~="icon"]');
     if (!favicon) return;
