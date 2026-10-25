@@ -52,15 +52,5 @@ require('update_defer_service_start=1')
 require('service_start_for_config()')
 require('service_restart_for_config()')
 
-# Automatic Simurgh refresh runs only after the panel transaction commits and
-# uses the same validated updater as a standalone refresh.
-require("auto_update_simurgh()")
-require('python3 "$updater" --yes')
-require('[[ "${XUI_IN_DOCKER:-}" != "true" && ! -e /.dockerenv ]] || return 0')
-order("finalize_update_transaction\n\n    # Simurgh is updated only after", "    auto_update_simurgh\n")
-installer = Path(sys.argv[1]).with_name("install.sh").read_text()
-if 'python3 "$simurgh_updater" --yes' not in installer:
-    raise SystemExit("panel installer must auto-update Simurgh after setup")
-
 print("update transaction static checks passed")
 PY

@@ -206,70 +206,6 @@ update() {
     fi
 }
 
-update_simurgh() {
-    if [[ "$EUID" -ne 0 ]]; then
-        LOGE "Run this command as root; Simurgh was not changed."
-        return 1
-    fi
-    if [[ "${running_in_docker}" == "true" ]]; then
-        LOGE "Simurgh is bundled in the Docker image. Update and recreate the image instead; this command made no changes."
-        return 1
-    fi
-    if ! command -v python3 > /dev/null 2>&1; then
-        LOGE "Python 3 is required for the bundled Simurgh service; no changes were made."
-        return 1
-    fi
-
-    local updater="/usr/bin/phoenix-simurgh-update" repo tag tmp
-    if [[ ! -x "${updater}" ]]; then
-        repo="${PHOENIX_REPO}"
-        tag="$(phoenix_latest_tag)"
-        if [[ -z "${tag}" ]]; then
-            LOGE "Could not determine the latest PHOENIX release; Simurgh was not changed."
-            return 1
-        fi
-        tmp="$(mktemp /usr/bin/.phoenix-simurgh-update.XXXXXX)" || return 1
-        if ! curl -4fLRsS -o "${tmp}" "https://raw.githubusercontent.com/${repo}/${tag}/scripts/update_simurgh.py"; then
-            rm -f "${tmp}"
-            LOGE "Could not download the Simurgh updater from ${tag}; nothing was changed."
-            return 1
-        fi
-        if ! python3 - "${tmp}" <<'PY'
-import ast
-import pathlib
-import sys
-ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-PY
-        then
-            rm -f "${tmp}"
-            LOGE "The downloaded Simurgh updater failed its syntax check; nothing was changed."
-            return 1
-        fi
-        chmod 755 "${tmp}" || { rm -f "${tmp}"; return 1; }
-        if ! mv -f "${tmp}" "${updater}"; then
-            rm -f "${tmp}"
-            LOGE "Could not install the Simurgh updater; nothing was changed."
-            return 1
-        fi
-    fi
-
-    python3 "${updater}" "$@"
-}
-
-open_simurgh_menu() {
-    local simurgh_cli="/opt/phoenix-simurgh/simurgh"
-    if [[ ! -x "${simurgh_cli}" || ( ! -s "/etc/phoenix-simurgh/relay.toml" && ! -s "/etc/phoenix-simurgh/exit.toml" ) ]]; then
-        LOGE "Simurgh Tunnel is not installed or initialized. Rerun the PHOENIX installer and check its Simurgh health report."
-        before_show_menu
-        return 1
-    fi
-
-    SIMURGH_HOME="/etc/phoenix-simurgh" "${simurgh_cli}" menu
-    local rc=$?
-    before_show_menu
-    return "${rc}"
-}
-
 update_menu() {
     echo -e "${yellow}Updating Menu${plain}"
     confirm "This function will update the menu to the latest changes." "y"
@@ -3180,7 +3116,6 @@ show_usage() {
 │  ${blue}phoenix banlog${plain}             - Check Fail2ban ban logs          │
 │  ${blue}phoenix update${plain}             - Update                           │
 │  ${blue}phoenix update-all-geofiles${plain}- Update all geo files             │
-│  ${blue}phoenix update-simurgh${plain}     - Update Simurgh Tunnel             │
 │  ${blue}phoenix migrateDB [file]${plain}   - Convert .db <-> .dump (SQLite)   │
 │  ${blue}phoenix legacy${plain}             - Legacy version                   │
 │  ${blue}phoenix install${plain}            - Install                          │
@@ -3227,12 +3162,10 @@ show_menu() {
 │  ${green}26.${plain} Speedtest by Ookla                        │
 │────────────────────────────────────────────────│
 │  ${green}27.${plain} PostgreSQL Management                     │
-│  ${green}28.${plain} Update Simurgh Tunnel                     │
-│  ${green}29.${plain} Simurgh Tunnel                            │
 ╚────────────────────────────────────────────────╝
 "
     show_status
-    echo && read -rp "Please enter your selection [0-29]: " num
+    echo && read -rp "Please enter your selection [0-27]: " num
 
     case "${num}" in
         0)
@@ -3319,14 +3252,8 @@ show_menu() {
         27)
             postgresql_menu
             ;;
-        28)
-            check_install && update_simurgh
-            ;;
-        29)
-            check_install && open_simurgh_menu
-            ;;
         *)
-            LOGE "Please enter the correct number [0-29]"
+            LOGE "Please enter the correct number [0-27]"
             ;;
     esac
 }
@@ -3377,9 +3304,6 @@ if [[ $# > 0 ]]; then
             ;;
         "update-all-geofiles")
             check_install 0 && update_all_geofiles 0 && restart 0
-            ;;
-        "update-simurgh")
-            check_install 0 && update_simurgh "${@:2}"
             ;;
         "migrateDB")
             migrate_db "$2" "$3"
