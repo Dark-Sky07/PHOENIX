@@ -2139,6 +2139,15 @@ export const SCHEMAS: Record<string, unknown> = {
       "shareAddrStrategy": {
         "type": "string"
       },
+      "sniffingDestOverride": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "sniffingEnabled": {
+        "type": "boolean"
+      },
       "ssMethod": {
         "type": "string"
       },
@@ -2164,6 +2173,7 @@ export const SCHEMAS: Record<string, unknown> = {
       "port",
       "protocol",
       "remark",
+      "sniffingEnabled",
       "ssMethod",
       "tag",
       "tlsFlowCapable"

@@ -2165,6 +2165,15 @@
           "shareAddrStrategy": {
             "type": "string"
           },
+          "sniffingDestOverride": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "sniffingEnabled": {
+            "type": "boolean"
+          },
           "ssMethod": {
             "type": "string"
           },
@@ -2190,6 +2199,7 @@
           "port",
           "protocol",
           "remark",
+          "sniffingEnabled",
           "ssMethod",
           "tag",
           "tlsFlowCapable"
@@ -3322,6 +3332,10 @@
                       "remark": "VLESS-443",
                       "shareAddr": "",
                       "shareAddrStrategy": "",
+                      "sniffingDestOverride": [
+                        ""
+                      ],
+                      "sniffingEnabled": false,
                       "ssMethod": "",
                       "tag": "in-443-tcp",
                       "tlsFlowCapable": true,

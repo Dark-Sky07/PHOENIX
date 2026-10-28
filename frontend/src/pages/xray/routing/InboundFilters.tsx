@@ -183,7 +183,7 @@ export default function InboundFilters({
       <Alert
         type="info"
         showIcon
-        title={t('pages.xray.inboundFilters.description')}
+        title={t('pages.xray.inboundFilters.intro')}
         description={t('pages.xray.inboundFilters.sniffingHint')}
       />
       <Alert

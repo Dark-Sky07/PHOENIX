@@ -1531,7 +1531,7 @@
       "routeTesterDefaultOutbound": "No routing rule matched — traffic goes to the default (first) outbound.",
       "inboundFilters": {
         "title": "Inbound Filters",
-        "description": "Create independent domain-blocking policies for one or more selected inbounds. Rules are inserted before broad routing rules and send matches to a blackhole outbound. Iran/Russia presets also require geosite_IR.dat/geosite_RU.dat to be installed.",
+        "intro": "Create independent domain-blocking policies for one or more selected inbounds. Rules are inserted before broad routing rules and send matches to a blackhole outbound. Iran/Russia presets also require geosite_IR.dat/geosite_RU.dat to be installed.",
         "sniffingHint": "Domain categories require sniffing to be enabled on every selected inbound with HTTP, TLS and QUIC in destOverride. This panel checks all three before saving; enable them in each inbound's settings first. Changes remain unsaved until you press Save on this page.",
         "youtubeWarning": "Domain lists cannot reliably separate YouTube ads from video delivery. Blocking ad-related domains may reduce ads but can also break playback; no YouTube-ad removal is guaranteed.",
         "addPolicy": "Add filter policy",
