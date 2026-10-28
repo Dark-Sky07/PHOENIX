@@ -470,6 +470,8 @@ export interface InboundOption {
   remark: string;
   shareAddr?: string;
   shareAddrStrategy?: string;
+  sniffingDestOverride?: string[];
+  sniffingEnabled: boolean;
   ssMethod: string;
   tag: string;
   tlsFlowCapable: boolean;

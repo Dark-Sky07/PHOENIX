@@ -501,6 +501,8 @@ export const InboundOptionSchema = z.object({
   remark: z.string(),
   shareAddr: z.string().optional(),
   shareAddrStrategy: z.string().optional(),
+  sniffingDestOverride: z.array(z.string()).optional(),
+  sniffingEnabled: z.boolean(),
   ssMethod: z.string(),
   tag: z.string(),
   tlsFlowCapable: z.boolean(),

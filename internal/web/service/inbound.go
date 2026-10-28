@@ -343,21 +343,34 @@ func firstNonEmpty(value, fallback string) string {
 	return fallback
 }
 
+func parseInboundSniffing(raw string) (bool, []string) {
+	var sniffing struct {
+		Enabled      bool     `json:"enabled"`
+		DestOverride []string `json:"destOverride"`
+	}
+	if err := json.Unmarshal([]byte(raw), &sniffing); err != nil {
+		return false, nil
+	}
+	return sniffing.Enabled, sniffing.DestOverride
+}
+
 type InboundOption struct {
-	Id                int                       `json:"id" example:"1"`
-	Remark            string                    `json:"remark" example:"VLESS-443"`
-	Tag               string                    `json:"tag" example:"in-443-tcp"`
-	Protocol          string                    `json:"protocol" example:"vless"`
-	Port              int                       `json:"port" example:"443"`
-	TlsFlowCapable    bool                      `json:"tlsFlowCapable" example:"true"`
-	SsMethod          string                    `json:"ssMethod"`
-	L2TP              *L2TPInboundOption        `json:"l2tp,omitempty"`
-	AwgServer         *amneziawg.ServerSettings `json:"awgServer,omitempty"`
-	TuicServer        *tuic.TuicServerSettings  `json:"tuicServer,omitempty"`
-	NodeAddress       string                    `json:"nodeAddress,omitempty"`
-	Listen            string                    `json:"listen,omitempty"`
-	ShareAddr         string                    `json:"shareAddr,omitempty"`
-	ShareAddrStrategy string                    `json:"shareAddrStrategy,omitempty"`
+	Id                   int                       `json:"id" example:"1"`
+	Remark               string                    `json:"remark" example:"VLESS-443"`
+	Tag                  string                    `json:"tag" example:"in-443-tcp"`
+	Protocol             string                    `json:"protocol" example:"vless"`
+	Port                 int                       `json:"port" example:"443"`
+	TlsFlowCapable       bool                      `json:"tlsFlowCapable" example:"true"`
+	SsMethod             string                    `json:"ssMethod"`
+	SniffingEnabled      bool                      `json:"sniffingEnabled"`
+	SniffingDestOverride []string                  `json:"sniffingDestOverride,omitempty"`
+	L2TP                 *L2TPInboundOption        `json:"l2tp,omitempty"`
+	AwgServer            *amneziawg.ServerSettings `json:"awgServer,omitempty"`
+	TuicServer           *tuic.TuicServerSettings  `json:"tuicServer,omitempty"`
+	NodeAddress          string                    `json:"nodeAddress,omitempty"`
+	Listen               string                    `json:"listen,omitempty"`
+	ShareAddr            string                    `json:"shareAddr,omitempty"`
+	ShareAddrStrategy    string                    `json:"shareAddrStrategy,omitempty"`
 	// Hosting node; nil for this panel's own inbounds. Lets the clients
 	// page map a node filter onto inbound IDs (#4997).
 	NodeId *int `json:"nodeId,omitempty"`
@@ -373,6 +386,7 @@ func (s *InboundService) GetInboundOptions(userId int) ([]InboundOption, error) 
 		Port              int    `gorm:"column:port"`
 		StreamSettings    string `gorm:"column:stream_settings"`
 		Settings          string `gorm:"column:settings"`
+		Sniffing          string `gorm:"column:sniffing"`
 		NodeId            *int   `gorm:"column:node_id"`
 		NodeAddress       string `gorm:"column:node_address"`
 		Listen            string `gorm:"column:listen"`
@@ -380,7 +394,7 @@ func (s *InboundService) GetInboundOptions(userId int) ([]InboundOption, error) 
 		ShareAddrStrategy string `gorm:"column:share_addr_strategy"`
 	}
 	err := db.Table("inbounds").
-		Select("inbounds.id, inbounds.remark, inbounds.tag, inbounds.protocol, inbounds.port, inbounds.stream_settings, inbounds.settings, inbounds.node_id, COALESCE(nodes.address, '') AS node_address, inbounds.listen, inbounds.share_addr, inbounds.share_addr_strategy").
+		Select("inbounds.id, inbounds.remark, inbounds.tag, inbounds.protocol, inbounds.port, inbounds.stream_settings, inbounds.settings, inbounds.sniffing, inbounds.node_id, COALESCE(nodes.address, '') AS node_address, inbounds.listen, inbounds.share_addr, inbounds.share_addr_strategy").
 		Joins("LEFT JOIN nodes ON nodes.id = inbounds.node_id").
 		Where("inbounds.user_id = ?", userId).
 		Order("id ASC").
@@ -390,21 +404,24 @@ func (s *InboundService) GetInboundOptions(userId int) ([]InboundOption, error) 
 	}
 	out := make([]InboundOption, 0, len(rows))
 	for _, r := range rows {
+		sniffingEnabled, sniffingDestOverride := parseInboundSniffing(r.Sniffing)
 		option := InboundOption{
-			Id:                r.Id,
-			Remark:            r.Remark,
-			Tag:               r.Tag,
-			Protocol:          r.Protocol,
-			Port:              r.Port,
-			TlsFlowCapable:    inboundCanEnableTlsFlow(r.Protocol, r.StreamSettings, r.Settings),
-			SsMethod:          inboundShadowsocksMethod(r.Protocol, r.Settings),
-			AwgServer:         inboundAmneziaWGServer(r.Protocol, r.Settings),
-			TuicServer:        inboundTuicServer(r.Protocol, r.Settings),
-			NodeId:            r.NodeId,
-			NodeAddress:       r.NodeAddress,
-			Listen:            r.Listen,
-			ShareAddr:         r.ShareAddr,
-			ShareAddrStrategy: r.ShareAddrStrategy,
+			Id:                   r.Id,
+			Remark:               r.Remark,
+			Tag:                  r.Tag,
+			Protocol:             r.Protocol,
+			Port:                 r.Port,
+			TlsFlowCapable:       inboundCanEnableTlsFlow(r.Protocol, r.StreamSettings, r.Settings),
+			SsMethod:             inboundShadowsocksMethod(r.Protocol, r.Settings),
+			SniffingEnabled:      sniffingEnabled,
+			SniffingDestOverride: sniffingDestOverride,
+			AwgServer:            inboundAmneziaWGServer(r.Protocol, r.Settings),
+			TuicServer:           inboundTuicServer(r.Protocol, r.Settings),
+			NodeId:               r.NodeId,
+			NodeAddress:          r.NodeAddress,
+			Listen:               r.Listen,
+			ShareAddr:            r.ShareAddr,
+			ShareAddrStrategy:    r.ShareAddrStrategy,
 		}
 		if r.Protocol == string(model.L2TP) {
 			option.L2TP = l2tpInboundOption(r.Settings)

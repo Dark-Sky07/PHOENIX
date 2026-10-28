@@ -479,6 +479,10 @@ export const EXAMPLES: Record<string, unknown> = {
     "remark": "VLESS-443",
     "shareAddr": "",
     "shareAddrStrategy": "",
+    "sniffingDestOverride": [
+      ""
+    ],
+    "sniffingEnabled": false,
     "ssMethod": "",
     "tag": "in-443-tcp",
     "tlsFlowCapable": true,
