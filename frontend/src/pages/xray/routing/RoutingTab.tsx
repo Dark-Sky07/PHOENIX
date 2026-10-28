@@ -1,10 +1,11 @@
 import { useCallback, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Modal, Space, Table, Tabs } from 'antd';
-import { AimOutlined, ControlOutlined, PlusOutlined, UnorderedListOutlined } from '@ant-design/icons';
+import { AimOutlined, ControlOutlined, FilterOutlined, PlusOutlined, UnorderedListOutlined } from '@ant-design/icons';
 
 import { catTabLabel } from '@/pages/settings/catTabLabel';
 import RoutingBasic from './RoutingBasic';
+import InboundFilters from './InboundFilters';
 import RouteTester from './RouteTester';
 import RuleFormModal from './RuleFormModal';
 import type { RoutingRule } from './RuleFormModal';
@@ -153,7 +154,11 @@ export default function RoutingTab({
       if (!Array.isArray(tt.routing.rules)) tt.routing.rules = [];
       const typed = rule as unknown as RuleObject;
       if (editingIndex == null) tt.routing.rules.push(typed);
-      else tt.routing.rules[editingIndex] = typed;
+      else {
+        const existing = tt.routing.rules[editingIndex];
+        if (existing?.ruleTag && !typed.ruleTag) typed.ruleTag = existing.ruleTag;
+        tt.routing.rules[editingIndex] = typed;
+      }
     });
     setRuleModalOpen(false);
   }
@@ -311,6 +316,16 @@ export default function RoutingTab({
                   />
                 )}
               </Space>
+            ),
+          },
+          {
+            key: 'filters',
+            label: catTabLabel(<FilterOutlined />, t('pages.xray.inboundFilters.title'), isMobile),
+            children: (
+              <InboundFilters
+                templateSettings={templateSettings}
+                setTemplateSettings={setTemplateSettings}
+              />
             ),
           },
           {

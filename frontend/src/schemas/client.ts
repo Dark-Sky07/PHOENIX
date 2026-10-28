@@ -111,6 +111,8 @@ export const InboundOptionSchema = z.object({
   protocol: z.string().optional(),
   port: z.number().optional(),
   tlsFlowCapable: z.boolean().optional(),
+  sniffingEnabled: z.boolean().optional(),
+  sniffingDestOverride: z.array(z.string()).optional(),
   ssMethod: z.string().optional(),
   awgServer: AwgServerOptionSchema.nullable().optional(),
   tuicServer: TuicServerOptionSchema.nullable().optional(),
