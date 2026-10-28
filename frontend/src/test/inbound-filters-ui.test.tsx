@@ -36,17 +36,14 @@ describe('inbound filter UI placement and packages', () => {
     expect(screen.getByText('Direct Domains')).toBeTruthy();
   });
 
-  it('shows domain, IP/CIDR and separate YouTube packages inside Inbound Filters', () => {
+  it('explains YouTube ad-filtering limits and does not offer a whole-site YouTube preset', () => {
     renderWithProviders(<InboundFilters templateSettings={null} setTemplateSettings={vi.fn() as SetTemplate} />);
 
-    expect(screen.getByText(/YouTube has a separate domain package/)).toBeTruthy();
+    expect(screen.getByText(/cannot block only YouTube ads/)).toBeTruthy();
+    expect(FILTER_PRESETS.some((preset) => preset.value === 'geosite:youtube')).toBe(false);
     fireEvent.click(screen.getByRole('button', { name: /Add filter policy/ }));
 
     expect(screen.getByText('Domain packages')).toBeTruthy();
     expect(screen.getByText('IP / CIDR packages')).toBeTruthy();
-    expect(screen.getByText(/YouTube has a separate domain package/)).toBeTruthy();
-    expect(FILTER_PRESETS.filter((preset) => preset.key === 'youtube')).toMatchObject([
-      { kind: 'domain', group: 'youtube', value: 'geosite:youtube' },
-    ]);
   });
 });
