@@ -1,7 +1,6 @@
 export type FilterPresetKind = 'domain' | 'ip';
 export type FilterPresetGroup =
   | 'globalDomains'
-  | 'youtube'
   | 'iranDomains'
   | 'russiaDomains'
   | 'privateIPs'
@@ -40,8 +39,6 @@ export const FILTER_PRESETS: FilterPreset[] = [
   { key: 'developerTools', kind: 'domain', group: 'globalDomains', value: 'geosite:category-dev', caution: 'broad' },
   { key: 'entertainment', kind: 'domain', group: 'globalDomains', value: 'geosite:category-entertainment', caution: 'broad' },
   { key: 'bettingRussia', kind: 'domain', group: 'globalDomains', value: 'geosite:category-betting-ru', caution: 'broad' },
-  { key: 'youtube', kind: 'domain', group: 'youtube', value: 'geosite:youtube', caution: 'broad' },
-
   { key: 'iranAds', kind: 'domain', group: 'iranDomains', value: 'ext:geosite_IR.dat:ads' },
   { key: 'iranAdsAll', kind: 'domain', group: 'iranDomains', value: 'ext:geosite_IR.dat:category-ads-all' },
   { key: 'iranMalware', kind: 'domain', group: 'iranDomains', value: 'ext:geosite_IR.dat:malware' },
@@ -82,7 +79,6 @@ export const FILTER_PRESETS: FilterPreset[] = [
 
 export const FILTER_PRESET_GROUPS: FilterPresetGroup[] = [
   'globalDomains',
-  'youtube',
   'iranDomains',
   'russiaDomains',
   'privateIPs',
