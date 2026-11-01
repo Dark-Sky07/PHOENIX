@@ -25,6 +25,8 @@ export class AllSetting {
   resellerNotifTelegramEnable = true;
   remarkModel = '-io';
   datepicker: 'gregorian' | 'jalalian' = 'gregorian';
+  panelAutoRestartEnable = false;
+  panelAutoRestartCron = '0 0 4 * * *';
   tgBotEnable = false;
   tgBotToken = '';
   tgBotProxy = '';

@@ -13,6 +13,7 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/logger"
 	"github.com/Dark-Sky07/phoenix/internal/util/crypto"
 	"github.com/Dark-Sky07/phoenix/internal/web/entity"
+	"github.com/Dark-Sky07/phoenix/internal/web/global"
 	"github.com/Dark-Sky07/phoenix/internal/web/middleware"
 	"github.com/Dark-Sky07/phoenix/internal/web/service"
 	"github.com/Dark-Sky07/phoenix/internal/web/service/panel"
@@ -115,6 +116,23 @@ func preserveBrandSettings(submitted map[string]json.RawMessage, current *entity
 	}
 }
 
+func preservePanelRestartSettings(submitted map[string]json.RawMessage, current *entity.AllSetting) {
+	if submitted == nil || current == nil {
+		return
+	}
+	values := map[string]any{
+		"panelAutoRestartEnable": current.PanelAutoRestartEnable,
+		"panelAutoRestartCron":   current.PanelAutoRestartCron,
+	}
+	for key, value := range values {
+		if _, exists := submitted[key]; exists {
+			continue
+		}
+		encoded, _ := json.Marshal(value)
+		submitted[key] = encoded
+	}
+}
+
 func preserveResellerNotificationSettings(submitted map[string]json.RawMessage, current *entity.AllSetting) {
 	if submitted == nil || current == nil {
 		return
@@ -155,6 +173,7 @@ func (a *SettingController) updateSetting(c *gin.Context) {
 			}
 			preserveResellerNotificationSettings(submitted, current)
 			preserveBrandSettings(submitted, current)
+			preservePanelRestartSettings(submitted, current)
 			body, _ = json.Marshal(submitted)
 		}
 		c.Request.Body = io.NopCloser(bytes.NewReader(body))
@@ -177,6 +196,18 @@ func (a *SettingController) updateSetting(c *gin.Context) {
 		// hot-appliable, so this normally does not restart Xray.
 		if applyErr := a.xrayService.RestartXray(false); applyErr != nil {
 			logger.Warning("apply panel outbound change failed:", applyErr)
+		}
+	}
+	if err == nil {
+		if server := global.GetWebServer(); server != nil {
+			if scheduler, ok := server.(interface {
+				SyncPanelRestartSchedule(bool, string) error
+			}); ok {
+				if syncErr := scheduler.SyncPanelRestartSchedule(allSetting.PanelAutoRestartEnable, allSetting.PanelAutoRestartCron); syncErr != nil {
+					logger.Warning("apply panel restart schedule failed:", syncErr)
+					err = syncErr
+				}
+			}
 		}
 	}
 	jsonMsg(c, I18nWeb(c, "pages.settings.toasts.modifySettings"), err)

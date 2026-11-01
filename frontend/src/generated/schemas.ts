@@ -199,6 +199,14 @@ export const SCHEMAS: Record<string, unknown> = {
         "minimum": 0,
         "type": "integer"
       },
+      "panelAutoRestartCron": {
+        "description": "Cron schedule for automatic panel restart",
+        "type": "string"
+      },
+      "panelAutoRestartEnable": {
+        "description": "Automatically restart the panel web/subscription services",
+        "type": "boolean"
+      },
       "panelOutbound": {
         "description": "Xray outbound tag for the panel's own outbound HTTP (update checks/downloads, Telegram, geo updates, outbound-subscription fetches)",
         "type": "string"
@@ -571,6 +579,8 @@ export const SCHEMAS: Record<string, unknown> = {
       "outboundWatchdogIntervalSec",
       "outboundWatchdogTags",
       "pageSize",
+      "panelAutoRestartCron",
+      "panelAutoRestartEnable",
       "panelOutbound",
       "remarkModel",
       "resellerNotifClientWarningPercent",
@@ -871,6 +881,14 @@ export const SCHEMAS: Record<string, unknown> = {
         "maximum": 1000,
         "minimum": 0,
         "type": "integer"
+      },
+      "panelAutoRestartCron": {
+        "description": "Cron schedule for automatic panel restart",
+        "type": "string"
+      },
+      "panelAutoRestartEnable": {
+        "description": "Automatically restart the panel web/subscription services",
+        "type": "boolean"
       },
       "panelOutbound": {
         "description": "Xray outbound tag for the panel's own outbound HTTP (update checks/downloads, Telegram, geo updates, outbound-subscription fetches)",
@@ -1252,6 +1270,8 @@ export const SCHEMAS: Record<string, unknown> = {
       "outboundWatchdogIntervalSec",
       "outboundWatchdogTags",
       "pageSize",
+      "panelAutoRestartCron",
+      "panelAutoRestartEnable",
       "panelOutbound",
       "remarkModel",
       "resellerNotifClientWarningPercent",

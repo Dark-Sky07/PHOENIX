@@ -108,10 +108,14 @@ const DATEPICKER_LIST: { name: string; value: 'gregorian' | 'jalalian' }[] = [
   { name: 'Jalalian (شمسی)', value: 'jalalian' },
 ];
 
+const PANEL_RESTART_CUSTOM_DEFAULT = '0 0 4 * * *';
+const PANEL_RESTART_PRESETS = ['@every 6h', '@every 12h', PANEL_RESTART_CUSTOM_DEFAULT, '@weekly'];
+
 export default function GeneralTab({ allSetting, updateSetting, defaultSubTab = '1', onlySubTab }: GeneralTabProps) {
   const { t } = useTranslation();
   const { isMobile } = useMediaQuery();
   const [activeSubTab, setActiveSubTab] = useState<string>(onlySubTab || defaultSubTab);
+  const [panelRestartCustomSelected, setPanelRestartCustomSelected] = useState(false);
   useEffect(() => {
     setActiveSubTab(onlySubTab || defaultSubTab);
   }, [onlySubTab, defaultSubTab]);
@@ -414,6 +418,8 @@ export default function GeneralTab({ allSetting, updateSetting, defaultSubTab = 
   );
 
   const activeCloudProvider = (allSetting.cloudBackupProvider || 's3').toLowerCase();
+  const panelRestartSchedule = allSetting.panelAutoRestartCron || PANEL_RESTART_CUSTOM_DEFAULT;
+  const panelRestartIsPreset = PANEL_RESTART_PRESETS.includes(panelRestartSchedule);
 
   const selectedCheckoutCurrency = allSetting.checkoutCurrency?.trim().toUpperCase() || 'USD';
   const checkoutCurrencyOptions = [
@@ -648,6 +654,50 @@ export default function GeneralTab({ allSetting, updateSetting, defaultSubTab = 
                 style={{ width: '100%' }}
                 options={DATEPICKER_LIST.map((d) => ({ value: d.value, label: d.name }))}
               />
+            </SettingListItem>
+            <SettingListItem
+              paddings="small"
+              title={t('pages.settings.panelAutoRestartTitle')}
+              description={t('pages.settings.panelAutoRestartDesc')}
+            >
+              <Switch
+                checked={allSetting.panelAutoRestartEnable}
+                onChange={(v) => updateSetting({ panelAutoRestartEnable: v })}
+              />
+            </SettingListItem>
+            <SettingListItem
+              paddings="small"
+              title={t('pages.settings.panelAutoRestartSchedule')}
+              description={t('pages.settings.panelAutoRestartScheduleDesc')}
+            >
+              <Space direction="vertical" size="small" style={{ width: '100%' }}>
+                <Select
+                  value={panelRestartIsPreset && !panelRestartCustomSelected ? panelRestartSchedule : 'custom'}
+                  style={{ width: '100%' }}
+                  onChange={(value) => {
+                    if (value === 'custom') {
+                      setPanelRestartCustomSelected(true);
+                      return;
+                    }
+                    setPanelRestartCustomSelected(false);
+                    updateSetting({ panelAutoRestartCron: value });
+                  }}
+                  options={[
+                    { value: '@every 6h', label: t('pages.settings.panelRestartEvery6Hours') },
+                    { value: '@every 12h', label: t('pages.settings.panelRestartEvery12Hours') },
+                    { value: PANEL_RESTART_CUSTOM_DEFAULT, label: t('pages.settings.panelRestartDailyAtFour') },
+                    { value: '@weekly', label: t('pages.settings.panelRestartWeekly') },
+                    { value: 'custom', label: t('pages.settings.panelRestartCustom') },
+                  ]}
+                />
+                {(!panelRestartIsPreset || panelRestartCustomSelected) && (
+                  <Input
+                    value={panelRestartSchedule}
+                    placeholder={PANEL_RESTART_CUSTOM_DEFAULT}
+                    onChange={(e) => updateSetting({ panelAutoRestartCron: e.target.value })}
+                  />
+                )}
+              </Space>
             </SettingListItem>
           </>
         ),
