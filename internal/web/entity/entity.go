@@ -39,13 +39,13 @@ type AllSetting struct {
 	BrandTheme string `json:"brandTheme" form:"brandTheme"`
 
 	// UI settings
-	PageSize    int    `json:"pageSize" form:"pageSize" validate:"gte=0,lte=1000"`      // Number of items per page in lists (0 disables pagination)
-	ExpireDiff  int    `json:"expireDiff" form:"expireDiff" validate:"gte=0"`           // Expiration warning threshold in days
-	TrafficDiff int    `json:"trafficDiff" form:"trafficDiff" validate:"gte=0,lte=100"` // Traffic warning threshold percentage
-	RemarkModel              string `json:"remarkModel" form:"remarkModel"`                          // Remark model pattern for inbounds
-	Datepicker               string `json:"datepicker" form:"datepicker"`                            // Date picker format
-	PanelAutoRestartEnable   bool   `json:"panelAutoRestartEnable" form:"panelAutoRestartEnable"`    // Automatically restart the panel web/subscription services
-	PanelAutoRestartCron     string `json:"panelAutoRestartCron" form:"panelAutoRestartCron"`        // Cron schedule for automatic panel restart
+	PageSize               int    `json:"pageSize" form:"pageSize" validate:"gte=0,lte=1000"`      // Number of items per page in lists (0 disables pagination)
+	ExpireDiff             int    `json:"expireDiff" form:"expireDiff" validate:"gte=0"`           // Expiration warning threshold in days
+	TrafficDiff            int    `json:"trafficDiff" form:"trafficDiff" validate:"gte=0,lte=100"` // Traffic warning threshold percentage
+	RemarkModel            string `json:"remarkModel" form:"remarkModel"`                          // Remark model pattern for inbounds
+	Datepicker             string `json:"datepicker" form:"datepicker"`                            // Date picker format
+	PanelAutoRestartEnable bool   `json:"panelAutoRestartEnable" form:"panelAutoRestartEnable"`    // Automatically restart the panel web/subscription services
+	PanelAutoRestartCron   string `json:"panelAutoRestartCron" form:"panelAutoRestartCron"`        // Cron schedule for automatic panel restart
 
 	ResellerNotifTrafficWarningPercent  int  `json:"resellerNotifTrafficWarningPercent" form:"resellerNotifTrafficWarningPercent" validate:"gte=1,lte=98"`   // Traffic usage percentage that triggers the reseller warning.
 	ResellerNotifTrafficCriticalPercent int  `json:"resellerNotifTrafficCriticalPercent" form:"resellerNotifTrafficCriticalPercent" validate:"gte=2,lte=99"` // Traffic usage percentage that triggers the critical reseller warning.
