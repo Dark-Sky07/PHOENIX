@@ -26,6 +26,8 @@ export const AllSettingSchema = z.object({
   resellerNotifTelegramEnable: z.boolean().optional(),
   remarkModel: z.string().optional(),
   datepicker: z.enum(['gregorian', 'jalalian']).optional(),
+  panelAutoRestartEnable: z.boolean().optional(),
+  panelAutoRestartCron: z.string().optional(),
   tgBotEnable: z.boolean().optional(),
   tgBotToken: z.string().optional(),
   tgBotProxy: z.string().optional(),

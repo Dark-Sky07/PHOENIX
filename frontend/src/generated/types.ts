@@ -63,6 +63,8 @@ export interface AllSetting {
   outboundWatchdogIntervalSec: number;
   outboundWatchdogTags: string;
   pageSize: number;
+  panelAutoRestartCron: string;
+  panelAutoRestartEnable: boolean;
   panelOutbound: string;
   remarkModel: string;
   resellerNotifClientWarningPercent: number;
@@ -203,6 +205,8 @@ export interface AllSettingView {
   outboundWatchdogIntervalSec: number;
   outboundWatchdogTags: string;
   pageSize: number;
+  panelAutoRestartCron: string;
+  panelAutoRestartEnable: boolean;
   panelOutbound: string;
   remarkModel: string;
   resellerNotifClientWarningPercent: number;

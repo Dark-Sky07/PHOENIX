@@ -118,6 +118,8 @@ var defaultValueMap = map[string]string{
 	"subJsonFinalMask":                    "",
 	"subThemeDir":                         "",
 	"datepicker":                          "gregorian",
+	"panelAutoRestartEnable":              "false",
+	"panelAutoRestartCron":                "0 0 4 * * *",
 	"warp":                                "",
 	"warpUpdateInterval":                  "0",
 	"nord":                                "",

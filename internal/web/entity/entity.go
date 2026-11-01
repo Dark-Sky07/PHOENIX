@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Dark-Sky07/phoenix/internal/util/common"
+	"github.com/robfig/cron/v3"
 )
 
 // Msg represents a standard API response message with success status, message text, and optional data object.
@@ -41,8 +42,10 @@ type AllSetting struct {
 	PageSize    int    `json:"pageSize" form:"pageSize" validate:"gte=0,lte=1000"`      // Number of items per page in lists (0 disables pagination)
 	ExpireDiff  int    `json:"expireDiff" form:"expireDiff" validate:"gte=0"`           // Expiration warning threshold in days
 	TrafficDiff int    `json:"trafficDiff" form:"trafficDiff" validate:"gte=0,lte=100"` // Traffic warning threshold percentage
-	RemarkModel string `json:"remarkModel" form:"remarkModel"`                          // Remark model pattern for inbounds
-	Datepicker  string `json:"datepicker" form:"datepicker"`                            // Date picker format
+	RemarkModel              string `json:"remarkModel" form:"remarkModel"`                          // Remark model pattern for inbounds
+	Datepicker               string `json:"datepicker" form:"datepicker"`                            // Date picker format
+	PanelAutoRestartEnable   bool   `json:"panelAutoRestartEnable" form:"panelAutoRestartEnable"`    // Automatically restart the panel web/subscription services
+	PanelAutoRestartCron     string `json:"panelAutoRestartCron" form:"panelAutoRestartCron"`        // Cron schedule for automatic panel restart
 
 	ResellerNotifTrafficWarningPercent  int  `json:"resellerNotifTrafficWarningPercent" form:"resellerNotifTrafficWarningPercent" validate:"gte=1,lte=98"`   // Traffic usage percentage that triggers the reseller warning.
 	ResellerNotifTrafficCriticalPercent int  `json:"resellerNotifTrafficCriticalPercent" form:"resellerNotifTrafficCriticalPercent" validate:"gte=2,lte=99"` // Traffic usage percentage that triggers the critical reseller warning.
@@ -203,6 +206,29 @@ func pathHasForbiddenChar(s string) bool {
 	return false
 }
 
+// ValidatePanelAutoRestartCron validates the panel restart schedule and limits
+// it to at most one restart per hour to avoid accidental restart loops.
+func ValidatePanelAutoRestartCron(expression string) error {
+	expression = strings.TrimSpace(expression)
+	if expression == "" {
+		return common.NewError("panel restart schedule is required when automatic restart is enabled")
+	}
+	parser := cron.NewParser(cron.Second | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
+	schedule, err := parser.Parse(expression)
+	if err != nil {
+		return common.NewError("panel restart schedule is invalid:", err)
+	}
+	first := schedule.Next(time.Now())
+	if first.IsZero() {
+		return common.NewError("panel restart schedule has no upcoming run")
+	}
+	second := schedule.Next(first)
+	if second.IsZero() || second.Sub(first) < time.Hour {
+		return common.NewError("panel restart schedule must run no more than once per hour")
+	}
+	return nil
+}
+
 func (s *AllSetting) CheckValid() error {
 	if s.ResellerNotifTrafficWarningPercent < 1 || s.ResellerNotifTrafficWarningPercent > 98 {
 		return common.NewError("reseller traffic warning threshold must be between 1 and 98 percent")
@@ -329,6 +355,11 @@ func (s *AllSetting) CheckValid() error {
 	_, err := time.LoadLocation(s.TimeLocation)
 	if err != nil {
 		return common.NewError("time location not exist:", s.TimeLocation)
+	}
+	if s.PanelAutoRestartEnable {
+		if err := ValidatePanelAutoRestartCron(s.PanelAutoRestartCron); err != nil {
+			return err
+		}
 	}
 
 	return nil

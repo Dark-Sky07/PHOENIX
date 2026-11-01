@@ -42,6 +42,29 @@ func TestPreserveResellerNotificationSettingsForOlderClients(t *testing.T) {
 	}
 }
 
+func TestPreservePanelRestartSettingsForOlderClients(t *testing.T) {
+	current := &entity.AllSetting{PanelAutoRestartEnable: true, PanelAutoRestartCron: "@every 12h"}
+	encoded, err := json.Marshal(current.PanelAutoRestartEnable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	submitted := map[string]json.RawMessage{"panelAutoRestartEnable": encoded}
+
+	preservePanelRestartSettings(submitted, current)
+
+	var got entity.AllSetting
+	body, err := json.Marshal(submitted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.PanelAutoRestartEnable || got.PanelAutoRestartCron != "@every 12h" {
+		t.Fatalf("preserved panel restart settings = %+v, want enabled schedule retained", got)
+	}
+}
+
 func TestPreserveBrandSettingsForOlderClients(t *testing.T) {
 	current := &entity.AllSetting{
 		BrandName: "Main", BrandLogo: "/main.svg", BrandColor: "#123456", BrandTheme: "ocean",

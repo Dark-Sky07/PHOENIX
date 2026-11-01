@@ -129,7 +129,8 @@ type Server struct {
 
 	wsHub *websocket.Hub
 
-	cron *cron.Cron
+	cron                  *cron.Cron
+	panelRestartScheduler job.PanelRestartScheduler
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -287,6 +288,11 @@ func (s *Server) initRouter() (*gin.Engine, error) {
 // startTask schedules background jobs (Xray checks, traffic jobs, cron
 // jobs) which the panel relies on for periodic maintenance and monitoring.
 func (s *Server) startTask(restartXray bool) {
+	if settings, err := s.settingService.GetAllSetting(); err != nil {
+		logger.Warning("load panel restart schedule failed:", err)
+	} else if err := s.SyncPanelRestartSchedule(settings.PanelAutoRestartEnable, settings.PanelAutoRestartCron); err != nil {
+		logger.Warning("configure panel restart schedule failed:", err)
+	}
 	if restartXray {
 		err := s.xrayService.RestartXray(true)
 		if err != nil {
@@ -584,6 +590,12 @@ func (s *Server) GetCtx() context.Context {
 // GetCron returns the server's cron scheduler instance.
 func (s *Server) GetCron() *cron.Cron {
 	return s.cron
+}
+
+// SyncPanelRestartSchedule applies the saved panel auto-restart configuration
+// to the running scheduler without requiring a separate panel restart.
+func (s *Server) SyncPanelRestartSchedule(enabled bool, expression string) error {
+	return s.panelRestartScheduler.Configure(s.cron, enabled, expression)
 }
 
 // GetWSHub returns the WebSocket hub instance.
