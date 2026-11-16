@@ -29,8 +29,18 @@ jobs:
         uses: docker/setup-buildx-action@v4
 
       - name: Build supported Docker platforms without publishing
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64/v8,linux/arm/v7,linux/arm/v6,linux/386
-          push: false
+        shell: bash
+        run: |
+          set -o pipefail
+          if docker buildx build --progress=plain \
+            --platform linux/amd64,linux/arm64/v8,linux/arm/v7,linux/arm/v6,linux/386 \
+            . 2>&1 | tee /tmp/docker-build.log; then
+            exit 0
+          fi
+          python3 - <<'PYLOG'
+          from pathlib import Path
+          output = Path('/tmp/docker-build.log').read_text(errors='replace')[-6000:]
+          output = output.replace('%', '%25').replace(chr(13), '%0D').replace(chr(10), '%0A')
+          print(f'::error title=docker-build-output::{output}')
+          PYLOG
+          exit 1
