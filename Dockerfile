@@ -47,6 +47,7 @@ WORKDIR /app
 
 # Alpine no longer publishes pptpd for current releases; build the pinned upstream source below.
 # Omit upstream's optional logwtmp plugin because it requires libc interfaces unavailable on musl.
+# Patch two stale Linux API uses: old getopt declarations and MSG_TRYHARD's MSG_CONFIRM alias.
 RUN apk add --no-cache --update \
   ca-certificates \
   tzdata \
@@ -71,6 +72,7 @@ RUN apk add --no-cache --update \
   && sed -i 's/^subdirs = plugins$/subdirs =/' "$PPTPD_SRC/Makefile.am" \
   && sed -i 's/inststr.c getopt.c getopt1.c/inststr.c/' "$PPTPD_SRC/Makefile.am" \
   && sed -i 's|#include "our_getopt.h"|#include <getopt.h>|' "$PPTPD_SRC/pptpd.c" "$PPTPD_SRC/bcrelay.c" \
+  && sed -i 's/MSG_DONTWAIT|MSG_TRYHARD/MSG_DONTWAIT|MSG_CONFIRM/' "$PPTPD_SRC/bcrelay.c" \
   && cd "$PPTPD_SRC" \
   && autoreconf -fi \
   && ./configure --prefix=/usr --sbindir=/usr/sbin --sysconfdir=/etc \
