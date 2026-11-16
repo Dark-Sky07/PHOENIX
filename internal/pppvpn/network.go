@@ -102,7 +102,7 @@ func (m *firewall) apply(i Instance) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err = m.run("sysctl", "-w", "net.ipv4.ip_forward=1"); err != nil {
+	if _, err = m.run("sysctl", "-w", "net.ipv4.ip_forward=1"); err != nil {
 		if _, fallbackErr := m.run("sh", "-c", "echo 1 > /proc/sys/net/ipv4/ip_forward"); fallbackErr != nil {
 			return fmt.Errorf("enable IPv4 forwarding: %w", err)
 		}
