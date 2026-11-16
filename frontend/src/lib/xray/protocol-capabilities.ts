@@ -67,14 +67,16 @@ export function canEnableStream(values: { protocol: string }): boolean {
   return STREAM_PROTOCOLS.includes(values.protocol);
 }
 
-// mtproto, openvpn, and l2tp are served by host daemons rather than Xray,
-// so the Xray sniffing block does not apply to them. Every other inbound
+// mtproto, openvpn, l2tp, sstp, and pptp are served by host daemons rather than
+// Xray, so the Xray sniffing block does not apply to them. Every other inbound
 // supports sniffing.
 export function canEnableSniffing(values: { protocol: string }): boolean {
   return (
     values.protocol !== 'mtproto' &&
     values.protocol !== 'openvpn' &&
     values.protocol !== 'l2tp' &&
+    values.protocol !== 'sstp' &&
+    values.protocol !== 'pptp' &&
     values.protocol !== 'amneziawg' &&
     values.protocol !== 'tuic'
   );

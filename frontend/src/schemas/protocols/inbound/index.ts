@@ -8,6 +8,8 @@ import { MixedInboundSettingsSchema } from './mixed';
 import { MtprotoInboundSettingsSchema } from './mtproto';
 import { OpenvpnInboundSettingsSchema } from './openvpn';
 import { L2tpInboundSettingsSchema } from './l2tp';
+import { SstpInboundSettingsSchema } from './sstp';
+import { PptpInboundSettingsSchema } from './pptp';
 import { ShadowsocksInboundSettingsSchema } from './shadowsocks';
 import { TrojanInboundSettingsSchema } from './trojan';
 import { TuicInboundSettingsSchema } from './tuic';
@@ -25,6 +27,8 @@ export * from './mixed';
 export * from './mtproto';
 export * from './openvpn';
 export * from './l2tp';
+export * from './sstp';
+export * from './pptp';
 export * from './shadowsocks';
 export * from './trojan';
 export * from './tuic';
@@ -54,6 +58,8 @@ export const InboundSettingsSchema = z.discriminatedUnion('protocol', [
   z.object({ protocol: z.literal('mtproto'),     settings: MtprotoInboundSettingsSchema }),
   z.object({ protocol: z.literal('openvpn'),     settings: OpenvpnInboundSettingsSchema }),
   z.object({ protocol: z.literal('l2tp'),        settings: L2tpInboundSettingsSchema }),
+  z.object({ protocol: z.literal('sstp'),        settings: SstpInboundSettingsSchema }),
+  z.object({ protocol: z.literal('pptp'),        settings: PptpInboundSettingsSchema }),
   z.object({ protocol: z.literal('masque'),      settings: MasqueInboundSettingsSchema }),
   z.object({ protocol: z.literal('tuic'),        settings: TuicInboundSettingsSchema }),
 ]);

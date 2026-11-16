@@ -215,7 +215,7 @@ func (a *InboundController) addInbound(c *gin.Context) {
 	if needRestart {
 		a.xrayService.SetToNeedRestart()
 	}
-	if inbound != nil && (inbound.Protocol == model.OpenVPN || inbound.Protocol == model.L2TP) {
+	if inbound != nil && (inbound.Protocol == model.OpenVPN || inbound.Protocol == model.L2TP || inbound.Protocol == model.SSTP || inbound.Protocol == model.PPTP) {
 		if needRestart && a.xrayService.IsXrayRunning() {
 			_ = a.xrayService.RestartXray(false)
 		} else {
@@ -306,7 +306,7 @@ func (a *InboundController) updateInbound(c *gin.Context) {
 	if needRestart {
 		a.xrayService.SetToNeedRestart()
 	}
-	if inbound != nil && (inbound.Protocol == model.OpenVPN || inbound.Protocol == model.L2TP) {
+	if inbound != nil && (inbound.Protocol == model.OpenVPN || inbound.Protocol == model.L2TP || inbound.Protocol == model.SSTP || inbound.Protocol == model.PPTP) {
 		if needRestart && a.xrayService.IsXrayRunning() {
 			_ = a.xrayService.RestartXray(false)
 		} else {

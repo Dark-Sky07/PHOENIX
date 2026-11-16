@@ -52,12 +52,20 @@ RUN apk add --no-cache --update \
   openvpn \
   strongswan \
   xl2tpd \
+  pptpd \
   ppp \
   iptables \
   iproute2 \
+  python3 \
   bash \
   curl \
-  openssl
+  openssl \
+  && apk add --no-cache --virtual .pppvpn-build-deps py3-pip python3-dev musl-dev gcc \
+  && python3 -m venv /opt/phoenix/pppvpn-sstp \
+  && /opt/phoenix/pppvpn-sstp/bin/python -m pip install --no-cache-dir --upgrade pip setuptools wheel \
+  && /opt/phoenix/pppvpn-sstp/bin/python -m pip install --no-cache-dir 'sstp-server==0.7.2' \
+  && ln -sf /opt/phoenix/pppvpn-sstp/bin/sstpd /usr/local/bin/sstpd \
+  && apk del .pppvpn-build-deps
 
 COPY --from=builder /app/build/ /app/
 COPY --from=builder /app/DockerEntrypoint.sh /app/

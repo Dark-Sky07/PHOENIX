@@ -940,8 +940,8 @@ func (s *InboundService) DelDepletedClients(id int) (err error) {
 		if change.old.Protocol == model.OpenVPN && change.old.NodeID == nil {
 			continue
 		}
-		if change.old.Protocol == model.L2TP && change.old.NodeID == nil {
-			if reconcileErr := reconcileL2TPRuntime(&change.new); reconcileErr != nil && runtimeErr == nil {
+		if (change.old.Protocol == model.L2TP || change.old.Protocol == model.SSTP || change.old.Protocol == model.PPTP) && change.old.NodeID == nil {
+			if reconcileErr := reconcilePPPVPNRuntime(&change.new); reconcileErr != nil && runtimeErr == nil {
 				runtimeErr = reconcileErr
 			}
 			continue

@@ -139,11 +139,10 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 		if inbound.Protocol == model.MTProto || inbound.Protocol == model.AmneziaWG || inbound.Protocol == model.TUIC {
 			continue
 		}
-		// OpenVPN and L2TP/IPsec inbounds are served by host daemons that bind
-		// their own sockets; they must never appear in the Xray config.
-		if inbound.Protocol == model.OpenVPN || inbound.Protocol == model.L2TP {
-			// These are host daemons, not Xray protocols. Their listeners and
-			// credentials are reconciled by their respective jobs.
+		// OpenVPN, L2TP/IPsec, SSTP, and PPTP use host daemons that own
+		// their sockets; these protocols must never appear in Xray config.
+		if inbound.Protocol == model.OpenVPN || inbound.Protocol == model.L2TP || inbound.Protocol == model.SSTP || inbound.Protocol == model.PPTP {
+			// Host-daemon listeners and credentials are reconciled separately.
 			continue
 		}
 		settings := map[string]any{}

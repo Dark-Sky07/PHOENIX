@@ -71,6 +71,8 @@ import {
   MtprotoFields,
   OpenvpnFields,
   L2tpFields,
+  SstpFields,
+  PptpFields,
   ShadowsocksFields,
   TuicFields,
   TunFields,
@@ -483,7 +485,7 @@ export default function InboundFormModal({
           masqueSettings: { path: MASQUE_DEFAULT_PATH },
           tlsSettings: createMasqueTlsSettingsWithDefaultCert(),
         });
-      } else if (next === Protocols.WIREGUARD || next === Protocols.TUNNEL || next === Protocols.OPENVPN || next === Protocols.L2TP) {
+      } else if (next === Protocols.WIREGUARD || next === Protocols.TUNNEL || next === Protocols.OPENVPN || next === Protocols.L2TP || next === Protocols.SSTP || next === Protocols.PPTP) {
         // Wireguard and Tunnel (dokodemo-door) have no user-selectable
         // transport: wireguard is always a UDP listener, and tunnel only needs
         // `sockopt.tproxy` for its TProxy/redirect mode. OpenVPN is the same
@@ -499,6 +501,10 @@ export default function InboundFormModal({
         } else if (next === Protocols.L2TP) {
           // L2TP/IPsec uses fixed UDP listeners: 500, 4500 and 1701.
           form.setFieldValue('port', 1701);
+        } else if (next === Protocols.SSTP) {
+          form.setFieldValue('port', 443);
+        } else if (next === Protocols.PPTP) {
+          form.setFieldValue('port', 1723);
         }
       } else {
         const current = form.getFieldValue('streamSettings') as { network?: string } | undefined;
@@ -763,6 +769,10 @@ export default function InboundFormModal({
 
       {protocol === Protocols.L2TP && <L2tpFields />}
 
+      {protocol === Protocols.SSTP && <SstpFields />}
+
+      {protocol === Protocols.PPTP && <PptpFields />}
+
       {protocol === Protocols.MASQUE && <MasqueSettingsFields />}
 
       {protocol === Protocols.TUIC && <TuicFields />}
@@ -904,7 +914,7 @@ export default function InboundFormModal({
           .conf fanout resolves its host elsewhere, openvpn embeds the host
           in its .ovpn profile, and tunnel (dokodemo-door) has no clients at
           all — the section is dead weight on all three. */}
-      {protocol !== Protocols.WIREGUARD && protocol !== Protocols.AMNEZIAWG && protocol !== Protocols.TUNNEL && protocol !== Protocols.OPENVPN && (
+      {protocol !== Protocols.WIREGUARD && protocol !== Protocols.AMNEZIAWG && protocol !== Protocols.TUNNEL && protocol !== Protocols.OPENVPN && protocol !== Protocols.L2TP && protocol !== Protocols.SSTP && protocol !== Protocols.PPTP && (
         <ExternalProxyForm toggleExternalProxy={toggleExternalProxy} />
       )}
 
@@ -1121,6 +1131,8 @@ export default function InboundFormModal({
               Protocols.MTPROTO,
               Protocols.OPENVPN,
               Protocols.L2TP,
+              Protocols.SSTP,
+              Protocols.PPTP,
               Protocols.MASQUE,
               Protocols.TUIC,
             ] as string[]).includes(protocol) || isFallbackHost

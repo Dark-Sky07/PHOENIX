@@ -21,6 +21,7 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/logger"
 	"github.com/Dark-Sky07/phoenix/internal/mtproto"
 	"github.com/Dark-Sky07/phoenix/internal/openvpn"
+	"github.com/Dark-Sky07/phoenix/internal/pppvpn"
 	"github.com/Dark-Sky07/phoenix/internal/tuic"
 	"github.com/Dark-Sky07/phoenix/internal/util/common"
 	"github.com/Dark-Sky07/phoenix/internal/web/controller"
@@ -343,6 +344,11 @@ func (s *Server) startTask(restartXray bool) {
 	s.cron.AddJob("@every 10s", l2tpJob)
 	go l2tpJob.Run()
 
+	// Reconcile the local SSTP and legacy PPTP PPP daemons.
+	pppVPNJob := job.NewPPPVPNJob()
+	s.cron.AddJob("@every 10s", pppVPNJob)
+	go pppVPNJob.Run()
+
 	// check client ips from log file every 10 sec
 	s.cron.AddJob("@every 10s", job.NewCheckClientIpJob())
 
@@ -557,6 +563,7 @@ func (s *Server) stop(stopXray bool, stopTgBot bool) error {
 		amneziawgnet.GetManager().StopAll()
 		openvpn.GetManager().StopAll()
 		l2tp.GetManager().StopAll()
+		pppvpn.GetManager().StopAll()
 	}
 	if err := service.PersistSystemMetrics(); err != nil {
 		logger.Warning("persist system metrics on shutdown failed:", err)

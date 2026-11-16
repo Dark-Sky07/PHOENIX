@@ -11,6 +11,8 @@ import type { MixedInboundSettings } from '@/schemas/protocols/inbound/mixed';
 import type { MtprotoInboundSettings } from '@/schemas/protocols/inbound/mtproto';
 import type { OpenvpnInboundSettings } from '@/schemas/protocols/inbound/openvpn';
 import type { L2tpInboundSettings } from '@/schemas/protocols/inbound/l2tp';
+import type { SstpInboundSettings } from '@/schemas/protocols/inbound/sstp';
+import type { PptpInboundSettings } from '@/schemas/protocols/inbound/pptp';
 import type { ShadowsocksClient, ShadowsocksInboundSettings } from '@/schemas/protocols/inbound/shadowsocks';
 import type { TrojanClient, TrojanInboundSettings } from '@/schemas/protocols/inbound/trojan';
 import type { TuicClient, TuicInboundSettings } from '@/schemas/protocols/inbound/tuic';
@@ -278,6 +280,14 @@ export function createDefaultL2tpInboundSettings(): L2tpInboundSettings {
   };
 }
 
+export function createDefaultSstpInboundSettings(): SstpInboundSettings {
+  return { localIP: '10.254.0.1', poolCIDR: '10.254.0.0/24', dns1: '1.1.1.1', dns2: '8.8.8.8', certificatePEM: '', privateKeyPEM: '', routeThroughXray: false, clients: [] };
+}
+
+export function createDefaultPptpInboundSettings(): PptpInboundSettings {
+  return { localIP: '10.253.0.1', poolCIDR: '10.253.0.0/24', dns1: '1.1.1.1', dns2: '8.8.8.8', routeThroughXray: false, clients: [] };
+}
+
 export function createDefaultTunnelInboundSettings(): TunnelInboundSettings {
   return {
     portMap: {},
@@ -428,6 +438,8 @@ export type AnyInboundSettings =
   | MtprotoInboundSettings
   | OpenvpnInboundSettings
   | L2tpInboundSettings
+  | SstpInboundSettings
+  | PptpInboundSettings
   | MasqueInboundSettings
   | TuicInboundSettings;
 
@@ -451,6 +463,8 @@ export function createDefaultInboundSettings(protocol: string): AnyInboundSettin
     case 'mtproto':     return createDefaultMtprotoInboundSettings();
     case 'openvpn':     return createDefaultOpenvpnInboundSettings();
     case 'l2tp':        return createDefaultL2tpInboundSettings();
+    case 'sstp':        return createDefaultSstpInboundSettings();
+    case 'pptp':        return createDefaultPptpInboundSettings();
     case 'masque':      return createDefaultMasqueInboundSettings();
     case 'tuic':        return createDefaultTuicInboundSettings();
     default:            return null;

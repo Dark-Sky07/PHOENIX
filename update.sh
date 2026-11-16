@@ -264,6 +264,122 @@ install_base() {
     esac
 }
 
+install_pppvpn() {
+    # SSTP/PPTP are served by foreground daemons managed by PHOENIX. Install
+    # their PPP/kernel/firewall prerequisites here rather than relying on
+    # distro services that can pre-bind the daemon ports.
+    local packages python_bin python_version sstp_version runtime_dir
+    echo -e "${green}Installing SSTP/PPTP and PPP prerequisites...${plain}"
+    case "${release}" in
+        ubuntu | debian | armbian | linuxmint)
+            packages="pptpd ppp iptables iproute2 python3 python3-venv python3-dev build-essential"
+            apt-get update && apt-get install -y -q $packages || return 1
+            ;;
+        fedora | amzn | virtuozzo | rhel | almalinux | rocky | ol)
+            packages="pptpd ppp iptables iproute python3 python3-pip python3-devel gcc"
+            dnf install -y -q $packages || return 1
+            ;;
+        centos)
+            packages="pptpd ppp iptables iproute python3 python3-pip python3-devel gcc"
+            if [[ "${VERSION_ID}" =~ ^7 ]]; then
+                yum install -y $packages || return 1
+            else
+                dnf install -y -q $packages || return 1
+            fi
+            ;;
+        arch | manjaro | parch)
+            packages="pptpd ppp iptables iproute2 python python-pip base-devel"
+            pacman -S --noconfirm $packages || return 1
+            ;;
+        opensuse-tumbleweed | opensuse-leap)
+            packages="pptpd ppp iptables iproute2 python3 python3-pip python3-devel gcc"
+            zypper --non-interactive install $packages || return 1
+            ;;
+        alpine)
+            packages="pptpd ppp iptables iproute2 python3 py3-pip python3-dev musl-dev gcc"
+            apk add --no-cache $packages || return 1
+            ;;
+        *)
+            echo -e "${red}Unsupported package manager for SSTP/PPTP. Install pptpd, pppd, iptables, iproute2, Python 3, Python headers, and a C compiler manually.${plain}"
+            return 1
+            ;;
+    esac
+
+    python_bin="$(command -v python3 2>/dev/null)"
+    if [[ -z "$python_bin" ]]; then
+        echo -e "${red}SSTP requires Python 3; python3 was not installed.${plain}"
+        return 1
+    fi
+    python_version="$($python_bin -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)" || return 1
+    if "$python_bin" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)' >/dev/null 2>&1; then
+        sstp_version="0.7.2"
+    else
+        # Upstream 0.7.x now requires Python 3.12. Keep older supported
+        # distributions installable with the last release that supports their
+        # system Python; newer systems always get the maintained 0.7.2 line.
+        sstp_version="0.6.0"
+        echo -e "${yellow}Python ${python_version} detected; using sstp-server ${sstp_version} (0.7.2 requires Python 3.12+).${plain}"
+    fi
+
+    runtime_dir="/opt/phoenix/pppvpn-sstp"
+    mkdir -p "$(dirname "$runtime_dir")" || return 1
+    if [[ -x "${runtime_dir}/bin/python" ]]; then
+        local existing_python
+        existing_python="$("${runtime_dir}/bin/python" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)" || existing_python=""
+        if [[ "$existing_python" != "$python_version" ]]; then
+            rm -rf "$runtime_dir" || return 1
+        fi
+    fi
+    if [[ ! -x "${runtime_dir}/bin/python" ]]; then
+        "$python_bin" -m venv "$runtime_dir" || {
+            echo -e "${red}Could not create the isolated SSTP Python environment.${plain}"
+            return 1
+        }
+    fi
+    "${runtime_dir}/bin/python" -m pip install --disable-pip-version-check --upgrade pip setuptools wheel || return 1
+    "${runtime_dir}/bin/python" -m pip install --disable-pip-version-check --no-cache-dir "sstp-server==${sstp_version}" || {
+        echo -e "${red}Failed to install sstp-server ${sstp_version}.${plain}"
+        return 1
+    }
+    ln -sf "${runtime_dir}/bin/sstpd" /usr/local/bin/sstpd || return 1
+
+    for command_name in pptpd pppd iptables ip sysctl sstpd; do
+        if ! command -v "$command_name" >/dev/null 2>&1; then
+            echo -e "${red}SSTP/PPTP prerequisite is missing: $command_name${plain}"
+            return 1
+        fi
+    done
+    if ! sstpd --help >/dev/null 2>&1; then
+        echo -e "${red}The installed sstpd executable failed its startup check.${plain}"
+        return 1
+    fi
+
+    # PHOENIX owns these instances; stop package-managed services so they do
+    # not occupy TCP/1723 or race with the per-inbound foreground process.
+    if command -v systemctl >/dev/null 2>&1; then
+        for service_name in pptpd sstpd; do
+            systemctl disable --now "$service_name" >/dev/null 2>&1 || true
+        done
+    fi
+    if command -v rc-service >/dev/null 2>&1; then
+        rc-service pptpd stop >/dev/null 2>&1 || true
+        rc-update del pptpd default >/dev/null 2>&1 || true
+    fi
+
+    if [[ ! -c /dev/ppp ]]; then
+        if command -v modprobe >/dev/null 2>&1; then
+            modprobe ppp_generic >/dev/null 2>&1 || true
+        fi
+        mkdir -p /dev
+        mknod /dev/ppp c 108 0 >/dev/null 2>&1 || true
+    fi
+    if [[ ! -c /dev/ppp ]]; then
+        echo -e "${red}SSTP/PPTP needs /dev/ppp. Load ppp_generic or expose /dev/ppp (and NET_ADMIN in Docker).${plain}"
+        return 1
+    fi
+    echo -e "${green}SSTP/PPTP prerequisites are ready (sstp-server ${sstp_version}; pptpd: $(command -v pptpd)).${plain}"
+}
+
 install_acme() {
     echo -e "${green}Installing acme.sh for SSL certificate management...${plain}"
     cd ~ || return 1
@@ -1442,4 +1558,7 @@ update_x-ui() {
 
 echo -e "${green}Running...${plain}"
 install_base
+if ! install_pppvpn; then
+    _fail "ERROR: SSTP/PPTP dependency setup failed. Fix the prerequisite above and rerun the update."
+fi
 update_x-ui $1

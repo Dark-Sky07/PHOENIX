@@ -13,6 +13,7 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/l2tp"
 	"github.com/Dark-Sky07/phoenix/internal/mtproto"
 	"github.com/Dark-Sky07/phoenix/internal/openvpn"
+	"github.com/Dark-Sky07/phoenix/internal/pppvpn"
 	"github.com/Dark-Sky07/phoenix/internal/tuic"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
 )
@@ -99,11 +100,19 @@ func (l *Local) AddInbound(_ context.Context, ib *model.Inbound) error {
 			return errors.New("invalid l2tp inbound settings")
 		}
 		if l.deps.DaemonRelayPort != nil {
-			// Keep the divert rules the reconcile job installed instead of
-			// flapping them to the direct path until its next round.
 			inst.XrayRelayPort = l.deps.DaemonRelayPort(ib.Tag)
 		}
 		return l2tp.GetManager().Ensure(inst)
+	}
+	if ib.Protocol == model.SSTP || ib.Protocol == model.PPTP {
+		inst, ok := pppvpn.InstanceFromInbound(ib, nil)
+		if !ok {
+			return errors.New("invalid SSTP/PPTP inbound settings")
+		}
+		if l.deps.DaemonRelayPort != nil {
+			inst.XrayRelayPort = l.deps.DaemonRelayPort(ib.Tag)
+		}
+		return pppvpn.GetManager().Ensure(inst)
 	}
 	if ib.Protocol == model.TUIC {
 		inst, ok := tuic.InstanceFromInbound(ib)
@@ -143,6 +152,10 @@ func (l *Local) DelInbound(_ context.Context, ib *model.Inbound) error {
 	}
 	if ib.Protocol == model.L2TP {
 		l2tp.GetManager().Remove(ib.Id)
+		return nil
+	}
+	if ib.Protocol == model.SSTP || ib.Protocol == model.PPTP {
+		pppvpn.GetManager().Remove(ib.Id)
 		return nil
 	}
 	if ib.Protocol == model.TUIC {
@@ -262,7 +275,7 @@ func (l *Local) updateAmneziaWGInbound(ctx context.Context, oldIb, newIb *model.
 }
 
 func (l *Local) AddUser(_ context.Context, ib *model.Inbound, userMap map[string]any) error {
-	if ib.Protocol == model.OpenVPN || ib.Protocol == model.MTProto || ib.Protocol == model.AmneziaWG || ib.Protocol == model.L2TP || ib.Protocol == model.TUIC {
+	if ib.Protocol == model.OpenVPN || ib.Protocol == model.MTProto || ib.Protocol == model.AmneziaWG || ib.Protocol == model.L2TP || ib.Protocol == model.SSTP || ib.Protocol == model.PPTP || ib.Protocol == model.TUIC {
 		return nil
 	}
 	return l.withAPI(func(api *xray.XrayAPI) error {
@@ -271,7 +284,7 @@ func (l *Local) AddUser(_ context.Context, ib *model.Inbound, userMap map[string
 }
 
 func (l *Local) RemoveUser(_ context.Context, ib *model.Inbound, email string) error {
-	if ib.Protocol == model.OpenVPN || ib.Protocol == model.MTProto || ib.Protocol == model.AmneziaWG || ib.Protocol == model.L2TP || ib.Protocol == model.TUIC {
+	if ib.Protocol == model.OpenVPN || ib.Protocol == model.MTProto || ib.Protocol == model.AmneziaWG || ib.Protocol == model.L2TP || ib.Protocol == model.SSTP || ib.Protocol == model.PPTP || ib.Protocol == model.TUIC {
 		return nil
 	}
 	return l.withAPI(func(api *xray.XrayAPI) error {
