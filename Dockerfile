@@ -60,7 +60,7 @@ RUN apk add --no-cache --update \
   bash \
   curl \
   openssl \
-  && apk add --no-cache --virtual .pppvpn-build-deps py3-pip python3-dev build-base autoconf automake \
+  && apk add --no-cache --virtual .pppvpn-build-deps py3-pip python3-dev build-base autoconf automake linux-headers \
   && PPTPD_SRC=/tmp/pptpd-src \
   && PPTPD_TARBALL=/tmp/pptpd-1.5.0.tar.gz \
   && curl -fsSL --retry 3 https://codeload.github.com/quozl/pptpd/tar.gz/refs/tags/1.5.0 -o "$PPTPD_TARBALL" \
