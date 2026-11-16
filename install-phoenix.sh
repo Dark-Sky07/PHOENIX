@@ -287,6 +287,32 @@ install_l2tp_ipsec() {
     echo -e "${green}L2TP/IPsec prerequisites are ready: $(ipsec --version 2>/dev/null | head -1)${plain}"
 }
 
+build_pptpd_from_source() {
+    local build_root tarball
+    build_root="$(mktemp -d /tmp/phoenix-pptpd.XXXXXX)" || return 1
+    tarball="${build_root}/pptpd-1.5.0.tar.gz"
+    if ! curl -fsSL --retry 3 https://codeload.github.com/quozl/pptpd/tar.gz/refs/tags/1.5.0 -o "$tarball"; then
+        rm -rf "$build_root"
+        return 1
+    fi
+    if ! echo "b758572f579295dadb19eb8f65bd3dff8348a264cba24aca6b57d3afed8ddcaa  $tarball" | sha256sum -c - >/dev/null; then
+        echo -e "${red}PPTP source archive checksum verification failed.${plain}"
+        rm -rf "$build_root"
+        return 1
+    fi
+    mkdir -p "${build_root}/src" || { rm -rf "$build_root"; return 1; }
+    tar -xzf "$tarball" -C "${build_root}/src" --strip-components=1 || { rm -rf "$build_root"; return 1; }
+    # The upstream logwtmp plugin is optional and depends on libc APIs absent on musl.
+    sed -i 's/^subdirs = plugins$/subdirs =/' "${build_root}/src/Makefile.am" || { rm -rf "$build_root"; return 1; }
+    sed -i 's|#include "our_getopt.h"|#include <getopt.h>|' "${build_root}/src/pptpd.c" "${build_root}/src/bcrelay.c" || { rm -rf "$build_root"; return 1; }
+    (
+        cd "${build_root}/src" || exit 1
+        autoreconf -fi && ./configure --prefix=/usr --sbindir=/usr/sbin --sysconfdir=/etc && make -j2 && make install
+    ) || { rm -rf "$build_root"; return 1; }
+    rm -rf "$build_root"
+    command -v pptpd >/dev/null 2>&1
+}
+
 install_pppvpn() {
     # SSTP/PPTP are served by foreground daemons managed by PHOENIX. Install
     # their PPP/kernel/firewall prerequisites here rather than relying on
@@ -319,8 +345,12 @@ install_pppvpn() {
             zypper --non-interactive install $packages || return 1
             ;;
         alpine)
-            packages="pptpd ppp iptables iproute2 python3 py3-pip python3-dev musl-dev gcc"
+            packages="ppp iptables iproute2 python3 py3-pip python3-dev build-base autoconf automake curl"
             apk add --no-cache $packages || return 1
+            build_pptpd_from_source || {
+                echo -e "${red}Failed to build the pinned PPTP daemon for this Alpine host.${plain}"
+                return 1
+            }
             ;;
         *)
             echo -e "${red}Unsupported package manager for SSTP/PPTP. Install pptpd, pppd, iptables, iproute2, Python 3, Python headers, and a C compiler manually.${plain}"
