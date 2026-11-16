@@ -8,6 +8,8 @@ export { default as MixedFields } from './mixed';
 export { default as MtprotoFields } from './mtproto';
 export { default as OpenvpnFields } from './openvpn';
 export { default as L2tpFields } from './l2tp';
+export { default as SstpFields } from './sstp';
+export { default as PptpFields } from './pptp';
 export { default as VlessFields } from './vless';
 export { default as AmneziawgFields } from './amneziawg';
 export { default as MasqueStreamFields, MasqueSettingsFields } from './masque';

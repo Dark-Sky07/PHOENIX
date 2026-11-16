@@ -20,6 +20,7 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/l2tp"
 	"github.com/Dark-Sky07/phoenix/internal/logger"
 	"github.com/Dark-Sky07/phoenix/internal/mtproto"
+	"github.com/Dark-Sky07/phoenix/internal/pppvpn"
 	"github.com/Dark-Sky07/phoenix/internal/tuic"
 	"github.com/Dark-Sky07/phoenix/internal/util/common"
 	"github.com/Dark-Sky07/phoenix/internal/util/netsafe"
@@ -667,6 +668,59 @@ func (s *InboundService) normalizeL2TPSettings(inbound *model.Inbound) error {
 	return nil
 }
 
+func (s *InboundService) normalizePPPVPNSettings(inbound *model.Inbound) error {
+	if inbound == nil || (inbound.Protocol != model.SSTP && inbound.Protocol != model.PPTP) {
+		return nil
+	}
+	if inbound.NodeID != nil {
+		return common.NewErrorf("%s is supported only on the local Linux host", inbound.Protocol)
+	}
+	protocol := pppvpn.Protocol(inbound.Protocol)
+	if inbound.Port == 0 {
+		inbound.Port = pppvpn.DefaultPort(protocol)
+	}
+	var settings map[string]any
+	if strings.TrimSpace(inbound.Settings) == "" {
+		settings = map[string]any{}
+	} else if err := json.Unmarshal([]byte(inbound.Settings), &settings); err != nil || settings == nil {
+		return common.NewErrorf("%s settings must be a JSON object", inbound.Protocol)
+	}
+	defaultIP, defaultPool := "10.254.0.1", "10.254.0.0/24"
+	if inbound.Protocol == model.PPTP {
+		defaultIP, defaultPool = "10.253.0.1", "10.253.0.0/24"
+	}
+	defaults := map[string]any{"localIP": defaultIP, "poolCIDR": defaultPool, "dns1": "1.1.1.1", "dns2": "8.8.8.8", "routeThroughXray": false}
+	for key, value := range defaults {
+		if _, exists := settings[key]; !exists {
+			settings[key] = value
+		}
+	}
+	encoded, err := json.Marshal(settings)
+	if err != nil {
+		return err
+	}
+	inbound.Settings = string(encoded)
+	candidate := *inbound
+	if candidate.Id == 0 {
+		candidate.Id = 1
+	}
+	instance, ok := pppvpn.InstanceFromInbound(&candidate, nil)
+	if !ok {
+		return common.NewErrorf("invalid %s settings; check the IPv4 pool, DNS, and SSTP certificate/key pair", inbound.Protocol)
+	}
+	if err := pppvpn.Validate(instance); err != nil {
+		return common.NewError(err.Error())
+	}
+	pretty, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return err
+	}
+	inbound.Settings = string(pretty)
+	inbound.StreamSettings = ""
+	inbound.Sniffing = ""
+	return nil
+}
+
 func validateL2TPClientCredentials(clients []model.Client) error {
 	for _, client := range clients {
 		if strings.TrimSpace(client.Email) == "" || client.Password == "" ||
@@ -720,7 +774,7 @@ func daemonRelayRoutesThroughXray(inbound *model.Inbound) bool {
 	if inbound == nil || inbound.NodeID != nil {
 		return false
 	}
-	if inbound.Protocol != model.OpenVPN && inbound.Protocol != model.L2TP {
+	if inbound.Protocol != model.OpenVPN && inbound.Protocol != model.L2TP && inbound.Protocol != model.SSTP && inbound.Protocol != model.PPTP {
 		return false
 	}
 	var parsed struct {
@@ -743,7 +797,7 @@ func daemonRelayRoutesThroughXray(inbound *model.Inbound) bool {
 // from a client or UI payload that omits "clients" inside settings does not
 // wipe the inbound's existing attached clients.
 func preserveDaemonInboundClients(inbound *model.Inbound, oldSettings string) {
-	if inbound == nil || (inbound.Protocol != model.OpenVPN && inbound.Protocol != model.L2TP) {
+	if inbound == nil || (inbound.Protocol != model.OpenVPN && inbound.Protocol != model.L2TP && inbound.Protocol != model.SSTP && inbound.Protocol != model.PPTP) {
 		return
 	}
 	if strings.TrimSpace(oldSettings) == "" || strings.TrimSpace(inbound.Settings) == "" {
@@ -899,6 +953,9 @@ func (s *InboundService) addInbound(inbound *model.Inbound, preserveExistingClie
 	if err := s.normalizeL2TPSettings(inbound); err != nil {
 		return inbound, false, err
 	}
+	if err := s.normalizePPPVPNSettings(inbound); err != nil {
+		return inbound, false, err
+	}
 	if err := s.normalizeAmneziaWGSettings(inbound); err != nil {
 		return inbound, false, err
 	}
@@ -943,6 +1000,11 @@ func (s *InboundService) addInbound(inbound *model.Inbound, preserveExistingClie
 	}
 	if inbound.Protocol == model.L2TP {
 		if err := validateL2TPClientCredentials(clients); err != nil {
+			return inbound, false, err
+		}
+	}
+	if inbound.Protocol == model.SSTP || inbound.Protocol == model.PPTP {
+		if err := validatePPPVPNClientCredentials(inbound.Protocol, clients); err != nil {
 			return inbound, false, err
 		}
 	}
@@ -1001,9 +1063,9 @@ func (s *InboundService) addInbound(inbound *model.Inbound, preserveExistingClie
 			if client.PublicKey == "" {
 				return inbound, false, common.NewError("wireguard client requires a key")
 			}
-		case model.L2TP:
+		case model.L2TP, model.SSTP, model.PPTP:
 			if client.Email == "" || client.Password == "" {
-				return inbound, false, common.NewError("l2tp clients require email and password")
+				return inbound, false, common.NewErrorf("%s clients require email and password", inbound.Protocol)
 			}
 		case model.TUIC:
 			if client.ID == "" {
@@ -1180,7 +1242,7 @@ func (s *InboundService) DelInbound(id int) (bool, error) {
 		defer l2tpInboundMu.Unlock()
 	}
 	if loadErr == nil {
-		shouldPushToRuntime := ib.NodeID != nil || ib.Enable || ib.Protocol == model.L2TP
+		shouldPushToRuntime := ib.NodeID != nil || ib.Enable || ib.Protocol == model.L2TP || ib.Protocol == model.SSTP || ib.Protocol == model.PPTP
 		if shouldPushToRuntime {
 			rt, push, dirty, perr := s.nodePushPlan(&ib)
 			if perr != nil {
@@ -1344,11 +1406,11 @@ func (s *InboundService) SetInboundEnable(id int, enable bool) (bool, error) {
 
 	// The daemons' relay listener lives in the generated Xray config, so an
 	// enable/disable flip must regenerate it too (hot-applied).
-	if daemonRelayRoutesThroughXray(inbound) || inbound.Protocol == model.OpenVPN || inbound.Protocol == model.L2TP {
+	if daemonRelayRoutesThroughXray(inbound) || inbound.Protocol == model.OpenVPN || inbound.Protocol == model.L2TP || inbound.Protocol == model.SSTP || inbound.Protocol == model.PPTP {
 		needRestart = true
 	}
 
-	if inbound.Protocol == model.OpenVPN || inbound.Protocol == model.L2TP {
+	if inbound.Protocol == model.OpenVPN || inbound.Protocol == model.L2TP || inbound.Protocol == model.SSTP || inbound.Protocol == model.PPTP {
 		payload := inbound
 		if enable {
 			if built, bErr := s.buildRuntimeInboundForAPI(db, inbound); bErr == nil {
@@ -1400,6 +1462,9 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 	if err := s.normalizeL2TPSettings(inbound); err != nil {
 		return inbound, false, err
 	}
+	if err := s.normalizePPPVPNSettings(inbound); err != nil {
+		return inbound, false, err
+	}
 	if err := s.normalizeAmneziaWGSettings(inbound); err != nil {
 		return inbound, false, err
 	}
@@ -1432,6 +1497,18 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 	}
 	if inbound.Protocol == model.OpenVPN && inbound.NodeID != nil {
 		return inbound, false, common.NewError("openvpn is supported only on the local Linux host")
+	}
+	if inbound.Protocol == model.SSTP || inbound.Protocol == model.PPTP {
+		if inbound.NodeID != nil {
+			return inbound, false, common.NewErrorf("%s is supported only on the local Linux host", inbound.Protocol)
+		}
+		clients, clientErr := s.GetClients(inbound)
+		if clientErr != nil {
+			return inbound, false, clientErr
+		}
+		if clientErr = validatePPPVPNClientCredentials(inbound.Protocol, clients); clientErr != nil {
+			return inbound, false, clientErr
+		}
 	}
 	if inbound.Protocol == model.L2TP {
 		clients, clientErr := s.GetClients(inbound)
@@ -1600,18 +1677,20 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 			needRestart = true
 		} else if oldRuntime.Protocol == model.TUIC || oldInbound.Protocol == model.TUIC ||
 			oldRuntime.Protocol == model.OpenVPN || oldInbound.Protocol == model.OpenVPN ||
-			oldRuntime.Protocol == model.L2TP || oldInbound.Protocol == model.L2TP {
+			oldRuntime.Protocol == model.L2TP || oldInbound.Protocol == model.L2TP ||
+			oldRuntime.Protocol == model.SSTP || oldInbound.Protocol == model.SSTP ||
+			oldRuntime.Protocol == model.PPTP || oldInbound.Protocol == model.PPTP {
 			oldSnapshot := oldRuntime
 			oldSnapshot.Tag = tag
 			payload := oldInbound
-			if oldInbound.Enable && (oldInbound.Protocol == model.TUIC || oldInbound.Protocol == model.OpenVPN || oldInbound.Protocol == model.L2TP) {
+			if oldInbound.Enable && (oldInbound.Protocol == model.TUIC || oldInbound.Protocol == model.OpenVPN || oldInbound.Protocol == model.L2TP || oldInbound.Protocol == model.SSTP || oldInbound.Protocol == model.PPTP) {
 				if built, bErr := s.buildInboundForLocalRuntime(tx, oldInbound); bErr == nil {
 					payload = built
 				}
 			}
 			if err2 := rt.UpdateInbound(context.Background(), &oldSnapshot, payload); err2 != nil {
 				logger.Debug("Unable to update daemon/TUIC inbound on", rt.Name(), ":", err2)
-				if oldInbound.Protocol != model.TUIC && oldInbound.Protocol != model.OpenVPN && oldInbound.Protocol != model.L2TP {
+				if oldInbound.Protocol != model.TUIC && oldInbound.Protocol != model.OpenVPN && oldInbound.Protocol != model.L2TP && oldInbound.Protocol != model.SSTP && oldInbound.Protocol != model.PPTP {
 					needRestart = true
 				}
 			}

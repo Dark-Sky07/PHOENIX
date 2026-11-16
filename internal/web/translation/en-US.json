@@ -701,7 +701,19 @@
           "addressPool": "Address pool",
           "addressPoolDesc": "Tunnel addresses are leased from these prefixes — at most one IPv4 and one IPv6."
         },
-        "autoFill": "Auto Fill"
+        "autoFill": "Auto Fill",
+        "sstpDaemonHint": "SSTP runs through a local sstpd/pppd daemon and uses its own TLS certificate and private key. Attach clients with a username (email) and password. Routing through Xray is handled by the local daemon relay.",
+        "sstpCertificate": "SSTP certificate (PEM)",
+        "sstpPrivateKey": "SSTP private key (PEM)",
+        "sstpLocalIP": "Server tunnel IP",
+        "sstpPoolCIDR": "Client IPv4 pool",
+        "sstpDns1": "DNS 1",
+        "sstpDns2": "DNS 2",
+        "pptpSecurityWarning": "PPTP is obsolete and weakly secured. Use SSTP or a modern VPN unless legacy-client compatibility is required.",
+        "pptpLocalIP": "Server tunnel IP",
+        "pptpPoolCIDR": "Client IPv4 pool",
+        "pptpDns1": "DNS 1",
+        "pptpDns2": "DNS 2"
       },
       "info": {
         "mode": "Mode",

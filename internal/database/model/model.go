@@ -35,6 +35,8 @@ const (
 	AmneziaWG   Protocol = "amneziawg"
 	OpenVPN     Protocol = "openvpn"
 	L2TP        Protocol = "l2tp"
+	SSTP        Protocol = "sstp"
+	PPTP        Protocol = "pptp"
 	MASQUE      Protocol = "masque"
 	TUIC        Protocol = "tuic"
 )

@@ -731,8 +731,8 @@ func reconcileTransferSnapshotRuntime(inboundSvc *InboundService, snapshot *tran
 			// will observe the restored links/settings without touching Xray.
 			continue
 		}
-		if inbound.Protocol == model.L2TP && inbound.NodeID == nil {
-			if err := reconcileL2TPRuntime(inbound); err != nil && firstErr == nil {
+		if (inbound.Protocol == model.L2TP || inbound.Protocol == model.SSTP || inbound.Protocol == model.PPTP) && inbound.NodeID == nil {
+			if err := reconcilePPPVPNRuntime(inbound); err != nil && firstErr == nil {
 				firstErr = err
 			}
 			continue

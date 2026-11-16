@@ -43,6 +43,12 @@ services:
       # the panel is configured with a different value.
       - "1194:1194/udp"
       - "1194:1194/tcp"
+      # Uncomment to expose SSTP's default port when it does not conflict with
+      # a host reverse proxy. Custom SSTP/PPTP ports must also be published.
+      # - "443:443/tcp"
+      # - "1723:1723/tcp"
+      # PPTP additionally uses GRE (IP protocol 47), which Docker's normal
+      # port publishing cannot forward; use host networking for PPTP.
       # L2TP/IPsec fixed listeners (one global inbound).
       - "500:500/udp"
       - "4500:4500/udp"

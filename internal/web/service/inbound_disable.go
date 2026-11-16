@@ -22,7 +22,7 @@ func (s *InboundService) disableInvalidInbounds(tx *gorm.DB) (bool, int64, error
 		var tags []string
 		err := tx.Table("inbounds").
 			Select("inbounds.tag").
-			Where("((total > 0 and up + down >= total) or (expiry_time > 0 and expiry_time <= ?)) and enable = ? and node_id IS NULL AND protocol NOT IN (?, ?)", now, true, model.OpenVPN, model.L2TP).
+			Where("((total > 0 and up + down >= total) or (expiry_time > 0 and expiry_time <= ?)) and enable = ? and node_id IS NULL AND protocol NOT IN (?, ?, ?, ?)", now, true, model.OpenVPN, model.L2TP, model.SSTP, model.PPTP).
 			Scan(&tags).Error
 		if err != nil {
 			return false, 0, err
@@ -128,7 +128,7 @@ func (s *InboundService) disableInvalidClients(tx *gorm.DB) (bool, int64, []int,
 			// OpenVPN and L2TP are reconciled by their host-daemon jobs, not
 			// by the Xray API. The canonical client/stat rows and settings
 			// below are the source of truth for the next daemon reconcile.
-			if t.Protocol == model.OpenVPN || t.Protocol == model.L2TP {
+			if t.Protocol == model.OpenVPN || t.Protocol == model.L2TP || t.Protocol == model.SSTP || t.Protocol == model.PPTP {
 				continue
 			}
 			err1 := s.xrayApi.RemoveUser(t.Tag, t.Email)

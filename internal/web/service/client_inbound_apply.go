@@ -11,6 +11,7 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
 	"github.com/Dark-Sky07/phoenix/internal/l2tp"
 	"github.com/Dark-Sky07/phoenix/internal/logger"
+	"github.com/Dark-Sky07/phoenix/internal/pppvpn"
 	"github.com/Dark-Sky07/phoenix/internal/util/common"
 	"github.com/Dark-Sky07/phoenix/internal/util/random"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
@@ -29,23 +30,38 @@ func clientsFromSettings(settings map[string]any) []any {
 	return []any{}
 }
 
-// reconcileL2TPRuntime makes client attach/update/delete operations visible to
+// reconcilePPPVPNRuntime makes client attach/update/delete operations visible to
 // the host daemon before the periodic job runs. It is intentionally a no-op
 // for every other protocol so the existing Xray runtime path is unchanged.
-func reconcileL2TPRuntime(inbound *model.Inbound) error {
-	if inbound == nil || inbound.Protocol != model.L2TP || inbound.NodeID != nil {
+func reconcilePPPVPNRuntime(inbound *model.Inbound) error {
+	if inbound == nil || inbound.NodeID != nil {
 		return nil
 	}
-	if !inbound.Enable {
-		l2tp.GetManager().Remove(inbound.Id)
-		return nil
+	if inbound.Protocol == model.L2TP {
+		if !inbound.Enable {
+			l2tp.GetManager().Remove(inbound.Id)
+			return nil
+		}
+		instance, ok := l2tp.InstanceFromInbound(inbound, nil)
+		if !ok {
+			return common.NewError("invalid l2tp settings or credentials")
+		}
+		instance.XrayRelayPort = (&XrayService{}).DaemonRelayPort(inbound.Tag)
+		return l2tp.GetManager().Ensure(instance)
 	}
-	instance, ok := l2tp.InstanceFromInbound(inbound, nil)
-	if !ok {
-		return common.NewError("invalid l2tp settings or credentials")
+	if inbound.Protocol == model.SSTP || inbound.Protocol == model.PPTP {
+		if !inbound.Enable {
+			pppvpn.GetManager().Remove(inbound.Id)
+			return nil
+		}
+		instance, ok := pppvpn.InstanceFromInbound(inbound, nil)
+		if !ok {
+			return common.NewErrorf("invalid %s settings or credentials", inbound.Protocol)
+		}
+		instance.XrayRelayPort = (&XrayService{}).DaemonRelayPort(inbound.Tag)
+		return pppvpn.GetManager().Ensure(instance)
 	}
-	instance.XrayRelayPort = (&XrayService{}).DaemonRelayPort(inbound.Tag)
-	return l2tp.GetManager().Ensure(instance)
+	return nil
 }
 
 // delInboundClients removes several clients from a single inbound in one pass:
@@ -190,8 +206,8 @@ func (s *ClientService) delInboundClients(inboundSvc *InboundService, inboundId 
 	if err := db.Save(oldInbound).Error; err != nil {
 		return needRestart, err
 	}
-	if err := reconcileL2TPRuntime(oldInbound); err != nil {
-		logger.Warning("l2tp: synchronous client removal reconcile failed:", err)
+	if err := reconcilePPPVPNRuntime(oldInbound); err != nil {
+		logger.Warning("PPP VPN: synchronous client removal reconcile failed:", err)
 		needRestart = true
 	}
 	finalClients, gcErr := inboundSvc.GetClients(oldInbound)
@@ -362,15 +378,20 @@ func (s *ClientService) addInboundClient(inboundSvc *InboundService, data *model
 			return false, err
 		}
 	}
+	if oldInbound.Protocol == model.SSTP || oldInbound.Protocol == model.PPTP {
+		if err := validatePPPVPNClientCredentials(oldInbound.Protocol, clients); err != nil {
+			return false, err
+		}
+	}
 
 	for _, client := range clients {
 		if strings.TrimSpace(client.Email) == "" {
 			return false, common.NewError("client email is required")
 		}
 		switch oldInbound.Protocol {
-		case model.OpenVPN, model.L2TP:
-			// Daemon identity is the email. L2TP additionally consumes
-			// Client.Password as the PPP/MS-CHAPv2 password.
+		case model.OpenVPN, model.L2TP, model.SSTP, model.PPTP:
+			// Daemon identity is the email. PPP VPNs authenticate with the
+			// Client.Password field.
 			if oldInbound.Protocol == model.L2TP && client.Password == "" {
 				return false, common.NewError("l2tp client password is required")
 			}
@@ -519,8 +540,8 @@ func (s *ClientService) addInboundClient(inboundSvc *InboundService, data *model
 	if err = tx.Save(oldInbound).Error; err != nil {
 		return false, err
 	}
-	if err := reconcileL2TPRuntime(oldInbound); err != nil {
-		logger.Warning("l2tp: synchronous client reconcile failed:", err)
+	if err := reconcilePPPVPNRuntime(oldInbound); err != nil {
+		logger.Warning("PPP VPN: synchronous client reconcile failed:", err)
 		needRestart = true
 	}
 	finalClients, gcErr := inboundSvc.GetClients(oldInbound)
@@ -565,6 +586,11 @@ func (s *ClientService) UpdateInboundClient(inboundSvc *InboundService, data *mo
 			return false, err
 		}
 	}
+	if oldInbound.Protocol == model.SSTP || oldInbound.Protocol == model.PPTP {
+		if err := validatePPPVPNClientCredentials(oldInbound.Protocol, clients); err != nil {
+			return false, err
+		}
+	}
 
 	oldClients, err := inboundSvc.GetClients(oldInbound)
 	if err != nil {
@@ -573,8 +599,8 @@ func (s *ClientService) UpdateInboundClient(inboundSvc *InboundService, data *mo
 
 	newClientId := ""
 	switch oldInbound.Protocol {
-	case model.OpenVPN, model.L2TP:
-		// Identity is the email. L2TP uses Password for PPP authentication.
+	case model.OpenVPN, model.L2TP, model.SSTP, model.PPTP:
+		// Daemon identity is the email; PPP VPNs use Password to authenticate.
 		if oldInbound.Protocol == model.L2TP && clients[0].Password == "" {
 			return false, common.NewError("l2tp client password is required")
 		}
@@ -877,8 +903,8 @@ func (s *ClientService) UpdateInboundClient(inboundSvc *InboundService, data *mo
 	if err = tx.Save(oldInbound).Error; err != nil {
 		return false, err
 	}
-	if err := reconcileL2TPRuntime(oldInbound); err != nil {
-		logger.Warning("l2tp: synchronous client reconcile failed:", err)
+	if err := reconcilePPPVPNRuntime(oldInbound); err != nil {
+		logger.Warning("PPP VPN: synchronous client reconcile failed:", err)
 		needRestart = true
 	}
 	finalClients, gcErr := inboundSvc.GetClients(oldInbound)
@@ -1007,7 +1033,7 @@ func (s *ClientService) DelInboundClientByEmail(inboundSvc *InboundService, inbo
 	if err := db.Save(oldInbound).Error; err != nil {
 		return false, err
 	}
-	if err := reconcileL2TPRuntime(oldInbound); err != nil {
+	if err := reconcilePPPVPNRuntime(oldInbound); err != nil {
 		logger.Warning("l2tp: synchronous client deletion reconcile failed:", err)
 		needRestart = true
 	}

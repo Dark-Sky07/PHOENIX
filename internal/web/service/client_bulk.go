@@ -1108,7 +1108,7 @@ func (s *ClientService) bulkDelInboundClients(
 		// non-Xray L2TP daemon after the settings transaction commits, otherwise
 		// BulkDelete/DelDepleted would leave deleted PPP credentials in
 		// chap-secrets until the periodic job happened to run.
-		if err := reconcileL2TPRuntime(oldInbound); err != nil {
+		if err := reconcilePPPVPNRuntime(oldInbound); err != nil {
 			logger.Warning("l2tp: synchronous bulk client deletion reconcile failed:", err)
 			res.needRestart = true
 		}

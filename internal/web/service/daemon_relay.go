@@ -14,6 +14,7 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/l2tp"
 	"github.com/Dark-Sky07/phoenix/internal/logger"
 	"github.com/Dark-Sky07/phoenix/internal/openvpn"
+	"github.com/Dark-Sky07/phoenix/internal/pppvpn"
 	"github.com/Dark-Sky07/phoenix/internal/util/json_util"
 	"github.com/Dark-Sky07/phoenix/internal/util/tproxy"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
@@ -24,7 +25,7 @@ import (
 // Daemon relay: routing OpenVPN and L2TP/IPsec traffic through the core.
 //
 // Those two protocols are served by host daemons, not by Xray. For every
-// enabled local OpenVPN/L2TP inbound that opts into Xray routing (or is
+// enabled local OpenVPN/L2TP/SSTP/PPTP inbound that opts into Xray routing (or is
 // referenced by an inboundTag rule in RouterConfig), the generated config
 // receives:
 //  1. A loopback TCP dokodemo-door inbound in "redirect" mode (SO_ORIGINAL_DST)
@@ -293,7 +294,7 @@ func injectDaemonRelays(cfg *xray.Config, inbounds []*model.Inbound) {
 		if inbound == nil || !inbound.Enable || inbound.NodeID != nil {
 			continue
 		}
-		if inbound.Protocol != model.OpenVPN && inbound.Protocol != model.L2TP {
+		if inbound.Protocol != model.OpenVPN && inbound.Protocol != model.L2TP && inbound.Protocol != model.SSTP && inbound.Protocol != model.PPTP {
 			continue
 		}
 		if !daemonRelayRoutesThroughXray(inbound) && !routingReferencesInboundTag(cfg.RouterConfig, inbound.Tag) {
@@ -309,7 +310,7 @@ func injectDaemonRelays(cfg *xray.Config, inbounds []*model.Inbound) {
 	}
 	if !daemonRelaySupported() {
 		if daemonRelayUnsupportedLogged.CompareAndSwap(false, true) {
-			logger.Warning("daemon relay: this process cannot bind loopback relay sockets; OpenVPN/L2TP traffic stays on the direct path and routing rules will not apply to it")
+			logger.Warning("daemon relay: this process cannot bind loopback relay sockets; OpenVPN/L2TP/SSTP/PPTP traffic stays on the direct path and routing rules will not apply to it")
 		}
 		return
 	}
@@ -406,6 +407,7 @@ func (s *XrayService) SyncDaemonInbounds() {
 	}
 	var desiredOvpn []openvpn.Instance
 	var desiredL2TP []l2tp.Instance
+	var desiredPPPVPN []pppvpn.Instance
 	for _, ib := range inbounds {
 		if ib == nil || !ib.Enable || ib.NodeID != nil {
 			continue
@@ -435,6 +437,29 @@ func (s *XrayService) SyncDaemonInbounds() {
 				inst.XrayRelayPort = s.DaemonRelayPort(ib.Tag)
 				desiredOvpn = append(desiredOvpn, inst)
 			}
+		case model.SSTP, model.PPTP:
+			dbClients, err := clientSvc.ListForInbound(nil, ib.Id)
+			if err != nil {
+				continue
+			}
+			enableMap := make(map[string]bool, len(ib.ClientStats))
+			for _, ct := range ib.ClientStats {
+				enableMap[strings.ToLower(strings.TrimSpace(ct.Email))] = ct.Enable
+			}
+			clients := make([]model.Client, 0, len(dbClients))
+			for _, c := range dbClients {
+				if !c.Enable {
+					continue
+				}
+				if enabled, exists := enableMap[strings.ToLower(strings.TrimSpace(c.Email))]; exists && !enabled {
+					continue
+				}
+				clients = append(clients, c)
+			}
+			if inst, ok := pppvpn.InstanceFromInbound(ib, clients); ok {
+				inst.XrayRelayPort = s.DaemonRelayPort(ib.Tag)
+				desiredPPPVPN = append(desiredPPPVPN, inst)
+			}
 		case model.L2TP:
 			dbClients, err := clientSvc.ListForInbound(nil, ib.Id)
 			if err != nil {
@@ -462,6 +487,7 @@ func (s *XrayService) SyncDaemonInbounds() {
 	}
 	openvpn.GetManager().Reconcile(desiredOvpn)
 	l2tp.GetManager().Reconcile(desiredL2TP)
+	pppvpn.GetManager().Reconcile(desiredPPPVPN)
 }
 
 // dropDaemonRelayTraffic removes the core's inbound-level counters for relay
@@ -511,6 +537,6 @@ func noteDaemonRelayCrash(isForce, crashed bool) {
 	}
 	daemonRelayStrikes++
 	if daemonRelayStrikes >= 2 && daemonRelaySuspended.CompareAndSwap(false, true) {
-		logger.Warning("daemon relay: Xray stopped right after starting twice in a row with relay inbounds present; suspending the OpenVPN/L2TP relay so the core can start (a manual Xray restart from the dashboard re-enables it)")
+		logger.Warning("daemon relay: Xray stopped right after starting twice in a row with relay inbounds present; suspending the OpenVPN/L2TP/SSTP/PPTP relay so the core can start (a manual Xray restart from the dashboard re-enables it)")
 	}
 }
