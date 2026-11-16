@@ -39,7 +39,10 @@ func (m *firewall) iptables() (string, error) {
 	return "", errors.New("iptables binary not found")
 }
 func (m *firewall) runRule(bin, table, op string, rule []string) error {
-	args := make([]string, 0, len(rule)+3)
+	if len(rule) > 32 {
+		return errors.New("iptables rule has too many arguments")
+	}
+	args := make([]string, 0, 35)
 	if table != "" {
 		args = append(args, "-t", table)
 	}

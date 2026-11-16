@@ -1,6 +1,9 @@
 package pppvpn
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -40,8 +43,49 @@ func rootDir() string {
 	return filepath.Join(dir, "pppvpn")
 }
 
+func instanceRelativeDir(i Instance) (string, error) {
+	protocolDir := ""
+	switch i.Protocol {
+	case SSTP:
+		protocolDir = "sstp"
+	case PPTP:
+		protocolDir = "pptp"
+	default:
+		return "", fmt.Errorf("pppvpn: invalid protocol directory %q", i.Protocol)
+	}
+	if i.ID <= 0 {
+		return "", errors.New("pppvpn: inbound id must be positive")
+	}
+	idDir := strconv.Itoa(i.ID)
+	if !filepath.IsLocal(idDir) {
+		return "", errors.New("pppvpn: invalid inbound directory")
+	}
+	relative := filepath.Join(protocolDir, idDir)
+	if !filepath.IsLocal(relative) {
+		return "", errors.New("pppvpn: invalid instance directory")
+	}
+	return relative, nil
+}
+
 func dirFor(i Instance) string {
-	return filepath.Join(rootDir(), string(i.Protocol), strconv.Itoa(i.ID))
+	relative, err := instanceRelativeDir(i)
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(rootDir(), relative)
+}
+
+func removeInstanceDir(i Instance) error {
+	relative, err := instanceRelativeDir(i)
+	if err != nil {
+		return err
+	}
+	root, err := os.OpenRoot(rootDir())
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	return root.RemoveAll(relative)
 }
 
 func quotePPP(s string) string {
@@ -139,7 +183,7 @@ func updateChapSecrets(i Instance) error {
 	if base != "" {
 		content = base + "\n\n" + content
 	}
-	return atomicWrite(chapSecretsPath, []byte(content), 0o600)
+	return atomicWrite(filepath.Dir(chapSecretsPath), filepath.Base(chapSecretsPath), []byte(content), 0o600)
 }
 
 func removeChapSecrets(i Instance) {
@@ -171,64 +215,102 @@ func removeChapSecrets(i Instance) {
 	if content != "" {
 		content += "\n"
 	}
-	_ = atomicWrite(chapSecretsPath, []byte(content), 0o600)
+	_ = atomicWrite(filepath.Dir(chapSecretsPath), filepath.Base(chapSecretsPath), []byte(content), 0o600)
 }
 
-func atomicWrite(path string, data []byte, mode os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+func atomicWrite(rootPath, relativePath string, data []byte, mode os.FileMode) error {
+	if relativePath == "" || !filepath.IsLocal(relativePath) || filepath.Clean(relativePath) != relativePath {
+		return errors.New("pppvpn: refusing non-local managed path")
+	}
+	if err := os.MkdirAll(rootPath, 0o750); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".phoenix-pppvpn-*")
+	root, err := os.OpenRoot(rootPath)
 	if err != nil {
 		return err
 	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if err = tmp.Chmod(mode); err == nil {
-		_, err = tmp.Write(data)
+	defer root.Close()
+
+	dir := filepath.Dir(relativePath)
+	if dir != "." {
+		if err := root.MkdirAll(dir, 0o750); err != nil {
+			return err
+		}
 	}
-	if closeErr := tmp.Close(); err == nil {
-		err = closeErr
+
+	for attempt := 0; attempt < 10; attempt++ {
+		token := make([]byte, 16)
+		if _, err := rand.Read(token); err != nil {
+			return err
+		}
+		tempPath := filepath.Join(dir, ".phoenix-pppvpn-"+hex.EncodeToString(token))
+		if dir == "." {
+			tempPath = ".phoenix-pppvpn-" + hex.EncodeToString(token)
+		}
+		tmp, err := root.OpenFile(tempPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if err = tmp.Chmod(mode); err == nil {
+			_, err = tmp.Write(data)
+		}
+		if closeErr := tmp.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			_ = root.Remove(tempPath)
+			return err
+		}
+		if err = root.Rename(tempPath, relativePath); err != nil {
+			_ = root.Remove(tempPath)
+			return err
+		}
+		return nil
 	}
-	if err != nil {
-		return err
-	}
-	return os.Rename(tmpName, path)
+	return errors.New("pppvpn: could not allocate a temporary config file")
 }
 
 func writeConfig(i Instance) (string, error) {
 	if err := Validate(i); err != nil {
 		return "", err
 	}
-	dir := dirFor(i)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	relativeDir, err := instanceRelativeDir(i)
+	if err != nil {
 		return "", err
 	}
+	dir := filepath.Join(rootDir(), relativeDir)
+	optionsRelative := filepath.Join(relativeDir, "options.ppp")
 	options := filepath.Join(dir, "options.ppp")
-	if err := atomicWrite(options, []byte(renderPPPDOptions(i)), 0o600); err != nil {
+	if err := atomicWrite(rootDir(), optionsRelative, []byte(renderPPPDOptions(i)), 0o600); err != nil {
 		return "", err
 	}
 	ipUp := "#!/bin/sh\nset -eu\nPATH=/usr/sbin:/usr/bin:/sbin:/bin\nexport PATH\niface=\"${IFNAME:-${1:-}}\"\ncase \"$iface\" in ''|*[!A-Za-z0-9_.-]*) exit 0 ;; esac\nsysctl -w \"net.ipv4.conf.$iface.route_localnet=1\" >/dev/null 2>&1 || true\nsysctl -w \"net.ipv4.conf.$iface.rp_filter=0\" >/dev/null 2>&1 || true\n"
-	if err := atomicWrite(filepath.Join(dir, "ip-up"), []byte(ipUp), 0o750); err != nil {
+	if err := atomicWrite(rootDir(), filepath.Join(relativeDir, "ip-up"), []byte(ipUp), 0o750); err != nil {
 		return "", err
 	}
 	if err := updateChapSecrets(i); err != nil {
 		return "", fmt.Errorf("write PPP credentials: %w", err)
 	}
 	if i.Protocol == PPTP {
-		path := filepath.Join(dir, "pptpd.conf")
-		return path, atomicWrite(path, []byte(renderPPTPDConfig(i, options)), 0o600)
+		relativePath := filepath.Join(relativeDir, "pptpd.conf")
+		path := filepath.Join(rootDir(), relativePath)
+		return path, atomicWrite(rootDir(), relativePath, []byte(renderPPTPDConfig(i, options)), 0o600)
 	}
-	certPath, keyPath := filepath.Join(dir, "server.crt"), filepath.Join(dir, "server.key")
-	if err := atomicWrite(certPath, []byte(i.CertificatePEM), 0o600); err != nil {
+	certRelative, keyRelative := filepath.Join(relativeDir, "server.crt"), filepath.Join(relativeDir, "server.key")
+	certPath, keyPath := filepath.Join(rootDir(), certRelative), filepath.Join(rootDir(), keyRelative)
+	if err := atomicWrite(rootDir(), certRelative, []byte(i.CertificatePEM), 0o600); err != nil {
 		return "", err
 	}
-	if err := atomicWrite(keyPath, []byte(i.PrivateKeyPEM), 0o600); err != nil {
+	if err := atomicWrite(rootDir(), keyRelative, []byte(i.PrivateKeyPEM), 0o600); err != nil {
 		return "", err
 	}
-	path := filepath.Join(dir, "sstpd.conf")
+	relativePath := filepath.Join(relativeDir, "sstpd.conf")
+	path := filepath.Join(rootDir(), relativePath)
 	// sstpd reads an INI section; the instance-specific files make parallel
 	// server instances isolated and allow a dedicated certificate per inbound.
 	cfg := fmt.Sprintf("[server]\nlisten = %s\nlisten_port = %d\npem_cert = %s\npem_key = %s\nlocal = %s\nremote = %s\npppd_config = %s\n", strings.TrimSpace(i.Listen), i.Port, certPath, keyPath, i.LocalIP, i.PoolCIDR, options)
-	return path, atomicWrite(path, []byte(cfg), 0o600)
+	return path, atomicWrite(rootDir(), relativePath, []byte(cfg), 0o600)
 }

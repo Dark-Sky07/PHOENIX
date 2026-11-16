@@ -60,19 +60,19 @@ func (m *Manager) Ensure(i Instance) error {
 	cfg, err := writeConfig(i)
 	if err != nil {
 		removeChapSecrets(i)
-		_ = os.RemoveAll(dirFor(i))
+		_ = removeInstanceDir(i)
 		return err
 	}
 	if err = networkManager().apply(i); err != nil {
 		removeChapSecrets(i)
-		_ = os.RemoveAll(dirFor(i))
+		_ = removeInstanceDir(i)
 		return err
 	}
 	proc := &Process{}
 	if err = proc.Start(i, cfg); err != nil {
 		networkManager().removeInstance(i)
 		removeChapSecrets(i)
-		_ = os.RemoveAll(dirFor(i))
+		_ = removeInstanceDir(i)
 		return err
 	}
 	m.inbounds[i.ID] = &managed{instance: i, fingerprint: fp, process: proc}
@@ -91,7 +91,7 @@ func (m *Manager) Remove(id int) {
 		networkManager().removeInstance(cur.instance)
 		removeChapSecrets(cur.instance)
 		delete(m.inbounds, id)
-		_ = os.RemoveAll(dirFor(cur.instance))
+		_ = removeInstanceDir(cur.instance)
 		return
 	}
 }
