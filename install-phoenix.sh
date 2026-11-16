@@ -304,6 +304,7 @@ build_pptpd_from_source() {
     tar -xzf "$tarball" -C "${build_root}/src" --strip-components=1 || { rm -rf "$build_root"; return 1; }
     # The upstream logwtmp plugin is optional and depends on libc APIs absent on musl.
     sed -i 's/^subdirs = plugins$/subdirs =/' "${build_root}/src/Makefile.am" || { rm -rf "$build_root"; return 1; }
+    sed -i 's/inststr.c getopt.c getopt1.c/inststr.c/' "${build_root}/src/Makefile.am" || { rm -rf "$build_root"; return 1; }
     sed -i 's|#include "our_getopt.h"|#include <getopt.h>|' "${build_root}/src/pptpd.c" "${build_root}/src/bcrelay.c" || { rm -rf "$build_root"; return 1; }
     (
         cd "${build_root}/src" || exit 1

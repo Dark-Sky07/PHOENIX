@@ -69,6 +69,7 @@ RUN apk add --no-cache --update \
   && mkdir -p "$PPTPD_SRC" \
   && tar -xzf "$PPTPD_TARBALL" -C "$PPTPD_SRC" --strip-components=1 \
   && sed -i 's/^subdirs = plugins$/subdirs =/' "$PPTPD_SRC/Makefile.am" \
+  && sed -i 's/inststr.c getopt.c getopt1.c/inststr.c/' "$PPTPD_SRC/Makefile.am" \
   && sed -i 's|#include "our_getopt.h"|#include <getopt.h>|' "$PPTPD_SRC/pptpd.c" "$PPTPD_SRC/bcrelay.c" \
   && cd "$PPTPD_SRC" \
   && autoreconf -fi \
