@@ -60,18 +60,18 @@ RUN apk add --no-cache --update \
   bash \
   curl \
   openssl \
-  && apk add --no-cache --virtual .pppvpn-build-deps py3-pip python3-dev build-base \
+  && apk add --no-cache --virtual .pppvpn-build-deps py3-pip python3-dev build-base autoconf automake \
   && PPTPD_SRC=/tmp/pptpd-src \
   && PPTPD_TARBALL=/tmp/pptpd-1.5.0.tar.gz \
   && curl -fsSL --retry 3 https://codeload.github.com/quozl/pptpd/tar.gz/refs/tags/1.5.0 -o "$PPTPD_TARBALL" \
   && echo 'b758572f579295dadb19eb8f65bd3dff8348a264cba24aca6b57d3afed8ddcaa  /tmp/pptpd-1.5.0.tar.gz' | sha256sum -c - \
   && mkdir -p "$PPTPD_SRC" \
   && tar -xzf "$PPTPD_TARBALL" -C "$PPTPD_SRC" --strip-components=1 \
-  && sed -i 's#"/bin/pppd"#"/usr/sbin/pppd"#; s#"/bin"#"/usr/sbin"#' "$PPTPD_SRC/config.embed.h" \
-  && sed -i '/#define SBINDIR/a #define PPTP_FACILITY LOG_DAEMON' "$PPTPD_SRC/config.embed.h" \
   && cd "$PPTPD_SRC" \
-  && CFLAGS='-DHAVE_OPENPTY -DHAVE_PTY_H' LDLIBS=-lutil make -f Makefile.uClinux -j2 pptpd.VERSION=1 pptpd.PATCHLEVEL=5 pptpd.SUBLEVEL=0 OBJS1='pptpd.o configfile.o pptpmanager.o compat.o getopt.o getopt1.o inststr.o pqueue.o' OBJS2='pptpctrl.o ctrlpacket.o inststr.o compat.o pptpgre.o ppphdlc.o pqueue.o' pptpd pptpctrl \
-  && install -m 0755 pptpd pptpctrl /usr/sbin/ \
+  && autoreconf -fi \
+  && ./configure --prefix=/usr --sbindir=/usr/sbin --sysconfdir=/etc \
+  && make -j2 \
+  && make install \
   && cd / \
   && rm -rf "$PPTPD_SRC" "$PPTPD_TARBALL" \
   && python3 -m venv /opt/phoenix/pppvpn-sstp \

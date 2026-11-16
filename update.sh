@@ -279,19 +279,10 @@ build_pptpd_from_source() {
     fi
     mkdir -p "${build_root}/src" || { rm -rf "$build_root"; return 1; }
     tar -xzf "$tarball" -C "${build_root}/src" --strip-components=1 || { rm -rf "$build_root"; return 1; }
-    sed -i 's#"/bin/pppd"#"/usr/sbin/pppd"#; s#"/bin"#"/usr/sbin"#' "${build_root}/src/config.embed.h" || { rm -rf "$build_root"; return 1; }
-    sed -i '/#define SBINDIR/a #define PPTP_FACILITY LOG_DAEMON' "${build_root}/src/config.embed.h" || { rm -rf "$build_root"; return 1; }
     (
         cd "${build_root}/src" || exit 1
-        CFLAGS='-DHAVE_OPENPTY -DHAVE_PTY_H' LDLIBS=-lutil make -f Makefile.uClinux -j2 \
-            pptpd.VERSION=1 pptpd.PATCHLEVEL=5 pptpd.SUBLEVEL=0 \
-            OBJS1='pptpd.o configfile.o pptpmanager.o compat.o getopt.o getopt1.o inststr.o pqueue.o' \
-            OBJS2='pptpctrl.o ctrlpacket.o inststr.o compat.o pptpgre.o ppphdlc.o pqueue.o' \
-            pptpd pptpctrl
+        autoreconf -fi && ./configure --prefix=/usr --sbindir=/usr/sbin --sysconfdir=/etc && make -j2 && make install
     ) || { rm -rf "$build_root"; return 1; }
-    mkdir -p /usr/sbin || { rm -rf "$build_root"; return 1; }
-    cp "${build_root}/src/pptpd" "${build_root}/src/pptpctrl" /usr/sbin/ || { rm -rf "$build_root"; return 1; }
-    chmod 0755 /usr/sbin/pptpd /usr/sbin/pptpctrl || { rm -rf "$build_root"; return 1; }
     rm -rf "$build_root"
     command -v pptpd >/dev/null 2>&1
 }
@@ -328,7 +319,7 @@ install_pppvpn() {
             zypper --non-interactive install $packages || return 1
             ;;
         alpine)
-            packages="ppp iptables iproute2 python3 py3-pip python3-dev build-base curl"
+            packages="ppp iptables iproute2 python3 py3-pip python3-dev build-base autoconf automake curl"
             apk add --no-cache $packages || return 1
             build_pptpd_from_source || {
                 echo -e "${red}Failed to build the pinned PPTP daemon for this Alpine host.${plain}"
