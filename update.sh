@@ -279,6 +279,8 @@ build_pptpd_from_source() {
     fi
     mkdir -p "${build_root}/src" || { rm -rf "$build_root"; return 1; }
     tar -xzf "$tarball" -C "${build_root}/src" --strip-components=1 || { rm -rf "$build_root"; return 1; }
+    # The upstream logwtmp plugin is optional and depends on libc APIs absent on musl.
+    sed -i 's/^subdirs = plugins$/subdirs =/' "${build_root}/src/Makefile.am" || { rm -rf "$build_root"; return 1; }
     (
         cd "${build_root}/src" || exit 1
         autoreconf -fi && ./configure --prefix=/usr --sbindir=/usr/sbin --sysconfdir=/etc && make -j2 && make install
@@ -319,7 +321,7 @@ install_pppvpn() {
             zypper --non-interactive install $packages || return 1
             ;;
         alpine)
-            packages="ppp iptables iproute2 python3 py3-pip python3-dev build-base autoconf automake linux-headers ppp-dev curl"
+            packages="ppp iptables iproute2 python3 py3-pip python3-dev build-base autoconf automake curl"
             apk add --no-cache $packages || return 1
             build_pptpd_from_source || {
                 echo -e "${red}Failed to build the pinned PPTP daemon for this Alpine host.${plain}"

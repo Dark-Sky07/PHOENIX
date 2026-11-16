@@ -46,6 +46,7 @@ ENV TZ=Asia/Tehran
 WORKDIR /app
 
 # Alpine no longer publishes pptpd for current releases; build the pinned upstream source below.
+# Omit upstream's optional logwtmp plugin because it requires libc interfaces unavailable on musl.
 RUN apk add --no-cache --update \
   ca-certificates \
   tzdata \
@@ -60,13 +61,14 @@ RUN apk add --no-cache --update \
   bash \
   curl \
   openssl \
-  && apk add --no-cache --virtual .pppvpn-build-deps py3-pip python3-dev build-base autoconf automake linux-headers ppp-dev \
+  && apk add --no-cache --virtual .pppvpn-build-deps py3-pip python3-dev build-base autoconf automake \
   && PPTPD_SRC=/tmp/pptpd-src \
   && PPTPD_TARBALL=/tmp/pptpd-1.5.0.tar.gz \
   && curl -fsSL --retry 3 https://codeload.github.com/quozl/pptpd/tar.gz/refs/tags/1.5.0 -o "$PPTPD_TARBALL" \
   && echo 'b758572f579295dadb19eb8f65bd3dff8348a264cba24aca6b57d3afed8ddcaa  /tmp/pptpd-1.5.0.tar.gz' | sha256sum -c - \
   && mkdir -p "$PPTPD_SRC" \
   && tar -xzf "$PPTPD_TARBALL" -C "$PPTPD_SRC" --strip-components=1 \
+  && sed -i 's/^subdirs = plugins$/subdirs =/' "$PPTPD_SRC/Makefile.am" \
   && cd "$PPTPD_SRC" \
   && autoreconf -fi \
   && ./configure --prefix=/usr --sbindir=/usr/sbin --sysconfdir=/etc \
