@@ -1,0 +1,36 @@
+name: Docker image build test
+
+on:
+  pull_request:
+    paths:
+      - "Dockerfile"
+      - "DockerEntrypoint.sh"
+      - "DockerInit.sh"
+      - "scripts/**"
+      - "docker-compose.yml"
+      - ".github/workflows/docker.yml"
+      - ".github/workflows/docker-test.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build supported Docker platforms without publishing
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64/v8,linux/arm/v7,linux/arm/v6,linux/386
+          push: false
