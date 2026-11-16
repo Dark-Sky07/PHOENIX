@@ -1,6 +1,6 @@
 module github.com/Dark-Sky07/phoenix
 
-go 1.26.10
+go 1.26.11
 
 require (
 	github.com/amnezia-vpn/amneziawg-go/v3 v3.1.20260814
