@@ -7,6 +7,8 @@ import { HttpUtil } from '@/utils';
 import { ThemeProvider } from '@/hooks/useTheme';
 
 import ResellersPage from '@/pages/resellers/ResellersPage';
+import { buildResellerOverviewPoints } from '@/pages/resellers/ResellersOverview';
+import type { ResellerStat } from '@/api/queries/useSession';
 
 const sessionState = vi.hoisted(() => ({ role: 'admin' as 'admin' | 'reseller' }));
 
@@ -137,6 +139,26 @@ function statText(title: string): string {
   const stat = (titleEl as HTMLElement).closest('.phoenix-stat') as HTMLElement;
   return (stat.querySelector('.phoenix-stat-value') as HTMLElement).textContent || '';
 }
+
+describe('reseller dashboard chart data', () => {
+  it('orders by measured usage, sanitizes negative bytes, and bounds the chart to ten rows', () => {
+    const input = Array.from({ length: 12 }, (_, index) => ({
+      ...aliStat,
+      reseller: { ...aliStat.reseller, name: `Reseller ${index}`, username: `r${index}` },
+      clientCount: index,
+      onlineCount: index % 2,
+      usedTraffic: index === 11 ? -1 : index * GB,
+      allocatedTraffic: index * 2 * GB,
+      currency: 'USD',
+    })) as ResellerStat[];
+    const points = buildResellerOverviewPoints(input);
+    expect(points).toHaveLength(10);
+    expect(points[0]).toMatchObject({ name: 'Reseller 10', usedTraffic: 10 * GB, clients: 10 });
+    expect(points.at(-1)?.name).toBe('Reseller 1');
+    expect(input[0].reseller.name).toBe('Reseller 0'); // source snapshot was not mutated
+    expect(buildResellerOverviewPoints([{ ...aliStat, usedTraffic: -1, currency: 'USD' } as ResellerStat])[0].usedTraffic).toBe(0);
+  });
+});
 
 describe('resellers overview (admin)', () => {
   beforeEach(() => {

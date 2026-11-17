@@ -99,6 +99,7 @@ func quotePPP(s string) string {
 func renderPPPDOptions(i Instance) string {
 	server := pppServerName(i)
 	ipUp := filepath.Join(dirFor(i), "ip-up")
+	ipDown := filepath.Join(dirFor(i), "ip-down")
 	return fmt.Sprintf(`# Managed by PHOENIX. Do not edit.
 name %s
 auth
@@ -116,7 +117,54 @@ mru 1400
 ms-dns %s
 ms-dns %s
 ip-up-script %s
-`, server, i.DNS1, i.DNS2, ipUp)
+ip-down-script %s
+`, server, i.DNS1, i.DNS2, ipUp, ipDown)
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+}
+
+func renderTrafficHook(sessionDir string, inboundID int, closed bool) string {
+	state := "active"
+	if closed {
+		state = "closed"
+	}
+	return fmt.Sprintf(`#!/bin/sh
+set -eu
+umask 077
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+iface="${IFNAME:-${1:-}}"
+peer="${PEERNAME:-}"
+case "$iface" in ''|*[!A-Za-z0-9_.-]*) exit 0 ;; esac
+session_dir=%s
+mkdir -p "$session_dir"
+chmod 700 "$session_dir"
+active_file="$session_dir/$iface"
+rx=0
+tx=0
+if [ '%s' = closed ]; then
+  rx=$(cat "/sys/class/net/$iface/statistics/rx_bytes")
+  tx=$(cat "/sys/class/net/$iface/statistics/tx_bytes")
+fi
+if [ '%s' = closed ]; then
+  [ -n "$peer" ] || peer=$(cut -f3 "$active_file" 2>/dev/null || true)
+  session_id=$(cut -f6 "$active_file" 2>/dev/null || true)
+  [ -n "$session_id" ] || session_id="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || printf '%%s-%%s-%%s' "$iface" "$$" "$(date +%%s)")"
+  session_file="$session_dir/$iface.closed.$session_id"
+else
+  case "$peer" in '') exit 0 ;; esac
+  session_id=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || printf '%%s-%%s-%%s' "$iface" "$$" "$(date +%%s)")
+  session_file="$active_file"
+fi
+case "$peer" in '') exit 0 ;; esac
+tmp="$session_file.tmp.$$"
+printf '%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\n' '%s' "$iface" "$peer" "$rx" "$tx" "$session_id" '%d' > "$tmp"
+chmod 600 "$tmp"
+mv -f "$tmp" "$session_file"
+if [ '%s' = closed ]; then rm -f "$active_file"; fi
+`, shellQuote(sessionDir), state, state, state, inboundID, state)
 }
 
 func renderPPTPDConfig(i Instance, optionsPath string) string {
@@ -292,8 +340,15 @@ func writeConfig(i Instance) (string, error) {
 	if err := atomicWrite(rootDir(), optionsRelative, []byte(renderPPPDOptions(i)), 0o600); err != nil {
 		return "", err
 	}
-	ipUp := "#!/bin/sh\nset -eu\nPATH=/usr/sbin:/usr/bin:/sbin:/bin\nexport PATH\niface=\"${IFNAME:-${1:-}}\"\ncase \"$iface\" in ''|*[!A-Za-z0-9_.-]*) exit 0 ;; esac\nsysctl -w \"net.ipv4.conf.$iface.route_localnet=1\" >/dev/null 2>&1 || true\nsysctl -w \"net.ipv4.conf.$iface.rp_filter=0\" >/dev/null 2>&1 || true\n"
+	// Keep accounting records outside the managed instance directory: Remove()
+	// deletes daemon configs/certificates after stopping it, but any final PPP
+	// counters still need to be drained by the next traffic poll.
+	sessionDir := filepath.Join(rootDir(), "sessions", fmt.Sprintf("%s-%d", i.Protocol, i.ID))
+	ipUp := renderTrafficHook(sessionDir, i.ID, false) + "\nsysctl -w \"net.ipv4.conf.${IFNAME:-${1:-}}.route_localnet=1\" >/dev/null 2>&1 || true\nsysctl -w \"net.ipv4.conf.${IFNAME:-${1:-}}.rp_filter=0\" >/dev/null 2>&1 || true\n"
 	if err := atomicWrite(rootDir(), filepath.Join(relativeDir, "ip-up"), []byte(ipUp), 0o750); err != nil {
+		return "", err
+	}
+	if err := atomicWrite(rootDir(), filepath.Join(relativeDir, "ip-down"), []byte(renderTrafficHook(sessionDir, i.ID, true)), 0o750); err != nil {
 		return "", err
 	}
 	if err := updateChapSecrets(i); err != nil {

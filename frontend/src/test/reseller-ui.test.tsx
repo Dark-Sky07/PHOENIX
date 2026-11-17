@@ -225,6 +225,8 @@ describe('reseller pages', () => {
     expect(HttpUtil.get).toHaveBeenCalledWith('/panel/api/reseller/profile');
     expect(screen.getByText('Customer self-registration')).toBeTruthy();
     expect(screen.getByText('Public wallet top-up')).toBeTruthy();
+    expect(screen.getByText('Traffic usage snapshot')).toBeTruthy();
+    expect(screen.getByText('Clients and online users')).toBeTruthy();
 
     const inputs = document.querySelectorAll('input[type="password"]');
     expect(inputs.length).toBe(3);

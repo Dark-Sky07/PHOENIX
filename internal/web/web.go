@@ -346,7 +346,7 @@ func (s *Server) startTask(restartXray bool) {
 
 	// Reconcile the local SSTP and legacy PPTP PPP daemons.
 	pppVPNJob := job.NewPPPVPNJob()
-	s.cron.AddJob("@every 10s", pppVPNJob)
+	s.cron.AddJob("@every 5s", pppVPNJob)
 	go pppVPNJob.Run()
 
 	// check client ips from log file every 10 sec

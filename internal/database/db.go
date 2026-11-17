@@ -77,6 +77,7 @@ func initModels() error {
 		&model.InboundFallback{},
 		&model.NodeClientTraffic{},
 		&model.ClientGlobalTraffic{},
+		&model.PPPClientTrafficCounter{},
 		&model.OutboundSubscription{},
 		&model.Reseller{},
 		&model.ResellerInbound{},

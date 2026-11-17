@@ -1061,8 +1061,8 @@ func (s *ResellerService) ClientUsage(emails []string) (map[string]*xray.ClientT
 			agg = &xray.ClientTraffic{Email: row.Email}
 			usage[key] = agg
 		}
-		agg.Up += row.Up
-		agg.Down += row.Down
+		agg.Up = saturatingAddBytes(agg.Up, row.Up)
+		agg.Down = saturatingAddBytes(agg.Down, row.Down)
 		if row.Enable {
 			agg.Enable = true
 		}
@@ -1114,16 +1114,15 @@ func (s *ResellerService) Stat(reseller *model.Reseller) (*ResellerStat, error) 
 
 	if len(emails) > 0 {
 		for _, batch := range chunkStrings(emails, sqlInChunk) {
-			var allocated struct {
-				Total int64
-			}
+			var allocations []int64
 			if err := db.Model(model.ClientRecord{}).
 				Where("LOWER(TRIM(email)) IN ?", batch).
-				Select("COALESCE(SUM(total_gb), 0) AS total").
-				Scan(&allocated).Error; err != nil {
+				Pluck("total_gb", &allocations).Error; err != nil {
 				return nil, err
 			}
-			stat.AllocatedTraffic += allocated.Total
+			for _, allocation := range allocations {
+				stat.AllocatedTraffic = saturatingAddBytes(stat.AllocatedTraffic, allocation)
+			}
 		}
 	}
 
@@ -1132,7 +1131,8 @@ func (s *ResellerService) Stat(reseller *model.Reseller) (*ResellerStat, error) 
 		return nil, err
 	}
 	for _, row := range usage {
-		stat.UsedTraffic += row.Up + row.Down
+		stat.UsedTraffic = saturatingAddBytes(stat.UsedTraffic, row.Up)
+		stat.UsedTraffic = saturatingAddBytes(stat.UsedTraffic, row.Down)
 	}
 
 	online := s.inboundService.GetOnlineClients()
@@ -1239,7 +1239,7 @@ func (s *ResellerService) Report(resellerId int) (*ResellerReport, error) {
 		up, down, used := int64(0), int64(0), int64(0)
 		if t, ok := usage[strings.ToLower(strings.TrimSpace(rec.Email))]; ok && t != nil {
 			up, down = t.Up, t.Down
-			used = up + down
+			used = saturatingAddBytes(up, down)
 		}
 		ids := inboundIdsByEmail[strings.ToLower(strings.TrimSpace(rec.Email))]
 		sort.Ints(ids)
@@ -1356,6 +1356,12 @@ func (s *ResellerService) EnsureActive(reseller *model.Reseller) error {
 // the reseller inside its purchased volume (and that the volume is not already
 // used up).
 func (s *ResellerService) CheckTrafficQuota(reseller *model.Reseller, addBytes int64) error {
+	if reseller == nil {
+		return errors.New("reseller is required")
+	}
+	if addBytes < 0 {
+		return errors.New("traffic allocation cannot be negative")
+	}
 	if reseller.TrafficLimit <= 0 {
 		return nil
 	}
@@ -1363,12 +1369,26 @@ func (s *ResellerService) CheckTrafficQuota(reseller *model.Reseller, addBytes i
 	if err != nil {
 		return err
 	}
+	return checkTrafficQuotaSnapshot(reseller, stat, addBytes)
+}
+
+func checkTrafficQuotaSnapshot(reseller *model.Reseller, stat *ResellerStat, addBytes int64) error {
+	if reseller == nil || stat == nil {
+		return errors.New("reseller quota snapshot is required")
+	}
+	if addBytes < 0 {
+		return errors.New("traffic allocation cannot be negative")
+	}
 	if stat.UsedTraffic >= reseller.TrafficLimit {
 		return fmt.Errorf("traffic quota exhausted: %s of %s used", FormatBytes(stat.UsedTraffic), FormatBytes(reseller.TrafficLimit))
 	}
-	if addBytes > 0 && stat.AllocatedTraffic+addBytes > reseller.TrafficLimit {
+	remaining := int64(0)
+	if stat.AllocatedTraffic < reseller.TrafficLimit {
+		remaining = reseller.TrafficLimit - stat.AllocatedTraffic
+	}
+	if addBytes > 0 && addBytes > remaining {
 		return fmt.Errorf("traffic quota exceeded: only %s left out of %s (you are allocating %s)",
-			FormatBytes(reseller.TrafficLimit-stat.AllocatedTraffic), FormatBytes(reseller.TrafficLimit), FormatBytes(addBytes))
+			FormatBytes(remaining), FormatBytes(reseller.TrafficLimit), FormatBytes(addBytes))
 	}
 	return nil
 }
@@ -1376,16 +1396,35 @@ func (s *ResellerService) CheckTrafficQuota(reseller *model.Reseller, addBytes i
 // CheckClientQuota verifies that adding `adding` clients is allowed and that
 // their quota fits into the traffic volume.
 func (s *ResellerService) CheckClientQuota(reseller *model.Reseller, adding int, addBytes int64) error {
+	if reseller == nil {
+		return errors.New("reseller is required")
+	}
+	if adding < 0 {
+		return errors.New("client count increment cannot be negative")
+	}
+	if addBytes < 0 {
+		return errors.New("traffic allocation cannot be negative")
+	}
+	if reseller.ClientLimit <= 0 && reseller.TrafficLimit <= 0 {
+		return nil
+	}
+	stat, err := s.Stat(reseller)
+	if err != nil {
+		return err
+	}
 	if adding > 0 && reseller.ClientLimit > 0 {
-		stat, err := s.Stat(reseller)
-		if err != nil {
-			return err
+		remaining := reseller.ClientLimit - stat.ClientCount
+		if remaining < 0 {
+			remaining = 0
 		}
-		if stat.ClientCount+adding > reseller.ClientLimit {
+		if adding > remaining {
 			return fmt.Errorf("client limit reached: %d of %d used", stat.ClientCount, reseller.ClientLimit)
 		}
 	}
-	return s.CheckTrafficQuota(reseller, addBytes)
+	if reseller.TrafficLimit <= 0 {
+		return nil
+	}
+	return checkTrafficQuotaSnapshot(reseller, stat, addBytes)
 }
 
 // ---------------------------------------------------------------------------
@@ -1401,6 +1440,21 @@ func Round2(v float64) float64 {
 func RoundMoney(v float64, code string) float64 {
 	factor := math.Pow10(moneycurrency.FractionDigits(code))
 	return math.Round(v*factor) / factor
+}
+
+// saturatingAddBytes safely sums persisted byte counters. Negative legacy or
+// corrupt values are ignored rather than reducing a quota usage total.
+func saturatingAddBytes(total, value int64) int64 {
+	if total < 0 {
+		total = 0
+	}
+	if value <= 0 {
+		return total
+	}
+	if total > math.MaxInt64-value {
+		return math.MaxInt64
+	}
+	return total + value
 }
 
 // FormatBytes renders a byte count using binary units.

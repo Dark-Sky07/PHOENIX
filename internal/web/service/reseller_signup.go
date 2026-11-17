@@ -104,6 +104,8 @@ func (s *ResellerSignupService) Info(token string, secret []byte, now time.Time)
 // Register atomically checks current reseller limits, creates a client from
 // the selected reusable plan, and assigns the new client to that reseller.
 func (s *ResellerSignupService) Register(token, email string, secret []byte, now time.Time) (string, bool, error) {
+	resellerSignupQuotaMu.Lock()
+	defer resellerSignupQuotaMu.Unlock()
 	resellerID, templateID, err := parseResellerSignupToken(token, secret, now)
 	if err != nil {
 		return "", false, err

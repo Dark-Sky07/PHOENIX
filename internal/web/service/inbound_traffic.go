@@ -18,6 +18,17 @@ import (
 	"gorm.io/gorm/clause"
 )
 
+// DeletePPPTrafficCheckpoints removes final per-session baselines after the
+// corresponding closed-session spool files have been safely acknowledged.
+func (s *InboundService) DeletePPPTrafficCheckpoints(sessionIDs []string) error {
+	for _, batch := range chunkStrings(sessionIDs, sqlInChunk) {
+		if err := database.GetDB().Where("session_id IN ?", batch).Delete(&model.PPPClientTrafficCounter{}).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *InboundService) AddTraffic(inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic) (needRestart bool, clientsDisabled bool, err error) {
 	var disabledNodeIDs []int
 	err = submitTrafficWrite(func() error {
@@ -31,16 +42,18 @@ func (s *InboundService) AddTraffic(inboundTraffics []*xray.Traffic, clientTraff
 	return
 }
 
-func (s *InboundService) addTrafficLocked(inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic) (bool, bool, []int, error) {
-	var err error
+func (s *InboundService) addTrafficLocked(inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic) (needRestart bool, clientsDisabled bool, disabledNodeIDs []int, err error) {
 	db := database.GetDB()
 	tx := db.Begin()
+	if tx.Error != nil {
+		return false, false, nil, tx.Error
+	}
 
 	defer func() {
 		if err != nil {
 			tx.Rollback()
-		} else {
-			tx.Commit()
+		} else if commitErr := tx.Commit().Error; commitErr != nil {
+			err = commitErr
 		}
 	}()
 	err = s.addInboundTraffic(tx, inboundTraffics)
@@ -102,6 +115,15 @@ func (s *InboundService) addInboundTraffic(tx *gorm.DB, traffics []*xray.Traffic
 func (s *InboundService) addClientTraffic(tx *gorm.DB, traffics []*xray.ClientTraffic) (err error) {
 	if len(traffics) == 0 {
 		return nil
+	}
+	traffics, err = resolvePPPClientTraffic(tx, traffics)
+	if err != nil {
+		return fmt.Errorf("resolve PPP traffic checkpoints: %w", err)
+	}
+	for _, traffic := range traffics {
+		if traffic != nil && (traffic.Up < 0 || traffic.Down < 0) {
+			return errors.New("negative client traffic delta")
+		}
 	}
 	traffics, err = canonicalizeClientTraffic(tx, traffics)
 	if err != nil {
@@ -171,8 +193,8 @@ func (s *InboundService) addClientTraffic(tx *gorm.DB, traffics []*xray.ClientTr
 			continue
 		}
 		delta := trafficByEmail[key]
-		delta.up += traffic.Up
-		delta.down += traffic.Down
+		delta.up = saturatingAddBytes(delta.up, traffic.Up)
+		delta.down = saturatingAddBytes(delta.down, traffic.Down)
 		delta.online = delta.online || traffic.Up > 0 || traffic.Down > 0
 		trafficByEmail[key] = delta
 	}
@@ -182,8 +204,8 @@ func (s *InboundService) addClientTraffic(tx *gorm.DB, traffics []*xray.ClientTr
 		if !ok {
 			continue
 		}
-		dbClientTraffics[dbTrafficIndex].Up += delta.up
-		dbClientTraffics[dbTrafficIndex].Down += delta.down
+		dbClientTraffics[dbTrafficIndex].Up = saturatingAddBytes(dbClientTraffics[dbTrafficIndex].Up, delta.up)
+		dbClientTraffics[dbTrafficIndex].Down = saturatingAddBytes(dbClientTraffics[dbTrafficIndex].Down, delta.down)
 		if delta.online {
 			dbClientTraffics[dbTrafficIndex].LastOnline = now
 		}
@@ -208,6 +230,61 @@ func (s *InboundService) addClientTraffic(tx *gorm.DB, traffics []*xray.ClientTr
 	}
 
 	return nil
+}
+
+// resolvePPPClientTraffic turns absolute PPP interface counters into deltas and
+// advances the per-session checkpoint in the same transaction as client_traffic
+// accounting. Replaying a batch after a process/database restart therefore
+// yields zero additional usage instead of double-counting the session.
+func resolvePPPClientTraffic(tx *gorm.DB, traffics []*xray.ClientTraffic) ([]*xray.ClientTraffic, error) {
+	for _, traffic := range traffics {
+		if traffic == nil || traffic.PPPSessionID == "" {
+			continue
+		}
+		if len(traffic.PPPSessionID) > 128 || traffic.PPPInboundID <= 0 || strings.TrimSpace(traffic.Email) == "" || traffic.PPPRxBytes < 0 || traffic.PPPTxBytes < 0 {
+			return nil, errors.New("invalid PPP traffic checkpoint")
+		}
+		var previous model.PPPClientTrafficCounter
+		result := tx.Where("session_id = ?", traffic.PPPSessionID).Take(&previous)
+		if result.Error != nil && !errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return nil, result.Error
+		}
+		var rxDelta, txDelta int64
+		if result.Error == nil {
+			if transferEmailKey(previous.Email) != transferEmailKey(traffic.Email) || previous.InboundID != traffic.PPPInboundID || previous.RxBytes < 0 || previous.TxBytes < 0 {
+				return nil, errors.New("PPP session checkpoint identity mismatch or corruption")
+			}
+			rxDelta = traffic.PPPRxBytes - previous.RxBytes
+			txDelta = traffic.PPPTxBytes - previous.TxBytes
+			if rxDelta < 0 {
+				rxDelta = traffic.PPPRxBytes // a counter reset starts a new baseline
+			}
+			if txDelta < 0 {
+				txDelta = traffic.PPPTxBytes
+			}
+		} else {
+			rxDelta, txDelta = traffic.PPPRxBytes, traffic.PPPTxBytes
+		}
+		checkpoint := model.PPPClientTrafficCounter{
+			SessionID: traffic.PPPSessionID,
+			Email:     strings.TrimSpace(traffic.Email),
+			InboundID: traffic.PPPInboundID,
+			RxBytes:   traffic.PPPRxBytes,
+			TxBytes:   traffic.PPPTxBytes,
+		}
+		if err := tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "session_id"}},
+			DoUpdates: clause.AssignmentColumns([]string{"email", "inbound_id", "rx_bytes", "tx_bytes"}),
+		}).Create(&checkpoint).Error; err != nil {
+			return nil, err
+		}
+		traffic.Email = strings.TrimSpace(traffic.Email)
+		traffic.Up, traffic.Down = rxDelta, txDelta
+		traffic.PPPSessionID = ""
+		traffic.PPPInboundID = 0
+		traffic.PPPRxBytes, traffic.PPPTxBytes = 0, 0
+	}
+	return traffics, nil
 }
 
 func canonicalizeClientTraffic(tx *gorm.DB, traffics []*xray.ClientTraffic) ([]*xray.ClientTraffic, error) {
@@ -237,8 +314,8 @@ func canonicalizeClientTraffic(tx *gorm.DB, traffics []*xray.ClientTraffic) ([]*
 			byEmail[email] = &cp
 			continue
 		}
-		current.Up += traffic.Up
-		current.Down += traffic.Down
+		current.Up = saturatingAddBytes(current.Up, traffic.Up)
+		current.Down = saturatingAddBytes(current.Down, traffic.Down)
 		current.Enable = current.Enable || traffic.Enable
 	}
 	result := make([]*xray.ClientTraffic, 0, len(byEmail))

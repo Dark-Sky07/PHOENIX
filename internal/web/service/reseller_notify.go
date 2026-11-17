@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/bits"
 	"time"
 
 	"github.com/Dark-Sky07/phoenix/internal/database"
@@ -25,6 +26,20 @@ const (
 	resellerNotifyDefaultCap = 50
 	resellerNotifyMaxCap     = 200
 )
+
+// quotaPercent computes floor(value*100/limit) without overflowing int64.
+// Percentages are clamped at 100; over-quota state is evaluated separately.
+func quotaPercent(value, limit int64) int {
+	if value <= 0 || limit <= 0 {
+		return 0
+	}
+	if value >= limit {
+		return 100
+	}
+	hi, lo := bits.Mul64(uint64(value), 100)
+	pct, _ := bits.Div64(hi, lo, uint64(limit))
+	return int(pct)
+}
 
 // Default thresholds preserve the existing reseller notification behavior.
 const (
@@ -174,7 +189,7 @@ func (s *ResellerNotifyService) EvaluateWithConfig(stat *ResellerStat, config Re
 
 	// Traffic quota: percentage of the limit already allocated to clients.
 	if reseller.TrafficLimit > 0 {
-		pct := int(stat.AllocatedTraffic * 100 / reseller.TrafficLimit)
+		pct := quotaPercent(stat.AllocatedTraffic, reseller.TrafficLimit)
 		quotaOut := stat.AllocatedTraffic > reseller.TrafficLimit || stat.UsedTraffic >= reseller.TrafficLimit
 		switch {
 		case quotaOut:
@@ -196,7 +211,7 @@ func (s *ResellerNotifyService) EvaluateWithConfig(stat *ResellerStat, config Re
 
 	// Client count quota.
 	if reseller.ClientLimit > 0 {
-		pct := stat.ClientCount * 100 / reseller.ClientLimit
+		pct := quotaPercent(int64(stat.ClientCount), int64(reseller.ClientLimit))
 		switch {
 		case stat.ClientCount >= reseller.ClientLimit:
 			if s.claimEpisode(id, ResellerNotifClientMax) {
