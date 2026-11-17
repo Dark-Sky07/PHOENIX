@@ -17,6 +17,8 @@ import (
 
 const chapSecretsPath = "/etc/ppp/chap-secrets"
 
+var pptpdLogwtmpPluginPath = "/usr/lib/pptpd/pptpd-logwtmp.so"
+
 func chapMarkers(i Instance) (string, string) {
 	name := strings.ToUpper(string(i.Protocol)) + " " + strconv.Itoa(i.ID)
 	return "# BEGIN PHOENIX " + name + " MANAGED CREDENTIALS", "# END PHOENIX " + name + " MANAGED CREDENTIALS"
@@ -133,7 +135,10 @@ func renderPPTPDConfig(i Instance, optionsPath string) string {
 		fmt.Fprintf(&b, "listen %s\n", listen)
 	}
 	fmt.Fprintf(&b, "option %s\nlocalip %s\nremoteip %s-%s\n", optionsPath, i.LocalIP, start, end)
-	b.WriteString("stimeout 60\nconnections 100\nlogwtmp\n")
+	b.WriteString("stimeout 60\nconnections 100\n")
+	if _, err := os.Stat(pptpdLogwtmpPluginPath); err == nil {
+		b.WriteString("logwtmp\n")
+	}
 	return b.String()
 }
 
