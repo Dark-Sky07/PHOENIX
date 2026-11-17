@@ -18,4 +18,10 @@ type ClientTraffic struct {
 	Total         int64  `json:"total" form:"total" example:"10737418240"`
 	Reset         int    `json:"reset" form:"reset" gorm:"default:0" example:"0"`
 	LastOnline    int64  `json:"lastOnline" form:"lastOnline" gorm:"default:0" example:"1735680000000"`
+	// PPP fields carry absolute Linux interface counters through the shared
+	// traffic writer. They are never serialized or stored on client_traffics.
+	PPPSessionID string `json:"-" gorm:"-"`
+	PPPInboundID int    `json:"-" gorm:"-"`
+	PPPRxBytes   int64  `json:"-" gorm:"-"`
+	PPPTxBytes   int64  `json:"-" gorm:"-"`
 }

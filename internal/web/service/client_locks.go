@@ -37,6 +37,10 @@ var (
 	// this lock prevents an admin assignment/unassignment from changing the
 	// tenant boundary between validation and the runtime operation.
 	resellerScopeMutationMu sync.RWMutex
+
+	// Concurrent signup requests must not all pass the same reseller quota
+	// snapshot before any of them commits its client allocation.
+	resellerSignupQuotaMu sync.Mutex
 )
 
 func lockInbound(inboundId int) *sync.Mutex {

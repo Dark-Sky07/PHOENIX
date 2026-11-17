@@ -170,3 +170,24 @@ func TestInitDB_DropsLegacyResellerInboundUniqueIndex(t *testing.T) {
 		t.Fatalf("shared reseller inbound mapping rejected after upgrade: %v", err)
 	}
 }
+
+func TestCopyTableSkipsNewModelMissingFromLegacySource(t *testing.T) {
+	src, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: logger.Discard})
+	if err != nil {
+		t.Fatalf("open source sqlite: %v", err)
+	}
+	dst, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: logger.Discard})
+	if err != nil {
+		t.Fatalf("open destination sqlite: %v", err)
+	}
+	if err := dst.AutoMigrate(&model.PPPClientTrafficCounter{}); err != nil {
+		t.Fatalf("migrate destination table: %v", err)
+	}
+	copied, err := copyTable(src, dst, &model.PPPClientTrafficCounter{})
+	if err != nil {
+		t.Fatalf("copy missing legacy table: %v", err)
+	}
+	if copied != 0 {
+		t.Fatalf("copied %d rows from a nonexistent source table, want 0", copied)
+	}
+}

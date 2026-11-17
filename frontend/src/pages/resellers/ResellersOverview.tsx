@@ -1,10 +1,22 @@
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Legend,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
+import {
   Card,
+  Col,
   Empty,
   Input,
   Progress,
+  Row,
   Select,
   Space,
   Table,
@@ -19,6 +31,28 @@ import { SizeFormatter } from '@/utils';
 import type { ResellerStat } from '@/api/queries/useSession';
 
 type StatusFilter = 'all' | 'active' | 'disabled' | 'expired' | 'overQuota';
+
+export interface ResellerOverviewPoint {
+  name: string;
+  clients: number;
+  online: number;
+  usedTraffic: number;
+  allocatedTraffic: number;
+}
+
+/** Return a bounded top-10 snapshot, sorted by measured usage for chart legibility. */
+export function buildResellerOverviewPoints(stats: ResellerStat[]): ResellerOverviewPoint[] {
+  return [...stats]
+    .sort((a, b) => b.usedTraffic - a.usedTraffic)
+    .slice(0, 10)
+    .map((stat) => ({
+      name: stat.reseller.name || stat.reseller.username,
+      clients: stat.clientCount,
+      online: stat.onlineCount,
+      usedTraffic: Math.max(0, stat.usedTraffic),
+      allocatedTraffic: Math.max(0, stat.allocatedTraffic),
+    }));
+}
 
 function formatDate(ts?: number): string {
   if (!ts) return '—';
@@ -62,6 +96,8 @@ export default function ResellersOverview({ stats, loading }: ResellersOverviewP
     const attention = stats.filter((s) => !s.reseller.enable || s.expired || s.overQuota).length;
     return { total, active, disabled, inbounds, clients, online, used, allocated, attention };
   }, [stats]);
+
+  const chartData = useMemo(() => buildResellerOverviewPoints(stats), [stats]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -217,6 +253,51 @@ export default function ResellersOverview({ stats, loading }: ResellersOverviewP
   return (
     <>
       <StatStrip items={statItems} size="compact" className="resellers-stats" />
+
+      <Row gutter={[12, 12]} style={{ marginBottom: 12 }}>
+        <Col xs={24} xl={14}>
+          <Card size="small" title={t('resellers.dashboardTrafficByReseller', 'Traffic by reseller (top 10)')}>
+            {chartData.length === 0 ? (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t('resellers.noData', 'No usage data')} />
+            ) : (
+              <div role="img" aria-label={t('resellers.dashboardTrafficByReseller', 'Traffic by reseller (top 10)')} style={{ width: '100%', height: 270 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={chartData} margin={{ top: 8, right: 12, bottom: 20, left: 8 }}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                    <XAxis dataKey="name" interval={0} angle={-18} textAnchor="end" height={56} />
+                    <YAxis width={80} tickFormatter={(value: number) => SizeFormatter.sizeFormat(value)} />
+                    <Tooltip formatter={(value, name) => [SizeFormatter.sizeFormat(Number(value ?? 0)), String(name)]} />
+                    <Legend />
+                    <Bar dataKey="usedTraffic" name={t('resellers.usedTraffic', 'Used')} fill="#1677ff" radius={[3, 3, 0, 0]} />
+                    <Bar dataKey="allocatedTraffic" name={t('resellers.totalAllocatedTraffic', 'Allocated')} fill="#13c2c2" radius={[3, 3, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+          </Card>
+        </Col>
+        <Col xs={24} xl={10}>
+          <Card size="small" title={t('resellers.dashboardClientsByReseller', 'Clients and online users')}>
+            {chartData.length === 0 ? (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t('resellers.noData', 'No usage data')} />
+            ) : (
+              <div role="img" aria-label={t('resellers.dashboardClientsByReseller', 'Clients and online users')} style={{ width: '100%', height: 270 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={chartData} margin={{ top: 8, right: 10, bottom: 20, left: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                    <XAxis dataKey="name" interval={0} angle={-18} textAnchor="end" height={56} />
+                    <YAxis allowDecimals={false} width={38} />
+                    <Tooltip formatter={(value, name) => [Number(value ?? 0), String(name)]} />
+                    <Legend />
+                    <Bar dataKey="clients" name={t('resellers.totalClients', 'Clients')} fill="#52c41a" radius={[3, 3, 0, 0]} />
+                    <Bar dataKey="online" name={t('resellers.online', 'Online')} fill="#fa8c16" radius={[3, 3, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+          </Card>
+        </Col>
+      </Row>
 
       <Card className="phoenix-table-card">
         <div className="phoenix-toolbar">

@@ -49,6 +49,7 @@ func migrationModels() []any {
 		&model.ClientInbound{},
 		&model.InboundFallback{},
 		&model.NodeClientTraffic{},
+		&model.PPPClientTrafficCounter{},
 		&model.OutboundSubscription{},
 		&model.Reseller{},
 		&model.ResellerInbound{},
@@ -202,6 +203,11 @@ func copyAllModels(src, dst *gorm.DB) error {
 
 func copyTable(src, dst *gorm.DB, mdl any) (int, error) {
 	const batchSize = 500
+	if !src.Migrator().HasTable(mdl) {
+		// The source may predate a newly introduced table/model; its destination
+		// schema is already current, so there is simply nothing to copy yet.
+		return 0, nil
+	}
 
 	sliceType := reflect.SliceOf(reflect.PointerTo(reflect.TypeOf(mdl).Elem()))
 

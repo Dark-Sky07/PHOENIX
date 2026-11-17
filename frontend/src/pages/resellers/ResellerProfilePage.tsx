@@ -34,6 +34,7 @@ import { useMediaQuery } from '@/hooks/useMediaQuery';
 import { useTheme } from '@/hooks/useTheme';
 import type { ResellerStat } from '@/api/queries/useSession';
 import SupportTicketsModal from './SupportTicketsModal';
+import ResellerUsageCharts from './ResellerUsageCharts';
 import './ResellersPage.css';
 
 const JSON_HEADERS = { headers: { 'Content-Type': 'application/json' } } as const;
@@ -550,6 +551,10 @@ export default function ResellerProfilePage() {
                       </Row>
                     </Space>
                   </Card>
+                </Col>
+
+                <Col span={24}>
+                  <ResellerUsageCharts stat={stat} />
                 </Col>
 
                 <Col span={24}>
