@@ -38,10 +38,18 @@ var (
 	// tenant boundary between validation and the runtime operation.
 	resellerScopeMutationMu sync.RWMutex
 
-	// Concurrent signup requests must not all pass the same reseller quota
-	// snapshot before any of them commits its client allocation.
-	resellerSignupQuotaMu sync.Mutex
+	// Guards in-process reseller quota checks through the corresponding write.
+	// This is not a distributed lock or a replacement for database transactions.
+	resellerAllocationMu sync.Mutex
 )
+
+// LockResellerAllocation serializes quota-checked reseller allocation paths in
+// this process, including public signup and panel APIs. Call the returned unlock
+// only after the allocation and its ownership mapping have been persisted.
+func LockResellerAllocation() func() {
+	resellerAllocationMu.Lock()
+	return resellerAllocationMu.Unlock
+}
 
 func lockInbound(inboundId int) *sync.Mutex {
 	inboundMutationLocksMu.Lock()

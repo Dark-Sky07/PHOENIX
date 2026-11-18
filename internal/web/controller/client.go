@@ -261,6 +261,10 @@ func (a *ClientController) exportClients(c *gin.Context) {
 }
 
 func (a *ClientController) importClients(c *gin.Context) {
+	if resellerSession(c) != nil {
+		unlock := service.LockResellerAllocation()
+		defer unlock()
+	}
 	var envelope service.ClientTransferEnvelope
 	if err := c.ShouldBindJSON(&envelope); err != nil {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
@@ -372,6 +376,10 @@ func (a *ClientController) get(c *gin.Context) {
 }
 
 func (a *ClientController) create(c *gin.Context) {
+	if resellerSession(c) != nil {
+		unlock := service.LockResellerAllocation()
+		defer unlock()
+	}
 	var payload service.ClientCreatePayload
 	if err := c.ShouldBindJSON(&payload); err != nil {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
@@ -428,6 +436,10 @@ func (a *ClientController) create(c *gin.Context) {
 }
 
 func (a *ClientController) update(c *gin.Context) {
+	if resellerSession(c) != nil {
+		unlock := service.LockResellerAllocation()
+		defer unlock()
+	}
 	email := c.Param("email")
 	var updated model.Client
 	if err := c.ShouldBindJSON(&updated); err != nil {
@@ -653,6 +665,10 @@ func resellerBulkAllocation(count int, addBytes int64) (int64, error) {
 }
 
 func (a *ClientController) bulkAdjust(c *gin.Context) {
+	if resellerSession(c) != nil {
+		unlock := service.LockResellerAllocation()
+		defer unlock()
+	}
 	var req bulkAdjustRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
@@ -839,6 +855,10 @@ func (a *ClientController) bulkDelete(c *gin.Context) {
 }
 
 func (a *ClientController) bulkCreate(c *gin.Context) {
+	if resellerSession(c) != nil {
+		unlock := service.LockResellerAllocation()
+		defer unlock()
+	}
 	var payloads []service.ClientCreatePayload
 	if err := c.ShouldBindJSON(&payloads); err != nil {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
