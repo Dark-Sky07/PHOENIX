@@ -65,9 +65,18 @@ func (s *InboundService) addTrafficLocked(inboundTraffics []*xray.Traffic, clien
 		return false, false, nil, err
 	}
 
-	needRestart0, count, err := s.autoRenewClients(tx)
-	if err != nil {
-		logger.Warning("Error in renew clients:", err)
+	// Keep the just-written traffic even if a renewal cannot be completed,
+	// while ensuring no partially archived/reset renewal is committed.
+	if err = tx.SavePoint("automatic_renewal").Error; err != nil {
+		return false, false, nil, err
+	}
+	needRestart0, count, renewErr := s.autoRenewClients(tx)
+	if renewErr != nil {
+		if err = tx.RollbackTo("automatic_renewal").Error; err != nil {
+			return false, false, nil, err
+		}
+		needRestart0 = false
+		logger.Warning("Error in renew clients:", renewErr)
 	} else if count > 0 {
 		logger.Debugf("%v clients renewed", count)
 	}
@@ -496,6 +505,7 @@ func (s *InboundService) autoRenewClients(tx *gorm.DB) (bool, int64, error) {
 		}
 		inbounds = append(inbounds, page...)
 	}
+	renewedEmails := make(map[string]struct{})
 	for inbound_index := range inbounds {
 		settings := map[string]any{}
 		json.Unmarshal([]byte(inbounds[inbound_index].Settings), &settings)
@@ -515,6 +525,13 @@ func (s *InboundService) autoRenewClients(tx *gorm.DB) (bool, int64, error) {
 						// client untouched instead of looping or writing a
 						// past expiry.
 						break
+					}
+					key := transferEmailKey(traffic.Email)
+					if _, seen := renewedEmails[key]; !seen {
+						if err := closeResellerRenewalWindowTx(tx, traffic.Email); err != nil {
+							return false, 0, err
+						}
+						renewedEmails[key] = struct{}{}
 					}
 					c["expiryTime"] = newExpiryTime
 					traffics[traffic_index].ExpiryTime = newExpiryTime
@@ -569,7 +586,11 @@ func (s *InboundService) autoRenewClients(tx *gorm.DB) (bool, int64, error) {
 	}
 	// A renewed client starts a fresh quota window: drop the cross-panel rows
 	// too, or the stale pushed totals would re-deplete it immediately.
-	if err = clearGlobalTraffic(tx, renewEmails...); err != nil {
+	completedEmails := make([]string, 0, len(renewedEmails))
+	for email := range renewedEmails {
+		completedEmails = append(completedEmails, email)
+	}
+	if err = clearGlobalTraffic(tx, completedEmails...); err != nil {
 		return false, 0, err
 	}
 	if p != nil {

@@ -74,6 +74,7 @@ export interface ResellerTrafficArchive {
   clientRecordId: number;
   email: string;
   consumedBytes: number;
+  priorConsumedBytes: number;
   createdAt: number;
   updatedAt: number;
 }

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"strings"
 	"time"
 
@@ -72,6 +73,47 @@ func archiveResellerClientUsageTx(tx *gorm.DB, client *model.ClientRecord, resel
 				"updated_at":     time.Now().UnixMilli(),
 			}),
 		}).Create(&archive).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// closeResellerRenewalWindowTx records the current window before automatic
+// renewal clears counters. It must run within the same writer transaction as
+// the reset, once per client identity. Historical unmapped archives are rolled
+// forward too, but only the current owner receives a new snapshot.
+func closeResellerRenewalWindowTx(tx *gorm.DB, email string) error {
+	key := transferEmailKey(email)
+	var mappings []model.ResellerClient
+	if err := tx.Where("LOWER(TRIM(email)) = ?", key).Find(&mappings).Error; err != nil {
+		return err
+	}
+	var clients []model.ClientRecord
+	if err := tx.Where("LOWER(TRIM(email)) = ?", key).Find(&clients).Error; err != nil {
+		return err
+	}
+	if len(clients) != 1 {
+		if len(mappings) != 0 {
+			return errors.New("cannot renew reseller client without a unique client record")
+		}
+		return nil
+	}
+	client := &clients[0]
+	if err := archiveResellerClientUsageTx(tx, client, 0); err != nil {
+		return err
+	}
+	var archives []model.ResellerTrafficArchive
+	if err := tx.Where("client_record_id = ?", client.Id).Find(&archives).Error; err != nil {
+		return err
+	}
+	for _, entry := range archives {
+		prior := saturatingAddBytes(entry.PriorConsumedBytes, entry.ConsumedBytes)
+		if err := tx.Model(&model.ResellerTrafficArchive{}).Where("id = ?", entry.Id).Updates(map[string]any{
+			"prior_consumed_bytes": prior,
+			"consumed_bytes":       0,
+			"updated_at":           time.Now().UnixMilli(),
+		}).Error; err != nil {
 			return err
 		}
 	}

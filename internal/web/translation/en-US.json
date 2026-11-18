@@ -2320,9 +2320,10 @@
   "resellers": {
     "resetTemporarilyUnavailable": "Traffic reset is temporarily unavailable for resellers; contact the administrator.",
     "archiveTitle": "Traffic snapshots",
-    "archiveDescription": "Latest 500 persisted traffic snapshots taken on deletion or unassignment. A snapshot can exist for a failed deletion; live usage is not counted twice. Runtime traffic not yet persisted is not included.",
+    "archiveDescription": "Latest 500 persisted traffic records from deletion, unassignment or automatic renewal. Prior windows and current snapshots are shown separately. Runtime traffic not yet persisted and other reset paths are not fully accounted.",
     "archiveClientId": "Client record ID",
-    "archiveUsage": "Recorded usage",
+    "archivePriorUsage": "Completed renewal windows",
+    "archiveUsage": "Current window snapshot",
     "archiveUpdated": "Last snapshot (UTC)",
     "historyTitle": "Historical sales",
     "historyWarning": "Manual records are not verified payments. Use a unique reference and check for duplicates against existing sales; entries cannot be edited here.",
