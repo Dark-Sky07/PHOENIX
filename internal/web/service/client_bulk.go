@@ -759,35 +759,43 @@ func (s *ClientService) BulkDelete(inboundSvc *InboundService, emails []string, 
 	}
 
 	if len(successIds) > 0 {
-		for _, email := range successEmails {
-			if err := archiveResellerClientUsage(recordsByEmail[email]); err != nil {
-				return result, needRestart, err
-			}
-		}
-		for _, batch := range chunkInts(successIds, sqlInChunk) {
-			if err := db.Where("client_id IN ?", batch).Delete(&model.ClientInbound{}).Error; err != nil {
-				return result, needRestart, err
-			}
-		}
-		if !keepTraffic && len(successEmails) > 0 {
-			for _, batch := range chunkStrings(successEmails, sqlInChunk) {
-				if err := inboundSvc.delClientStatsByEmails(db, batch); err != nil {
-					return result, needRestart, err
+		err := submitTrafficWrite(func() error {
+			return database.GetDB().Transaction(func(tx *gorm.DB) error {
+				for _, email := range successEmails {
+					if err := archiveResellerClientUsageTx(tx, recordsByEmail[email], 0); err != nil {
+						return err
+					}
 				}
-				if err := db.Where("LOWER(TRIM(client_email)) IN ?", batch).Delete(&model.InboundClientIps{}).Error; err != nil {
-					return result, needRestart, err
+				for _, batch := range chunkInts(successIds, sqlInChunk) {
+					if err := tx.Where("client_id IN ?", batch).Delete(&model.ClientInbound{}).Error; err != nil {
+						return err
+					}
 				}
-			}
-		}
-		for _, batch := range chunkInts(successIds, sqlInChunk) {
-			if err := db.Where("id IN ?", batch).Delete(&model.ClientRecord{}).Error; err != nil {
-				return result, needRestart, err
-			}
-		}
-		for _, batch := range chunkStrings(successEmails, sqlInChunk) {
-			if err := db.Where("LOWER(TRIM(email)) IN ?", batch).Delete(&model.ResellerClient{}).Error; err != nil {
-				return result, needRestart, err
-			}
+				if !keepTraffic {
+					for _, batch := range chunkStrings(successEmails, sqlInChunk) {
+						if err := inboundSvc.delClientStatsByEmails(tx, batch); err != nil {
+							return err
+						}
+						if err := tx.Where("LOWER(TRIM(client_email)) IN ?", batch).Delete(&model.InboundClientIps{}).Error; err != nil {
+							return err
+						}
+					}
+				}
+				for _, batch := range chunkInts(successIds, sqlInChunk) {
+					if err := tx.Where("id IN ?", batch).Delete(&model.ClientRecord{}).Error; err != nil {
+						return err
+					}
+				}
+				for _, batch := range chunkStrings(successEmails, sqlInChunk) {
+					if err := tx.Where("LOWER(TRIM(email)) IN ?", batch).Delete(&model.ResellerClient{}).Error; err != nil {
+						return err
+					}
+				}
+				return nil
+			})
+		})
+		if err != nil {
+			return result, needRestart, err
 		}
 	}
 

@@ -467,27 +467,32 @@ func (s *ClientService) Delete(inboundSvc *InboundService, id int, keepTraffic b
 		}
 	}
 
-	if err := archiveResellerClientUsage(existing); err != nil {
+	err = submitTrafficWrite(func() error {
+		return database.GetDB().Transaction(func(tx *gorm.DB) error {
+			if err := archiveResellerClientUsageTx(tx, existing, 0); err != nil {
+				return err
+			}
+			if err := tx.Where("client_id = ?", id).Delete(&model.ClientInbound{}).Error; err != nil {
+				return err
+			}
+			if !keepTraffic && existing.Email != "" {
+				if err := inboundSvc.DelClientStat(tx, existing.Email); err != nil {
+					return err
+				}
+				if err := tx.Where("LOWER(TRIM(client_email)) = LOWER(?)", existing.Email).Delete(&model.InboundClientIps{}).Error; err != nil {
+					return err
+				}
+			}
+			if err := tx.Delete(&model.ClientRecord{}, id).Error; err != nil {
+				return err
+			}
+			return tx.Where("LOWER(TRIM(email)) = LOWER(?)", existing.Email).Delete(&model.ResellerClient{}).Error
+		})
+	})
+	if err != nil {
 		return needRestart, err
 	}
-	db := database.GetDB()
-	if err := db.Where("client_id = ?", id).Delete(&model.ClientInbound{}).Error; err != nil {
-		return needRestart, err
-	}
-	if !keepTraffic && existing.Email != "" {
-		if err := inboundSvc.DelClientStat(db, existing.Email); err != nil {
-			return needRestart, err
-		}
-		if err := db.Where("LOWER(TRIM(client_email)) = LOWER(?)", existing.Email).Delete(&model.InboundClientIps{}).Error; err != nil {
-			return needRestart, err
-		}
-	}
-	if err := db.Delete(&model.ClientRecord{}, id).Error; err != nil {
-		return needRestart, err
-	}
-	if err := db.Where("LOWER(TRIM(email)) = LOWER(?)", existing.Email).Delete(&model.ResellerClient{}).Error; err != nil {
-		return needRestart, err
-	}
+
 	return needRestart, nil
 }
 
@@ -786,38 +791,38 @@ func (s *ClientService) DeleteByEmailForInbounds(inboundSvc *InboundService, ema
 	if !removed {
 		return needRestart, nil
 	}
-	if err := archiveResellerClientUsage(rec); err != nil {
-		return needRestart, err
-	}
-
-	remainingIDs, err := s.GetInboundIdsForRecord(rec.Id)
+	// The last snapshot and final database cleanup are one writer transaction.
+	// Inbound/runtime removals above remain separate and can be retried.
+	err = submitTrafficWrite(func() error {
+		return database.GetDB().Transaction(func(tx *gorm.DB) error {
+			if err := archiveResellerClientUsageTx(tx, rec, 0); err != nil {
+				return err
+			}
+			var remaining int64
+			if err := tx.Model(&model.ClientInbound{}).Where("client_id = ?", rec.Id).Count(&remaining).Error; err != nil {
+				return err
+			}
+			if remaining > 0 {
+				return nil
+			}
+			if !keepTraffic {
+				if err := inboundSvc.DelClientStat(tx, rec.Email); err != nil {
+					return err
+				}
+				if err := tx.Where("LOWER(TRIM(client_email)) = LOWER(?)", rec.Email).Delete(&model.InboundClientIps{}).Error; err != nil {
+					return err
+				}
+			}
+			if err := tx.Delete(&model.ClientRecord{}, rec.Id).Error; err != nil {
+				return err
+			}
+			return tx.Where("LOWER(TRIM(email)) = LOWER(?)", rec.Email).Delete(&model.ResellerClient{}).Error
+		})
+	})
 	if err != nil {
 		return needRestart, err
 	}
-	if len(remainingIDs) > 0 {
-		// An admin-owned or another reseller-owned association remains. Never
-		// delete its shared stats or canonical credentials.
-		return needRestart, nil
-	}
 
-	db := database.GetDB()
-	if !keepTraffic {
-		if err := db.Where("LOWER(TRIM(email)) = LOWER(?)", rec.Email).Delete(&xray.ClientTraffic{}).Error; err != nil {
-			return needRestart, err
-		}
-		if err := clearGlobalTraffic(db, rec.Email); err != nil {
-			return needRestart, err
-		}
-		if err := db.Where("LOWER(TRIM(client_email)) = LOWER(?)", rec.Email).Delete(&model.InboundClientIps{}).Error; err != nil {
-			return needRestart, err
-		}
-	}
-	if err := db.Delete(&model.ClientRecord{}, rec.Id).Error; err != nil {
-		return needRestart, err
-	}
-	if err := db.Where("LOWER(TRIM(email)) = LOWER(?)", rec.Email).Delete(&model.ResellerClient{}).Error; err != nil {
-		return needRestart, err
-	}
 	return needRestart, nil
 }
 
