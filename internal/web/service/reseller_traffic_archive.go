@@ -79,11 +79,11 @@ func archiveResellerClientUsageTx(tx *gorm.DB, client *model.ClientRecord, resel
 	return nil
 }
 
-// closeResellerRenewalWindowTx records the current window before automatic
-// renewal clears counters. It must run within the same writer transaction as
-// the reset, once per client identity. Historical unmapped archives are rolled
-// forward too, but only the current owner receives a new snapshot.
-func closeResellerRenewalWindowTx(tx *gorm.DB, email string) error {
+// closeResellerTrafficWindowTx records the current window before counters are
+// cleared. Call inside the traffic writer's reset transaction. Historical
+// unmapped archives are rolled forward too; only the current owner receives a
+// new snapshot. Repeating after a successful reset records an empty window.
+func closeResellerTrafficWindowTx(tx *gorm.DB, email string) error {
 	key := transferEmailKey(email)
 	var mappings []model.ResellerClient
 	if err := tx.Where("LOWER(TRIM(email)) = ?", key).Find(&mappings).Error; err != nil {
@@ -114,6 +114,26 @@ func closeResellerRenewalWindowTx(tx *gorm.DB, email string) error {
 			"consumed_bytes":       0,
 			"updated_at":           time.Now().UnixMilli(),
 		}).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// closeResellerTrafficWindowsTx deduplicates identities so bulk reset never
+// closes the same pre-reset counter twice.
+func closeResellerTrafficWindowsTx(tx *gorm.DB, emails []string) error {
+	seen := make(map[string]struct{}, len(emails))
+	for _, email := range emails {
+		key := transferEmailKey(email)
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		if err := closeResellerTrafficWindowTx(tx, key); err != nil {
 			return err
 		}
 	}

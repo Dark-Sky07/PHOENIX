@@ -1306,7 +1306,7 @@ func (s *ResellerService) Stat(reseller *model.Reseller) (*ResellerStat, error) 
 		return nil, err
 	}
 	for _, entry := range archived {
-		// Completed renewal windows are additive to the current window.
+		// Completed usage windows are additive to the current window.
 		stat.UsedTraffic = saturatingAddBytes(stat.UsedTraffic, entry.PriorConsumedBytes)
 		stat.AllocatedTraffic = saturatingAddBytes(stat.AllocatedTraffic, entry.PriorConsumedBytes)
 		if client, exists := activeClients[entry.ClientRecordId]; exists {

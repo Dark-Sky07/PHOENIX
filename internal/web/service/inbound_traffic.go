@@ -528,7 +528,7 @@ func (s *InboundService) autoRenewClients(tx *gorm.DB) (bool, int64, error) {
 					}
 					key := transferEmailKey(traffic.Email)
 					if _, seen := renewedEmails[key]; !seen {
-						if err := closeResellerRenewalWindowTx(tx, traffic.Email); err != nil {
+						if err := closeResellerTrafficWindowTx(tx, traffic.Email); err != nil {
 							return false, 0, err
 						}
 						renewedEmails[key] = struct{}{}
@@ -690,13 +690,17 @@ func (s *InboundService) delClientStatsByEmails(tx *gorm.DB, emails []string) er
 
 func (s *InboundService) ResetClientTrafficByEmail(clientEmail string) error {
 	return submitTrafficWrite(func() error {
-		db := database.GetDB()
-		if err := clearGlobalTraffic(db, clientEmail); err != nil {
-			return err
-		}
-		return db.Model(xray.ClientTraffic{}).
-			Where("LOWER(TRIM(email)) = LOWER(?)", strings.TrimSpace(clientEmail)).
-			Updates(map[string]any{"enable": true, "up": 0, "down": 0}).Error
+		return database.GetDB().Transaction(func(tx *gorm.DB) error {
+			if err := closeResellerTrafficWindowTx(tx, clientEmail); err != nil {
+				return err
+			}
+			if err := clearGlobalTraffic(tx, clientEmail); err != nil {
+				return err
+			}
+			return tx.Model(xray.ClientTraffic{}).
+				Where("LOWER(TRIM(email)) = LOWER(?)", strings.TrimSpace(clientEmail)).
+				Updates(map[string]any{"enable": true, "up": 0, "down": 0}).Error
+		})
 	})
 }
 
@@ -790,11 +794,16 @@ func (s *InboundService) resetClientTrafficLocked(id int, clientEmail string) (b
 	traffic.Enable = true
 
 	db := database.GetDB()
-	err = db.Save(traffic).Error
+	err = db.Transaction(func(tx *gorm.DB) error {
+		if err := closeResellerTrafficWindowTx(tx, clientEmail); err != nil {
+			return err
+		}
+		if err := tx.Save(traffic).Error; err != nil {
+			return err
+		}
+		return clearGlobalTraffic(tx, clientEmail)
+	})
 	if err != nil {
-		return false, err
-	}
-	if err := clearGlobalTraffic(db, clientEmail); err != nil {
 		return false, err
 	}
 

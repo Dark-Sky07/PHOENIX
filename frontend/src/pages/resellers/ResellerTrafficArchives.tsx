@@ -8,12 +8,12 @@ export default function ResellerTrafficArchives({ rows }: { rows: ResellerTraffi
   return (
     <Card size="small" title={t('resellers.archiveTitle', 'Traffic snapshots')}>
       <Typography.Paragraph type="secondary">
-        {t('resellers.archiveDescription', 'Latest 500 persisted traffic records from deletion, unassignment or automatic renewal. Prior windows and current snapshots are shown separately. Runtime traffic not yet persisted and other reset paths are not fully accounted.')}
+        {t('resellers.archiveDescription', 'Latest 500 persisted traffic records from deletion, unassignment, automatic renewal or supported resets. Prior windows and current snapshots are shown separately. Runtime traffic not yet persisted and manual counter edits are not fully accounted.')}
       </Typography.Paragraph>
       <Table<ResellerTrafficArchive> size="small" rowKey="id" dataSource={rows} pagination={{ pageSize: 10 }} columns={[
         { title: t('pages.clients.email'), dataIndex: 'email' },
         { title: t('resellers.archiveClientId', 'Client record ID'), dataIndex: 'clientRecordId' },
-        { title: t('resellers.archivePriorUsage', 'Completed renewal windows'), dataIndex: 'priorConsumedBytes', render: (value: number) => SizeFormatter.sizeFormat(value || 0) },
+        { title: t('resellers.archivePriorUsage', 'Completed traffic windows'), dataIndex: 'priorConsumedBytes', render: (value: number) => SizeFormatter.sizeFormat(value || 0) },
         { title: t('resellers.archiveUsage', 'Current window snapshot'), dataIndex: 'consumedBytes', render: (value: number) => SizeFormatter.sizeFormat(value) },
         { title: t('resellers.archiveUpdated', 'Last snapshot (UTC)'), dataIndex: 'updatedAt', render: (value: number) => value ? new Date(value).toISOString() : '—' },
       ]} />
