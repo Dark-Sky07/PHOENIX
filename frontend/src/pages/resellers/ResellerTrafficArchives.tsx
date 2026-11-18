@@ -8,7 +8,7 @@ export default function ResellerTrafficArchives({ rows }: { rows: ResellerTraffi
   return (
     <Card size="small" title={t('resellers.archiveTitle', 'Traffic snapshots')}>
       <Typography.Paragraph type="secondary">
-        {t('resellers.archiveDescription', 'Latest 500 deletion-boundary snapshots of persisted traffic. A snapshot can exist for a failed deletion; live usage is not counted twice. Runtime traffic not yet persisted is not included.')}
+        {t('resellers.archiveDescription', 'Latest 500 persisted traffic snapshots taken on deletion or unassignment. A snapshot can exist for a failed deletion; live usage is not counted twice. Runtime traffic not yet persisted is not included.')}
       </Typography.Paragraph>
       <Table<ResellerTrafficArchive> size="small" rowKey="id" dataSource={rows} pagination={{ pageSize: 10 }} columns={[
         { title: t('pages.clients.email'), dataIndex: 'email' },

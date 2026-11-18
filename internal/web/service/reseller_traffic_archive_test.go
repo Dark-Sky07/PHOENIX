@@ -148,3 +148,61 @@ func TestScopedBulkDeleteKeepsConsumedTraffic(t *testing.T) {
 		t.Fatalf("bulk consumption lost: %+v %v", stat, err)
 	}
 }
+
+func TestUnassignPreservesUsageAndReassignmentDoesNotDoubleCount(t *testing.T) {
+	setupBulkDB(t)
+	db := database.GetDB()
+	r := model.Reseller{Username: "unassign-archive", Password: "hash", Enable: true, TrafficLimit: 1000}
+	client := model.ClientRecord{Email: "unassign@example.test", TotalGB: 500, Enable: true}
+	for _, row := range []any{&r, &client} {
+		if err := db.Create(row).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Create(&model.ResellerClient{ResellerId: r.Id, Email: client.Email}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&xray.ClientTraffic{Email: client.Email, Up: 120, Down: 180}).Error; err != nil {
+		t.Fatal(err)
+	}
+	svc := &ResellerService{}
+	if err := svc.UnassignClient(r.Id, " UNASSIGN@example.test "); err != nil {
+		t.Fatal(err)
+	}
+	stat, err := svc.Stat(&r)
+	if err != nil || stat.UsedTraffic != 300 || stat.AllocatedTraffic != 300 || stat.RemainingTraffic != 700 {
+		t.Fatalf("unassign lost consumption: %+v %v", stat, err)
+	}
+	if err := svc.AssignClient(r.Id, client.Email); err != nil {
+		t.Fatal(err)
+	}
+	stat, err = svc.Stat(&r)
+	if err != nil || stat.UsedTraffic != 300 || stat.AllocatedTraffic != 500 {
+		t.Fatalf("reassignment double counted: %+v %v", stat, err)
+	}
+}
+
+func TestUnassignRollsBackWhenArchiveFails(t *testing.T) {
+	setupBulkDB(t)
+	db := database.GetDB()
+	r := model.Reseller{Username: "unassign-rollback", Password: "hash", Enable: true}
+	client := model.ClientRecord{Email: "rollback@example.test", Enable: true}
+	for _, row := range []any{&r, &client} {
+		if err := db.Create(row).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Create(&model.ResellerClient{ResellerId: r.Id, Email: client.Email}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Migrator().DropTable(&model.ResellerTrafficArchive{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&ResellerService{}).UnassignClient(r.Id, client.Email); err == nil {
+		t.Fatal("expected archive failure")
+	}
+	var count int64
+	if err := db.Model(&model.ResellerClient{}).Where("reseller_id = ?", r.Id).Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("mapping removed on archive failure: %d %v", count, err)
+	}
+}

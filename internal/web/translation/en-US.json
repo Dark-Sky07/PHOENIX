@@ -2320,7 +2320,7 @@
   "resellers": {
     "resetTemporarilyUnavailable": "Traffic reset is temporarily unavailable for resellers; contact the administrator.",
     "archiveTitle": "Traffic snapshots",
-    "archiveDescription": "Latest 500 deletion-boundary snapshots of persisted traffic. A snapshot can exist for a failed deletion; live usage is not counted twice. Runtime traffic not yet persisted is not included.",
+    "archiveDescription": "Latest 500 persisted traffic snapshots taken on deletion or unassignment. A snapshot can exist for a failed deletion; live usage is not counted twice. Runtime traffic not yet persisted is not included.",
     "archiveClientId": "Client record ID",
     "archiveUsage": "Recorded usage",
     "archiveUpdated": "Last snapshot (UTC)",

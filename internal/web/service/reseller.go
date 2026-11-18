@@ -1136,17 +1136,38 @@ func (s *ResellerService) UnassignClients(resellerId int, emails []string) error
 	if len(keys) == 0 {
 		return errors.New("at least one email is required")
 	}
-	db := database.GetDB()
-	return db.Transaction(func(tx *gorm.DB) error {
-		var reseller model.Reseller
-		if err := tx.Where("id = ?", resellerId).First(&reseller).Error; err != nil {
-			if database.IsNotFound(err) {
-				return errors.New("reseller not found")
+	return submitTrafficWrite(func() error {
+		return database.GetDB().Transaction(func(tx *gorm.DB) error {
+			var reseller model.Reseller
+			if err := tx.Where("id = ?", resellerId).First(&reseller).Error; err != nil {
+				if database.IsNotFound(err) {
+					return errors.New("reseller not found")
+				}
+				return err
 			}
-			return err
-		}
-		return tx.Where("reseller_id = ? AND LOWER(TRIM(email)) IN ?", resellerId, keys).
-			Delete(&model.ResellerClient{}).Error
+			for _, batch := range chunkStrings(keys, sqlInChunk) {
+				var mappings []model.ResellerClient
+				if err := tx.Where("reseller_id = ? AND LOWER(TRIM(email)) IN ?", resellerId, batch).Find(&mappings).Error; err != nil {
+					return err
+				}
+				for _, mapping := range mappings {
+					var clients []model.ClientRecord
+					if err := tx.Where("LOWER(TRIM(email)) = ?", transferEmailKey(mapping.Email)).Find(&clients).Error; err != nil {
+						return err
+					}
+					if len(clients) != 1 {
+						return errors.New("cannot unassign client without a unique client record for usage accounting")
+					}
+					if err := archiveResellerClientUsageTx(tx, &clients[0], resellerId); err != nil {
+						return err
+					}
+				}
+				if err := tx.Where("reseller_id = ? AND LOWER(TRIM(email)) IN ?", resellerId, batch).Delete(&model.ResellerClient{}).Error; err != nil {
+					return err
+				}
+			}
+			return nil
+		})
 	})
 }
 

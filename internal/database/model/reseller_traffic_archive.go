@@ -1,7 +1,8 @@
 package model
 
 // ResellerTrafficArchive records a monotonic snapshot of measured usage at a
-// client deletion boundary. It survives deletion of the client and mapping.
+// client deletion or unassignment boundary. It survives removal of the client
+// and mapping; it is not a complete lifetime ledger across counter resets.
 type ResellerTrafficArchive struct {
 	Id             int    `json:"id" gorm:"primaryKey;autoIncrement"`
 	ResellerId     int    `json:"resellerId" gorm:"column:reseller_id;uniqueIndex:idx_reseller_traffic_archive_client;index;not null"`
