@@ -1306,13 +1306,12 @@ func (s *InboundService) GetClientTrafficByEmailForInbounds(email string, allowe
 }
 
 func (s *InboundService) updateClientTrafficByEmail(email string, upload int64, download int64) error {
-	db := database.GetDB()
-	err := db.Model(xray.ClientTraffic{}).
-		Where("LOWER(TRIM(email)) = LOWER(?)", strings.TrimSpace(email)).
-		Updates(map[string]any{
-			"up":   upload,
-			"down": download,
-		}).Error
+	if upload < 0 || download < 0 {
+		return errors.New("traffic counters cannot be negative")
+	}
+	err := database.GetDB().Transaction(func(tx *gorm.DB) error {
+		return rewriteResellerTrafficCountersTx(tx, email, upload, download)
+	})
 	if err != nil {
 		logger.Warningf("Error updating ClientTraffic with email %s: %v", email, err)
 	}

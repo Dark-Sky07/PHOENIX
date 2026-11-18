@@ -139,3 +139,74 @@ func closeResellerTrafficWindowsTx(tx *gorm.DB, emails []string) error {
 	}
 	return nil
 }
+
+// rewriteResellerTrafficCountersTx preserves a current owner's usage floor when
+// an administrator reduces counters. Only the lost difference moves to prior
+// usage, so increasing counters is not double charged. Unassigned owners keep
+// their previously recorded snapshots rather than acquiring later usage.
+func rewriteResellerTrafficCountersTx(tx *gorm.DB, email string, upload, download int64) error {
+	key := transferEmailKey(email)
+	var rows []xray.ClientTraffic
+	if err := tx.Where("LOWER(TRIM(email)) = ?", key).Find(&rows).Error; err != nil {
+		return err
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	if len(rows) != 1 {
+		return errors.New("cannot rewrite ambiguous traffic counters")
+	}
+	var mappings []model.ResellerClient
+	if err := tx.Where("LOWER(TRIM(email)) = ?", key).Find(&mappings).Error; err != nil {
+		return err
+	}
+	var clients []model.ClientRecord
+	if err := tx.Where("LOWER(TRIM(email)) = ?", key).Find(&clients).Error; err != nil {
+		return err
+	}
+	if len(clients) != 1 && len(mappings) > 0 {
+		return errors.New("cannot rewrite reseller traffic without a unique client record")
+	}
+	if len(clients) == 1 {
+		client := &clients[0]
+		if err := archiveResellerClientUsageTx(tx, client, 0); err != nil {
+			return err
+		}
+		var globals []model.ClientGlobalTraffic
+		if err := tx.Where("LOWER(TRIM(email)) = ?", key).Find(&globals).Error; err != nil {
+			return err
+		}
+		globalUp, globalDown := int64(0), int64(0)
+		for _, row := range globals {
+			globalUp = max(globalUp, row.Up)
+			globalDown = max(globalDown, row.Down)
+		}
+		newUsed := saturatingAddBytes(max(upload, globalUp), max(download, globalDown))
+		mapped := make(map[int]struct{}, len(mappings))
+		for _, mapping := range mappings {
+			mapped[mapping.ResellerId] = struct{}{}
+		}
+		var archives []model.ResellerTrafficArchive
+		if err := tx.Where("client_record_id = ?", client.Id).Find(&archives).Error; err != nil {
+			return err
+		}
+		for _, entry := range archives {
+			closed := entry.ConsumedBytes
+			if _, active := mapped[entry.ResellerId]; active {
+				if closed > newUsed {
+					closed -= newUsed
+				} else {
+					closed = 0
+				}
+			}
+			if err := tx.Model(&model.ResellerTrafficArchive{}).Where("id = ?", entry.Id).Updates(map[string]any{
+				"prior_consumed_bytes": saturatingAddBytes(entry.PriorConsumedBytes, closed),
+				"consumed_bytes":       0,
+				"updated_at":           time.Now().UnixMilli(),
+			}).Error; err != nil {
+				return err
+			}
+		}
+	}
+	return tx.Model(&xray.ClientTraffic{}).Where("id = ?", rows[0].Id).Updates(map[string]any{"up": upload, "down": download}).Error
+}
