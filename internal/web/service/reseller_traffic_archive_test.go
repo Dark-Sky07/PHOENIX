@@ -102,3 +102,49 @@ func TestResellerArchiveMonotonicAndSurvivesRecreatedEmail(t *testing.T) {
 		t.Fatalf("recreated client reused prior consumption: %+v %v", stat, err)
 	}
 }
+
+func TestScopedBulkDeleteKeepsConsumedTraffic(t *testing.T) {
+	setupBulkDB(t)
+	db := database.GetDB()
+	r := model.Reseller{Username: "bulk-archive", Password: "hash", Enable: true, TrafficLimit: 1000}
+	if err := db.Create(&r).Error; err != nil {
+		t.Fatal(err)
+	}
+	inbound := model.Inbound{Tag: "bulk-archive-inbound", Protocol: model.VLESS, Settings: `{"clients":[]}`}
+	if err := db.Create(&inbound).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&model.ResellerInbound{ResellerId: r.Id, InboundId: inbound.Id}).Error; err != nil {
+		t.Fatal(err)
+	}
+	var emails []string
+	for _, email := range []string{"archive-a@example.test", "archive-b@example.test"} {
+		client := model.ClientRecord{Email: email, TotalGB: 200, Enable: true}
+		if err := db.Create(&client).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Create(&model.ResellerClient{ResellerId: r.Id, Email: email}).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Create(&model.ClientInbound{ClientId: client.Id, InboundId: inbound.Id}).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Create(&xray.ClientTraffic{Email: email, Up: 30, Down: 70}).Error; err != nil {
+			t.Fatal(err)
+		}
+		emails = append(emails, email)
+	}
+	// Simulate a missing inbound after a legacy migration; the scoped deletion
+	// removes its orphaned associations and still needs to preserve usage.
+	if err := db.Delete(&model.Inbound{}, inbound.Id).Error; err != nil {
+		t.Fatal(err)
+	}
+	result, _, err := (&ClientService{}).BulkDeleteForReseller(&InboundService{}, r.Id, emails, false, []int{inbound.Id})
+	if err != nil || result.Deleted != 2 {
+		t.Fatalf("bulk deletion: %+v %v", result, err)
+	}
+	stat, err := (&ResellerService{}).Stat(&r)
+	if err != nil || stat.AllocatedTraffic != 200 || stat.UsedTraffic != 200 || stat.RemainingTraffic != 800 {
+		t.Fatalf("bulk consumption lost: %+v %v", stat, err)
+	}
+}
