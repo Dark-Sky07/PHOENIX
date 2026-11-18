@@ -50,3 +50,30 @@ func TestResellerGlobalResetRollsBackOnArchiveFailure(t *testing.T) {
 		t.Fatalf("global reset was committed after archive failure: %+v", row)
 	}
 }
+
+func TestResellerGlobalResetMultipleMasters(t *testing.T) {
+	r, client := seedResellerRenewal(t)
+	svc := &InboundService{}
+	push := func(master string, up, down int64) {
+		t.Helper()
+		if err := svc.AcceptGlobalTraffic(master, []*xray.ClientTraffic{{Email: client.Email, Up: up, Down: down}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check := func() {
+		t.Helper()
+		stat, err := (&ResellerService{}).Stat(&r)
+		if err != nil || stat.UsedTraffic != 900 {
+			t.Fatalf("usage after master reset: %+v %v", stat, err)
+		}
+	}
+	push("master-a", 400, 500)
+	push("master-b", 350, 450)
+	check()
+	push("master-a", 0, 0)
+	check()
+	push("master-b", 0, 0)
+	check()
+	push("master-a", 0, 0)
+	check()
+}

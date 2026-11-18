@@ -82,17 +82,20 @@ func (s *InboundService) AcceptGlobalTraffic(masterGuid string, traffics []*xray
 			// A lower master counter can be a remote reset. Snapshot reseller
 			// usage before overwriting it, then transfer the lost effective
 			// difference to the prior-usage ledger in the same transaction.
+			previous := make(map[string]model.ClientGlobalTraffic, len(rows))
+			for _, batch := range chunkStrings(known, sqlInChunk) {
+				var oldRows []model.ClientGlobalTraffic
+				if err := tx.Where("master_guid = ? AND email IN ?", masterGuid, batch).Find(&oldRows).Error; err != nil {
+					return err
+				}
+				for _, old := range oldRows {
+					previous[old.Email] = old
+				}
+			}
 			changed := make([]string, 0)
 			for _, row := range rows {
-				var old model.ClientGlobalTraffic
-				result := tx.Where("master_guid = ? AND email = ?", row.MasterGuid, row.Email).First(&old)
-				if errors.Is(result.Error, gorm.ErrRecordNotFound) {
-					continue
-				}
-				if result.Error != nil {
-					return result.Error
-				}
-				if row.Up >= old.Up && row.Down >= old.Down {
+				old, exists := previous[row.Email]
+				if !exists || (row.Up >= old.Up && row.Down >= old.Down) {
 					continue
 				}
 				key := transferEmailKey(row.Email)
