@@ -736,7 +736,8 @@ func (s *ClientService) BulkDelete(inboundSvc *InboundService, emails []string, 
 
 	needRestart := false
 	for inboundId, ibEmails := range emailsByInbound {
-		ibResult := s.bulkDelInboundClients(inboundSvc, inboundId, ibEmails, recordsByEmail, false)
+		// Keep traffic until the successful clients have been archived.
+		ibResult := s.bulkDelInboundClients(inboundSvc, inboundId, ibEmails, recordsByEmail, true)
 		if ibResult.needRestart {
 			needRestart = true
 		}
@@ -758,6 +759,11 @@ func (s *ClientService) BulkDelete(inboundSvc *InboundService, emails []string, 
 	}
 
 	if len(successIds) > 0 {
+		for _, email := range successEmails {
+			if err := archiveResellerClientUsage(recordsByEmail[email]); err != nil {
+				return result, needRestart, err
+			}
+		}
 		for _, batch := range chunkInts(successIds, sqlInChunk) {
 			if err := db.Where("client_id IN ?", batch).Delete(&model.ClientInbound{}).Error; err != nil {
 				return result, needRestart, err
@@ -765,7 +771,7 @@ func (s *ClientService) BulkDelete(inboundSvc *InboundService, emails []string, 
 		}
 		if !keepTraffic && len(successEmails) > 0 {
 			for _, batch := range chunkStrings(successEmails, sqlInChunk) {
-				if err := db.Where("LOWER(TRIM(email)) IN ?", batch).Delete(&xray.ClientTraffic{}).Error; err != nil {
+				if err := inboundSvc.delClientStatsByEmails(db, batch); err != nil {
 					return result, needRestart, err
 				}
 				if err := db.Where("LOWER(TRIM(client_email)) IN ?", batch).Delete(&model.InboundClientIps{}).Error; err != nil {
@@ -821,6 +827,10 @@ func (s *ClientService) BulkDeleteForInbounds(inboundSvc *InboundService, emails
 			continue
 		}
 		if !hasInboundIntersection(beforeIDs, inboundIDs) {
+			if err := archiveResellerClientUsage(rec); err != nil {
+				result.Skipped = append(result.Skipped, BulkDeleteReport{Email: email, Reason: err.Error()})
+				continue
+			}
 			result.Skipped = append(result.Skipped, BulkDeleteReport{Email: email, Reason: "client is not attached to a reseller-owned inbound"})
 			result.UnassignedEmails = append(result.UnassignedEmails, email)
 			continue

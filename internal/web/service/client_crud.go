@@ -452,7 +452,8 @@ func (s *ClientService) Delete(inboundSvc *InboundService, id int, keepTraffic b
 		if existing.Email == "" {
 			continue
 		}
-		nr, delErr := s.DelInboundClientByEmail(inboundSvc, ibId, existing.Email, keepTraffic)
+		// Keep counters until the reseller archive is safely recorded below.
+		nr, delErr := s.DelInboundClientByEmail(inboundSvc, ibId, existing.Email, true)
 		if delErr != nil {
 			// The client is already absent from this inbound (data drift or a
 			// retried delete). Skip it — deletion stays idempotent.
@@ -466,15 +467,15 @@ func (s *ClientService) Delete(inboundSvc *InboundService, id int, keepTraffic b
 		}
 	}
 
+	if err := archiveResellerClientUsage(existing); err != nil {
+		return needRestart, err
+	}
 	db := database.GetDB()
 	if err := db.Where("client_id = ?", id).Delete(&model.ClientInbound{}).Error; err != nil {
 		return needRestart, err
 	}
 	if !keepTraffic && existing.Email != "" {
-		if err := db.Where("LOWER(TRIM(email)) = LOWER(?)", existing.Email).Delete(&xray.ClientTraffic{}).Error; err != nil {
-			return needRestart, err
-		}
-		if err := clearGlobalTraffic(db, existing.Email); err != nil {
+		if err := inboundSvc.DelClientStat(db, existing.Email); err != nil {
 			return needRestart, err
 		}
 		if err := db.Where("LOWER(TRIM(client_email)) = LOWER(?)", existing.Email).Delete(&model.InboundClientIps{}).Error; err != nil {
@@ -669,6 +670,13 @@ func (s *ClientService) DeleteByEmail(inboundSvc *InboundService, email string, 
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return false, err
 	}
+	var assigned int64
+	if err := database.GetDB().Model(&model.ResellerClient{}).Where("LOWER(TRIM(email)) = ?", transferEmailKey(email)).Count(&assigned).Error; err != nil {
+		return false, err
+	}
+	if assigned > 0 {
+		return false, errors.New("cannot safely delete reseller client without a canonical client record")
+	}
 	inboundIds, idsErr := s.findInboundIdsByClientEmail(email)
 	if idsErr != nil {
 		return false, idsErr
@@ -723,6 +731,11 @@ func (s *ClientService) DeleteByEmailForInbounds(inboundSvc *InboundService, ema
 		}
 		return false, err
 	}
+	// Record a baseline even for a scoped no-op: the caller may revoke the
+	// mapping after this function returns. A second snapshot follows removal.
+	if err := archiveResellerClientUsage(rec); err != nil {
+		return false, err
+	}
 	if len(inboundIDs) == 0 {
 		return false, nil
 	}
@@ -772,6 +785,9 @@ func (s *ClientService) DeleteByEmailForInbounds(inboundSvc *InboundService, ema
 	}
 	if !removed {
 		return needRestart, nil
+	}
+	if err := archiveResellerClientUsage(rec); err != nil {
+		return needRestart, err
 	}
 
 	remainingIDs, err := s.GetInboundIdsForRecord(rec.Id)

@@ -407,7 +407,7 @@ func (s *ResellerService) UpdateBrandSettings(resellerID int, name, logo, color,
 func (s *ResellerService) Delete(id int) error {
 	db := database.GetDB()
 	return db.Transaction(func(tx *gorm.DB) error {
-		for _, mdl := range []any{&model.Reseller{}, &model.ResellerInbound{}, &model.ResellerClient{}, &model.ResellerTransaction{}, &model.ResellerSale{}, &model.ResellerHistoricalSale{}} {
+		for _, mdl := range []any{&model.Reseller{}, &model.ResellerInbound{}, &model.ResellerClient{}, &model.ResellerTransaction{}, &model.ResellerSale{}, &model.ResellerHistoricalSale{}, &model.ResellerTrafficArchive{}} {
 			q := tx
 			if _, isReseller := mdl.(*model.Reseller); isReseller {
 				if err := q.Where("id = ?", id).Delete(mdl).Error; err != nil {
@@ -1245,16 +1245,16 @@ func (s *ResellerService) Stat(reseller *model.Reseller) (*ResellerStat, error) 
 		}
 	}
 
+	activeClients := make(map[int]model.ClientRecord)
 	if len(emails) > 0 {
 		for _, batch := range chunkStrings(emails, sqlInChunk) {
-			var allocations []int64
-			if err := db.Model(model.ClientRecord{}).
-				Where("LOWER(TRIM(email)) IN ?", batch).
-				Pluck("total_gb", &allocations).Error; err != nil {
+			var records []model.ClientRecord
+			if err := db.Select("id", "email", "total_gb").Where("LOWER(TRIM(email)) IN ?", batch).Find(&records).Error; err != nil {
 				return nil, err
 			}
-			for _, allocation := range allocations {
-				stat.AllocatedTraffic = saturatingAddBytes(stat.AllocatedTraffic, allocation)
+			for _, record := range records {
+				activeClients[record.Id] = record
+				stat.AllocatedTraffic = saturatingAddBytes(stat.AllocatedTraffic, record.TotalGB)
 			}
 		}
 	}
@@ -1266,6 +1266,29 @@ func (s *ResellerService) Stat(reseller *model.Reseller) (*ResellerStat, error) 
 	for _, row := range usage {
 		stat.UsedTraffic = saturatingAddBytes(stat.UsedTraffic, row.Up)
 		stat.UsedTraffic = saturatingAddBytes(stat.UsedTraffic, row.Down)
+	}
+	var archived []model.ResellerTrafficArchive
+	if err := db.Where("reseller_id = ?", reseller.Id).Find(&archived).Error; err != nil {
+		return nil, err
+	}
+	for _, entry := range archived {
+		if client, exists := activeClients[entry.ClientRecordId]; exists {
+			// A failed or retried deletion can leave the same client live.
+			// Count the greater snapshot, not both copies.
+			liveUsed := int64(0)
+			if row := usage[transferEmailKey(client.Email)]; row != nil {
+				liveUsed = saturatingAddBytes(row.Up, row.Down)
+			}
+			if entry.ConsumedBytes > liveUsed {
+				stat.UsedTraffic = saturatingAddBytes(stat.UsedTraffic, entry.ConsumedBytes-liveUsed)
+			}
+			if entry.ConsumedBytes > max(client.TotalGB, 0) {
+				stat.AllocatedTraffic = saturatingAddBytes(stat.AllocatedTraffic, entry.ConsumedBytes-max(client.TotalGB, 0))
+			}
+		} else {
+			stat.UsedTraffic = saturatingAddBytes(stat.UsedTraffic, entry.ConsumedBytes)
+			stat.AllocatedTraffic = saturatingAddBytes(stat.AllocatedTraffic, entry.ConsumedBytes)
+		}
 	}
 
 	online := s.inboundService.GetOnlineClients()
