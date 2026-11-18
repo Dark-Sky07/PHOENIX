@@ -639,6 +639,16 @@ type bulkAdjustRequest struct {
 	AddBytes int64    `json:"addBytes"`
 }
 
+func resellerBulkAllocation(count int, addBytes int64) (int64, error) {
+	if count < 0 || addBytes < 0 {
+		return 0, errors.New("traffic allocation cannot be negative")
+	}
+	if addBytes > 0 && int64(count) > math.MaxInt64/addBytes {
+		return 0, errors.New("bulk traffic allocation exceeds supported range")
+	}
+	return int64(count) * addBytes, nil
+}
+
 func (a *ClientController) bulkAdjust(c *gin.Context) {
 	var req bulkAdjustRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -664,15 +674,12 @@ func (a *ClientController) bulkAdjust(c *gin.Context) {
 				return
 			}
 		}
-		if req.AddBytes < 0 {
-			jsonMsg(c, I18nWeb(c, "somethingWentWrong"), errors.New("traffic allocation cannot be negative"))
+		allocation, allocationErr := resellerBulkAllocation(len(req.Emails), req.AddBytes)
+		if allocationErr != nil {
+			jsonMsg(c, I18nWeb(c, "somethingWentWrong"), allocationErr)
 			return
 		}
-		if req.AddBytes > 0 && int64(len(req.Emails)) > math.MaxInt64/req.AddBytes {
-			jsonMsg(c, I18nWeb(c, "somethingWentWrong"), errors.New("bulk traffic allocation exceeds supported range"))
-			return
-		}
-		if err := a.resellerService.CheckTrafficQuota(reseller, int64(len(req.Emails))*req.AddBytes); err != nil {
+		if err := a.resellerService.CheckTrafficQuota(reseller, allocation); err != nil {
 			jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 			return
 		}
