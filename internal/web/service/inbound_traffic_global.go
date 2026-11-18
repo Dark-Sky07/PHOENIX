@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"strings"
 	"time"
 
@@ -31,6 +32,9 @@ func (s *InboundService) AcceptGlobalTraffic(masterGuid string, traffics []*xray
 	for _, t := range traffics {
 		if t == nil || strings.TrimSpace(t.Email) == "" {
 			continue
+		}
+		if t.Up < 0 || t.Down < 0 {
+			return errors.New("negative global traffic counters")
 		}
 		key := strings.ToLower(strings.TrimSpace(t.Email))
 		if _, dup := byEmail[key]; !dup {
@@ -75,11 +79,59 @@ func (s *InboundService) AcceptGlobalTraffic(masterGuid string, traffics []*xray
 		}
 
 		return db.Transaction(func(tx *gorm.DB) error {
+			// A lower master counter can be a remote reset. Snapshot reseller
+			// usage before overwriting it, then transfer the lost effective
+			// difference to the prior-usage ledger in the same transaction.
+			changed := make([]string, 0)
+			for _, row := range rows {
+				var old model.ClientGlobalTraffic
+				result := tx.Where("master_guid = ? AND email = ?", row.MasterGuid, row.Email).First(&old)
+				if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+					continue
+				}
+				if result.Error != nil {
+					return result.Error
+				}
+				if row.Up >= old.Up && row.Down >= old.Down {
+					continue
+				}
+				key := transferEmailKey(row.Email)
+				var mappings int64
+				if err := tx.Model(&model.ResellerClient{}).Where("LOWER(TRIM(email)) = ?", key).Count(&mappings).Error; err != nil {
+					return err
+				}
+				if mappings == 0 {
+					continue
+				}
+				var clients []model.ClientRecord
+				if err := tx.Where("LOWER(TRIM(email)) = ?", key).Find(&clients).Error; err != nil {
+					return err
+				}
+				if len(clients) != 1 {
+					return errors.New("cannot preserve global usage without a unique reseller client")
+				}
+				if err := archiveResellerClientUsageTx(tx, &clients[0], 0); err != nil {
+					return err
+				}
+				changed = append(changed, key)
+			}
 			for _, batch := range chunkGlobalRows(rows, 200) {
 				if err := tx.Clauses(clause.OnConflict{
 					Columns:   []clause.Column{{Name: "master_guid"}, {Name: "email"}},
 					DoUpdates: clause.AssignmentColumns([]string{"up", "down", "updated_at"}),
 				}).Create(&batch).Error; err != nil {
+					return err
+				}
+			}
+			for _, email := range changed {
+				var local []xray.ClientTraffic
+				if err := tx.Where("LOWER(TRIM(email)) = ?", email).Find(&local).Error; err != nil {
+					return err
+				}
+				if len(local) != 1 {
+					return errors.New("cannot preserve global usage with ambiguous local counters")
+				}
+				if err := rewriteResellerTrafficCountersTx(tx, email, local[0].Up, local[0].Down); err != nil {
 					return err
 				}
 			}
