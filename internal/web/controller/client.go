@@ -664,6 +664,14 @@ func (a *ClientController) bulkAdjust(c *gin.Context) {
 				return
 			}
 		}
+		if req.AddBytes < 0 {
+			jsonMsg(c, I18nWeb(c, "somethingWentWrong"), errors.New("traffic allocation cannot be negative"))
+			return
+		}
+		if req.AddBytes > 0 && int64(len(req.Emails)) > math.MaxInt64/req.AddBytes {
+			jsonMsg(c, I18nWeb(c, "somethingWentWrong"), errors.New("bulk traffic allocation exceeds supported range"))
+			return
+		}
 		if err := a.resellerService.CheckTrafficQuota(reseller, int64(len(req.Emails))*req.AddBytes); err != nil {
 			jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 			return
