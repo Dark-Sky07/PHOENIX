@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
@@ -45,6 +46,8 @@ func (a *ResellerController) initRouter(g *gin.RouterGroup) {
 	g.GET("/assignments", a.assignments)
 	g.GET("/report/:id", a.report)
 	g.GET("/report/:id/export", a.reportExport)
+	g.GET("/report/:id/sales", a.salesReport)
+	g.GET("/report/:id/sales/export", a.salesReportExport)
 	g.GET("/export", a.export)
 	g.POST("/add", a.add)
 	g.POST("/update/:id", a.update)
@@ -126,6 +129,72 @@ func (a *ResellerController) reportExport(c *gin.Context) {
 		name = "reseller-" + report.Stat.Reseller.Username + "-clients"
 	}
 	serveCSV(c, name, service.RenderResellerClientsCSV(report))
+}
+
+func (a *ResellerController) salesReport(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		jsonMsg(c, "", errors.New("invalid reseller id"))
+		return
+	}
+	period, from, to, err := parseResellerSalesQuery(c)
+	if err != nil {
+		jsonMsg(c, "", err)
+		return
+	}
+	report, err := a.resellerService.SalesReport(id, period, from, to)
+	if err != nil {
+		jsonMsg(c, "", err)
+		return
+	}
+	jsonObj(c, report, nil)
+}
+
+func (a *ResellerController) salesReportExport(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		jsonMsg(c, "", errors.New("invalid reseller id"))
+		return
+	}
+	period, from, to, err := parseResellerSalesQuery(c)
+	if err != nil {
+		jsonMsg(c, "", err)
+		return
+	}
+	report, err := a.resellerService.SalesReport(id, period, from, to)
+	if err != nil {
+		jsonMsg(c, "", err)
+		return
+	}
+	name := "reseller-" + strconv.Itoa(id) + "-sales-" + period
+	if reseller, getErr := a.resellerService.Get(id); getErr == nil && reseller.Username != "" {
+		name = "reseller-" + reseller.Username + "-sales-" + period
+	}
+	serveCSV(c, name, service.RenderResellerSalesCSV(report))
+}
+
+func parseResellerSalesQuery(c *gin.Context) (string, int64, int64, error) {
+	period := c.DefaultQuery("period", "monthly")
+	parseBound := func(name string) (int64, error) {
+		value := strings.TrimSpace(c.Query(name))
+		if value == "" {
+			return 0, nil
+		}
+		bound, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || bound <= 0 {
+			return 0, fmt.Errorf("%s must be a positive Unix-millisecond timestamp", name)
+		}
+		return bound, nil
+	}
+	from, err := parseBound("from")
+	if err != nil {
+		return "", 0, 0, err
+	}
+	to, err := parseBound("to")
+	if err != nil {
+		return "", 0, 0, err
+	}
+	return period, from, to, nil
 }
 
 // export streams the full resellers list with live usage numbers as CSV.

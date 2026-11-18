@@ -162,7 +162,7 @@ func (s *ResellerSignupService) Register(token, email string, secret []byte, now
 	if err != nil {
 		return "", false, err
 	}
-	if err := resellerSvc.AssignClients(resellerID, []string{email}); err != nil {
+	if err := resellerSvc.AssignClientsWithSales(resellerID, []string{email}, []string{email}); err != nil {
 		// Do not leave an unowned client behind if the visibility mapping fails.
 		rollbackRestart, rollbackErr := clients.DeleteByEmail(&inboundSvc, email, false)
 		if rollbackErr != nil {

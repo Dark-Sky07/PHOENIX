@@ -93,6 +93,25 @@ func RenderResellerClientsCSV(report *ResellerReport) []byte {
 	return w.bytes()
 }
 
+// RenderResellerSalesCSV renders account sales and allocated quota by UTC
+// period. It omits currency because retail sale amounts are not recorded.
+func RenderResellerSalesCSV(report *ResellerSalesReport) []byte {
+	w := &csvRowBuilder{}
+	w.row("period", "sales", "traffic_gb", "traffic_bytes")
+	if report == nil {
+		return w.bytes()
+	}
+	for _, bucket := range report.Buckets {
+		w.row(
+			bucket.Period,
+			strconv.FormatInt(bucket.Sales, 10),
+			csvGB(bucket.TrafficBytes),
+			strconv.FormatInt(bucket.TrafficBytes, 10),
+		)
+	}
+	return w.bytes()
+}
+
 // RenderResellerListCSV renders the admin resellers list as CSV: one row per
 // reseller with live usage numbers. Empty limit fields mean "unlimited".
 func RenderResellerListCSV(stats []*ResellerStat) []byte {

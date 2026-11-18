@@ -58,6 +58,7 @@ import type { ResellerReport, ResellerStat } from '@/api/queries/useSession';
 import { PageHeader } from '@/components/ui';
 import ResellersOverview from './ResellersOverview';
 import ResellerWalletChart from './ResellerWalletChart';
+import ResellerSalesSection from './ResellerSalesSection';
 import SupportTicketsModal from './SupportTicketsModal';
 import VouchersModal from './VouchersModal';
 import './ResellersPage.css';
@@ -909,6 +910,7 @@ export default function ResellersPage() {
                       />
                     </Col>
                   </Row>
+                  <ResellerSalesSection resellerId={reportQuery.data.stat.reseller.id} />
                   <Descriptions size="small" bordered column={isMobile ? 1 : 2}>
                     <Descriptions.Item label={t('resellers.clientLimit')}>
                       {reportQuery.data.stat.clientCount} / {reportQuery.data.stat.reseller.clientLimit || t('resellers.unlimited')}

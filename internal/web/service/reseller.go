@@ -19,6 +19,7 @@ import (
 	moneycurrency "github.com/Dark-Sky07/phoenix/internal/util/currency"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // ResellerService implements the نمایندگی (reseller) feature: panel sub-accounts
@@ -71,6 +72,27 @@ type ResellerReport struct {
 	Stat         *ResellerStat                `json:"stat"`
 	Clients      []ResellerClientRow          `json:"clients"`
 	Transactions []*model.ResellerTransaction `json:"transactions"`
+}
+
+// ResellerSalesBucket is one UTC day, month, or year of newly created client
+// accounts and the traffic quotas allocated to those accounts at sale time.
+type ResellerSalesBucket struct {
+	Period       string `json:"period"`
+	StartAt      int64  `json:"startAt"`
+	Sales        int64  `json:"sales"`
+	TrafficBytes int64  `json:"trafficBytes"`
+}
+
+// ResellerSalesReport reports recorded account/traffic sales. Currency is
+// deliberately omitted because the product does not record retail sale prices.
+type ResellerSalesReport struct {
+	ResellerId        int                   `json:"resellerId"`
+	Period            string                `json:"period"`
+	From              int64                 `json:"from,omitempty"`
+	To                int64                 `json:"to,omitempty"`
+	TotalSales        int64                 `json:"totalSales"`
+	TotalTrafficBytes int64                 `json:"totalTrafficBytes"`
+	Buckets           []ResellerSalesBucket `json:"buckets"`
 }
 
 // ---------------------------------------------------------------------------
@@ -348,7 +370,7 @@ func (s *ResellerService) UpdateBrandSettings(resellerID int, name, logo, color,
 func (s *ResellerService) Delete(id int) error {
 	db := database.GetDB()
 	return db.Transaction(func(tx *gorm.DB) error {
-		for _, mdl := range []any{&model.Reseller{}, &model.ResellerInbound{}, &model.ResellerClient{}, &model.ResellerTransaction{}} {
+		for _, mdl := range []any{&model.Reseller{}, &model.ResellerInbound{}, &model.ResellerClient{}, &model.ResellerTransaction{}, &model.ResellerSale{}} {
 			q := tx
 			if _, isReseller := mdl.(*model.Reseller); isReseller {
 				if err := q.Where("id = ?", id).Delete(mdl).Error; err != nil {
@@ -899,6 +921,13 @@ func (s *ResellerService) HasForeignInboundAssociation(resellerId int, email str
 // Inbound ownership is intentionally not consulted: this is the only operation
 // that grants client credentials/stats visibility.
 func (s *ResellerService) AssignClients(resellerId int, emails []string) error {
+	return s.AssignClientsWithSales(resellerId, emails, nil)
+}
+
+// AssignClientsWithSales records immutable account/traffic sale snapshots for
+// newly created reseller clients in the same transaction as their ownership
+// mappings. Manually assigned pre-existing clients are passed only in emails.
+func (s *ResellerService) AssignClientsWithSales(resellerId int, emails, saleEmails []string) error {
 	resellerScopeMutationMu.Lock()
 	defer resellerScopeMutationMu.Unlock()
 	keys := make([]string, 0, len(emails))
@@ -916,6 +945,26 @@ func (s *ResellerService) AssignClients(resellerId int, emails []string) error {
 	}
 	if len(keys) == 0 {
 		return errors.New("at least one email is required")
+	}
+	keySet := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		keySet[key] = struct{}{}
+	}
+	saleKeys := make([]string, 0, len(saleEmails))
+	saleSet := make(map[string]struct{}, len(saleEmails))
+	for _, raw := range saleEmails {
+		key := transferEmailKey(raw)
+		if key == "" {
+			return errors.New("sale email can not be empty")
+		}
+		if _, assigned := keySet[key]; !assigned {
+			return fmt.Errorf("sale client %q is not in the assignment batch", key)
+		}
+		if _, duplicate := saleSet[key]; duplicate {
+			continue
+		}
+		saleSet[key] = struct{}{}
+		saleKeys = append(saleKeys, key)
 	}
 	db := database.GetDB()
 	return db.Transaction(func(tx *gorm.DB) error {
@@ -969,6 +1018,31 @@ func (s *ResellerService) AssignClients(resellerId int, emails []string) error {
 			}
 			if err := tx.Create(row).Error; err != nil {
 				return err
+			}
+		}
+		if len(saleKeys) > 0 {
+			for _, key := range saleKeys {
+				var client model.ClientRecord
+				if err := tx.Where("LOWER(TRIM(email)) = ?", key).First(&client).Error; err != nil {
+					return err
+				}
+				createdAt := client.CreatedAt
+				if createdAt <= 0 {
+					createdAt = time.Now().UnixMilli()
+				}
+				sale := model.ResellerSale{
+					ResellerId:     resellerId,
+					ClientRecordId: client.Id,
+					Email:          client.Email,
+					TrafficBytes:   max(client.TotalGB, 0),
+					CreatedAt:      createdAt,
+				}
+				if err := tx.Clauses(clause.OnConflict{
+					Columns:   []clause.Column{{Name: "reseller_id"}, {Name: "client_record_id"}},
+					DoNothing: true,
+				}).Create(&sale).Error; err != nil {
+					return err
+				}
 			}
 		}
 		return nil
@@ -1280,6 +1354,75 @@ func (s *ResellerService) Transactions(resellerId int) ([]*model.ResellerTransac
 		return nil, err
 	}
 	return rows, nil
+}
+
+// SalesReport groups immutable client-creation sale snapshots in UTC. The time
+// range is half-open [from, to); zero bounds mean unbounded.
+func (s *ResellerService) SalesReport(resellerId int, period string, from, to int64) (*ResellerSalesReport, error) {
+	period = strings.ToLower(strings.TrimSpace(period))
+	if period != "daily" && period != "monthly" && period != "yearly" {
+		return nil, errors.New("period must be daily, monthly, or yearly")
+	}
+	if resellerId <= 0 {
+		return nil, errors.New("reseller id must be positive")
+	}
+	if from < 0 || to < 0 || (from > 0 && to > 0 && from >= to) {
+		return nil, errors.New("invalid sales report time range")
+	}
+	if _, err := s.Get(resellerId); err != nil {
+		return nil, err
+	}
+	query := database.GetDB().Model(&model.ResellerSale{}).Where("reseller_id = ?", resellerId)
+	if from > 0 {
+		query = query.Where("created_at >= ?", from)
+	}
+	if to > 0 {
+		query = query.Where("created_at < ?", to)
+	}
+	var sales []model.ResellerSale
+	if err := query.Order("created_at ASC, id ASC").Find(&sales).Error; err != nil {
+		return nil, err
+	}
+	buckets := make(map[string]*ResellerSalesBucket)
+	report := &ResellerSalesReport{ResellerId: resellerId, Period: period, From: from, To: to}
+	for _, sale := range sales {
+		if sale.CreatedAt <= 0 {
+			continue
+		}
+		at := time.UnixMilli(sale.CreatedAt).UTC()
+		var key string
+		var start time.Time
+		switch period {
+		case "daily":
+			key = at.Format("2006-01-02")
+			start = time.Date(at.Year(), at.Month(), at.Day(), 0, 0, 0, 0, time.UTC)
+		case "monthly":
+			key = at.Format("2006-01")
+			start = time.Date(at.Year(), at.Month(), 1, 0, 0, 0, 0, time.UTC)
+		case "yearly":
+			key = at.Format("2006")
+			start = time.Date(at.Year(), time.January, 1, 0, 0, 0, 0, time.UTC)
+		}
+		bucket := buckets[key]
+		if bucket == nil {
+			bucket = &ResellerSalesBucket{Period: key, StartAt: start.UnixMilli()}
+			buckets[key] = bucket
+		}
+		bucket.Sales++
+		bucket.TrafficBytes = saturatingAddBytes(bucket.TrafficBytes, sale.TrafficBytes)
+		report.TotalSales++
+		report.TotalTrafficBytes = saturatingAddBytes(report.TotalTrafficBytes, sale.TrafficBytes)
+	}
+	keys := make([]string, 0, len(buckets))
+	for key := range buckets {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	report.Buckets = make([]ResellerSalesBucket, 0, len(keys))
+	for _, key := range keys {
+		report.Buckets = append(report.Buckets, *buckets[key])
+	}
+	return report, nil
 }
 
 // AdjustBalance moves money on a reseller's account and records the movement.

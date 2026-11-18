@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -391,7 +392,13 @@ func (a *ClientController) create(c *gin.Context) {
 	if reseller := resellerSession(c); reseller != nil {
 		// Reseller-created clients must remain visible under explicit-only
 		// ownership, even when the target inbound is also reseller-owned.
-		if err := a.resellerService.AssignClient(reseller.Id, strings.TrimSpace(payload.Client.Email)); err != nil {
+		var assignErr error
+		if newResellerClient {
+			assignErr = a.resellerService.AssignClientsWithSales(reseller.Id, []string{payload.Client.Email}, []string{payload.Client.Email})
+		} else {
+			assignErr = a.resellerService.AssignClient(reseller.Id, strings.TrimSpace(payload.Client.Email))
+		}
+		if err := assignErr; err != nil {
 			// Create and ownership are separate service layers because the
 			// daemon/runtime mutation cannot run inside the reseller mapping
 			// transaction. If this was a new client, compensate the persisted
@@ -835,10 +842,15 @@ func (a *ClientController) bulkCreate(c *gin.Context) {
 		return
 	}
 	if reseller := resellerSession(c); reseller != nil && len(result.CreatedEmails) > 0 {
-		// Persist all explicit visibility mappings in one transaction. Do not
-		// loop over one-request assignments: a late failure must not leave a
-		// partially visible bulk create.
-		if err := a.resellerService.AssignClients(reseller.Id, result.CreatedEmails); err != nil {
+		// Persist all explicit visibility mappings and sales snapshots in one
+		// transaction so the quota/report is current as soon as creation succeeds.
+		newSales := make([]string, 0, len(result.CreatedEmails))
+		for _, email := range result.CreatedEmails {
+			if _, isNew := newResellerClients[strings.ToLower(strings.TrimSpace(email))]; isNew {
+				newSales = append(newSales, email)
+			}
+		}
+		if err := a.resellerService.AssignClientsWithSales(reseller.Id, result.CreatedEmails, newSales); err != nil {
 			var rollbackErr error
 			for _, email := range result.CreatedEmails {
 				if _, isNew := newResellerClients[strings.ToLower(strings.TrimSpace(email))]; !isNew {
@@ -1434,7 +1446,15 @@ func (a *ClientController) scopeResellerClientWrite(reseller *model.Reseller, pa
 				return errors.New("inbound not found")
 			}
 		}
-		addBytes += payload.Client.TotalGB
+		allocation := payload.Client.TotalGB
+		if allocation < 0 {
+			return errors.New("client traffic quota cannot be negative")
+		}
+		if addBytes > math.MaxInt64-allocation {
+			addBytes = math.MaxInt64
+		} else {
+			addBytes += allocation
+		}
 	}
 	return a.resellerService.CheckClientQuota(reseller, len(payloads), addBytes)
 }
