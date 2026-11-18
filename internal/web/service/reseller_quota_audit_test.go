@@ -193,3 +193,34 @@ func TestResellerAllocationNeverFallsBelowEachClientsMeasuredUsage(t *testing.T)
 		t.Fatalf("live usage double-counted after archive: %+v %v", stat, err)
 	}
 }
+
+func TestResellerQuotaIncludesGlobalOnlyTrafficAndFailsClosed(t *testing.T) {
+	setupBulkDB(t)
+	db := database.GetDB()
+	r := model.Reseller{Username: "global-only-quota", Password: "hash", Enable: true, TrafficLimit: 1000}
+	c := model.ClientRecord{Email: "global-only@example.test", Enable: true, TotalGB: 100}
+	for _, v := range []any{&r, &c} {
+		if err := db.Create(v).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, v := range []any{&model.ResellerClient{ResellerId: r.Id, Email: c.Email}, &model.ClientGlobalTraffic{MasterGuid: "master", Email: c.Email, Up: 400, Down: 300}} {
+		if err := db.Create(v).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	svc := &ResellerService{}
+	stat, err := svc.Stat(&r)
+	if err != nil || stat.UsedTraffic != 700 || stat.AllocatedTraffic != 700 {
+		t.Fatalf("global-only usage: %+v %v", stat, err)
+	}
+	if err := svc.CheckTrafficQuota(&r, 301); err == nil {
+		t.Fatal("global usage was not charged")
+	}
+	if err := db.Migrator().DropTable(&model.ClientGlobalTraffic{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.CheckTrafficQuota(&r, 1); err == nil {
+		t.Fatal("quota check must fail when global traffic cannot be read")
+	}
+}

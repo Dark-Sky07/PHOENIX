@@ -94,3 +94,33 @@ func TestRenewalQuotaReservationsShareRemainingCapacity(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestRenewalQuotaCountsGlobalOnlyTraffic(t *testing.T) {
+	setupBulkDB(t)
+	db := database.GetDB()
+	r := model.Reseller{Username: "global-renewal", Password: "hash", Enable: true, TrafficLimit: 750}
+	c := model.ClientRecord{Email: "global-renewal@example.test", Enable: true, TotalGB: 100}
+	for _, v := range []any{&r, &c} {
+		if err := db.Create(v).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, v := range []any{&model.ResellerClient{ResellerId: r.Id, Email: c.Email}, &model.ClientGlobalTraffic{MasterGuid: "master", Email: c.Email, Up: 400, Down: 300}} {
+		if err := db.Create(v).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		tracker := renewalQuotaTracker{tx: tx, accounts: map[int]*renewalQuotaSnapshot{}}
+		allowed, err := tracker.reserve(c.Email)
+		if err != nil {
+			return err
+		}
+		if allowed {
+			t.Fatal("renewal exceeded quota after global-only usage")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}

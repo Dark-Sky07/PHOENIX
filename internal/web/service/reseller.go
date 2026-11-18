@@ -1208,7 +1208,26 @@ func (s *ResellerService) ClientUsage(emails []string) (map[string]*xray.ClientT
 		}
 		rows = append(rows, part...)
 	}
-	overlayGlobalTraffic(db, rows)
+	// Quota decisions must not silently fall back to local counters when a
+	// global overlay query fails. Include global-only rows as well: a partially
+	// missing local traffic row must not make measured usage disappear.
+	globalUp, globalDown := map[string]int64{}, map[string]int64{}
+	for _, batch := range chunkStrings(keys, sqlInChunk) {
+		var globals []model.ClientGlobalTraffic
+		if err := db.Where("LOWER(TRIM(email)) IN ?", batch).Find(&globals).Error; err != nil {
+			return nil, fmt.Errorf("read reseller global traffic: %w", err)
+		}
+		for _, g := range globals {
+			key := transferEmailKey(g.Email)
+			globalUp[key] = max(globalUp[key], g.Up)
+			globalDown[key] = max(globalDown[key], g.Down)
+		}
+	}
+	for _, row := range rows {
+		key := transferEmailKey(row.Email)
+		row.Up = max(row.Up, globalUp[key])
+		row.Down = max(row.Down, globalDown[key])
+	}
 	for _, row := range rows {
 		key := strings.ToLower(strings.TrimSpace(row.Email))
 		agg, ok := usage[key]
@@ -1220,6 +1239,11 @@ func (s *ResellerService) ClientUsage(emails []string) (map[string]*xray.ClientT
 		agg.Down = saturatingAddBytes(agg.Down, row.Down)
 		if row.Enable {
 			agg.Enable = true
+		}
+	}
+	for _, key := range keys {
+		if _, exists := usage[key]; !exists && (globalUp[key] > 0 || globalDown[key] > 0) {
+			usage[key] = &xray.ClientTraffic{Email: key, Up: globalUp[key], Down: globalDown[key]}
 		}
 	}
 	return usage, nil

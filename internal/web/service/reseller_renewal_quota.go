@@ -77,10 +77,17 @@ func (t *renewalQuotaTracker) load(id int) (*renewalQuotaSnapshot, error) {
 			up[key] = max(up[key], g.Up)
 			down[key] = max(down[key], g.Down)
 		}
+		seenTraffic := map[string]bool{}
 		for _, row := range traffic {
 			key := transferEmailKey(row.Email)
+			seenTraffic[key] = true
 			if cid, ok := clientByEmail[key]; ok {
 				state.currentUsage[cid] = saturatingAddBytes(state.currentUsage[cid], saturatingAddBytes(max(row.Up, up[key]), max(row.Down, down[key])))
+			}
+		}
+		for _, key := range batch {
+			if cid, ok := clientByEmail[key]; ok && !seenTraffic[key] {
+				state.currentUsage[cid] = saturatingAddBytes(up[key], down[key])
 			}
 		}
 	}
