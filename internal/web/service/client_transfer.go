@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -562,7 +563,13 @@ func (s *ClientService) ValidateClientTransfer(inboundSvc *InboundService, envel
 		rec, exists := existingByEmail[key]
 		if !exists {
 			preflight.NewClients++
-			preflight.AdditionalQuota += entry.Client.TotalGB
+			if entry.Client.TotalGB >= 0 {
+				if entry.Client.TotalGB > math.MaxInt64-preflight.AdditionalQuota {
+					preflight.Errors = append(preflight.Errors, newTransferError(index, email, "combined client quota exceeds supported range"))
+				} else {
+					preflight.AdditionalQuota += entry.Client.TotalGB
+				}
+			}
 		} else if scope != nil && scope.Reseller {
 			if !scopeAllowsEmail(scope, rec.Email) {
 				// Existing destination data is authoritative and will not be
