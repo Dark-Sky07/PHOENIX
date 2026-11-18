@@ -154,3 +154,42 @@ func TestValidateResellerAllocationUnlimitedAndNegative(t *testing.T) {
 		t.Fatal("missing reseller must fail")
 	}
 }
+
+func TestResellerAllocationNeverFallsBelowEachClientsMeasuredUsage(t *testing.T) {
+	setupBulkDB(t)
+	db := database.GetDB()
+	reseller := model.Reseller{Username: "quota-reduction", Password: "hash", Enable: true, TrafficLimit: 1000}
+	if err := db.Create(&reseller).Error; err != nil {
+		t.Fatal(err)
+	}
+	clients := []model.ClientRecord{
+		{Email: "consumed@example.test", TotalGB: 100, Enable: true},
+		{Email: "unused@example.test", TotalGB: 400, Enable: true},
+	}
+	for i := range clients {
+		if err := db.Create(&clients[i]).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Create(&model.ResellerClient{ResellerId: reseller.Id, Email: clients[i].Email}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Create(&xray.ClientTraffic{Email: clients[0].Email, Up: 100, Down: 200}).Error; err != nil {
+		t.Fatal(err)
+	}
+	service := &ResellerService{}
+	stat, err := service.Stat(&reseller)
+	if err != nil || stat.UsedTraffic != 300 || stat.AllocatedTraffic != 700 || stat.RemainingTraffic != 300 {
+		t.Fatalf("quota reduction released consumed bytes: %+v %v", stat, err)
+	}
+	if err := service.CheckTrafficQuota(&reseller, 301); err == nil {
+		t.Fatal("consumed bytes must constrain new allocations")
+	}
+	if err := archiveResellerClientUsage(&clients[0]); err != nil {
+		t.Fatal(err)
+	}
+	stat, err = service.Stat(&reseller)
+	if err != nil || stat.AllocatedTraffic != 700 || stat.UsedTraffic != 300 {
+		t.Fatalf("live usage double-counted after archive: %+v %v", stat, err)
+	}
+}

@@ -35,14 +35,25 @@ func abortForbidden(c *gin.Context, msg string) {
 }
 
 const (
-	errNotYourInbound = "inbound not found"
-	errNotYourClient  = "client not found"
+	errResellerTrafficResetUnavailable = "reseller traffic counter reset is temporarily unavailable until usage accounting supports resets; contact the administrator"
+	errNotYourInbound                  = "inbound not found"
+	errNotYourClient                   = "client not found"
 	// errResellerInboundReadOnly is reported when a reseller session reaches
 	// an inbound write endpoint. Inbounds are assigned by the admin and are
 	// read-only for resellers — unlike a wrong-owner access this is not a
 	// probe-able fact, so the message says so plainly.
 	errResellerInboundReadOnly = "inbounds are read-only for reseller accounts"
 )
+
+// rejectResellerTrafficCounterMutation fails closed while resetting counters
+// would otherwise allow a reseller to erase measured usage before deletion.
+func rejectResellerTrafficCounterMutation(c *gin.Context) bool {
+	if resellerSession(c) != nil {
+		abortForbidden(c, errResellerTrafficResetUnavailable)
+		return false
+	}
+	return true
+}
 
 // rejectResellerInboundWrite is the guard every inbound POST handler calls
 // first, before parsing any parameter or body. Reseller sessions are answered

@@ -650,7 +650,7 @@ export const sections: readonly Section[] = [
       {
         method: 'POST',
         path: '/panel/api/clients/resetAllTraffics',
-        summary: 'Reset the up/down counters for every client globally. Quotas and expiry are not affected. Triggers an Xray restart if any counter actually moved.',
+        summary: 'Admin only; reseller requests are temporarily rejected to protect usage accounting. Reset the up/down counters for every client globally. Quotas and expiry are not affected. Triggers an Xray restart if any counter actually moved.',
         response: '{\n  "success": true\n}',
       },
       {
@@ -719,7 +719,7 @@ export const sections: readonly Section[] = [
       {
         method: 'POST',
         path: '/panel/api/clients/bulkResetTraffic',
-        summary: 'Zero up/down counters for many clients in one call. Loops the single-reset path so each client is re-enabled across its attached inbounds and pushed to Xray/remote nodes. Returns the count of successfully reset clients.',
+        summary: 'Admin only; reseller requests are temporarily rejected to protect usage accounting. Zero up/down counters for many clients in one call. Loops the single-reset path so each client is re-enabled across its attached inbounds and pushed to Xray/remote nodes. Returns the count of successfully reset clients.',
         body: '{\n  "emails": ["alice", "bob"]\n}',
         response: '{\n  "success": true,\n  "obj": {\n    "affected": 2\n  }\n}',
       },
@@ -762,7 +762,7 @@ export const sections: readonly Section[] = [
       {
         method: 'POST',
         path: '/panel/api/clients/resetTraffic/:email',
-        summary: 'Zero out a single client’s up/down counters. Re-enables the client across every attached inbound and pushes the change to Xray (or the remote node) so depleted users can connect again immediately.',
+        summary: 'Admin only; reseller requests are temporarily rejected to protect usage accounting. Zero out a single client’s up/down counters. Re-enables the client across every attached inbound and pushes the change to Xray (or the remote node) so depleted users can connect again immediately.',
         params: [
           { name: 'email', in: 'path', type: 'string', desc: 'Client email.' },
         ],
@@ -770,7 +770,7 @@ export const sections: readonly Section[] = [
       {
         method: 'POST',
         path: '/panel/api/clients/updateTraffic/:email',
-        summary: 'Manually adjust a client’s upload + download counters. Useful for migrations from external accounting systems.',
+        summary: 'Admin only; reseller requests are temporarily rejected to protect usage accounting. Manually adjust a client’s upload + download counters. Useful for migrations from external accounting systems.',
         params: [
           { name: 'email', in: 'path', type: 'string', desc: 'Client email.' },
         ],

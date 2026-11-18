@@ -31,6 +31,7 @@ import { useTheme } from '@/hooks/useTheme';
 import type { ResellerReport } from '@/api/queries/useSession';
 import ResellerWalletChart from './ResellerWalletChart';
 import ResellerSalesSection from './ResellerSalesSection';
+import ResellerTrafficArchives from './ResellerTrafficArchives';
 import './ResellersPage.css';
 
 export default function ResellerReportPage() {
@@ -193,6 +194,10 @@ export default function ResellerReportPage() {
                     <ResellerSalesSection resellerId={stat.reseller.id} self />
                   </Col>
                 )}
+
+                <Col span={24}>
+                  <ResellerTrafficArchives rows={reportQuery.data?.trafficArchives ?? []} />
+                </Col>
 
                 <Col span={24}>
                   <Card size="small" hoverable title={t('resellers.clientsTitle')}>

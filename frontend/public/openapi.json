@@ -6457,7 +6457,7 @@
         "tags": [
           "Clients"
         ],
-        "summary": "Reset the up/down counters for every client globally. Quotas and expiry are not affected. Triggers an Xray restart if any counter actually moved.",
+        "summary": "Admin only; reseller requests are temporarily rejected to protect usage accounting. Reset the up/down counters for every client globally. Quotas and expiry are not affected. Triggers an Xray restart if any counter actually moved.",
         "operationId": "post_panel_api_clients_resetAllTraffics",
         "responses": {
           "200": {
@@ -6979,7 +6979,7 @@
         "tags": [
           "Clients"
         ],
-        "summary": "Zero up/down counters for many clients in one call. Loops the single-reset path so each client is re-enabled across its attached inbounds and pushed to Xray/remote nodes. Returns the count of successfully reset clients.",
+        "summary": "Admin only; reseller requests are temporarily rejected to protect usage accounting. Zero up/down counters for many clients in one call. Loops the single-reset path so each client is re-enabled across its attached inbounds and pushed to Xray/remote nodes. Returns the count of successfully reset clients.",
         "operationId": "post_panel_api_clients_bulkResetTraffic",
         "requestBody": {
           "required": true,
@@ -7271,7 +7271,7 @@
         "tags": [
           "Clients"
         ],
-        "summary": "Zero out a single client’s up/down counters. Re-enables the client across every attached inbound and pushes the change to Xray (or the remote node) so depleted users can connect again immediately.",
+        "summary": "Admin only; reseller requests are temporarily rejected to protect usage accounting. Zero out a single client’s up/down counters. Re-enables the client across every attached inbound and pushes the change to Xray (or the remote node) so depleted users can connect again immediately.",
         "operationId": "post_panel_api_clients_resetTraffic_email",
         "parameters": [
           {
@@ -7312,7 +7312,7 @@
         "tags": [
           "Clients"
         ],
-        "summary": "Manually adjust a client’s upload + download counters. Useful for migrations from external accounting systems.",
+        "summary": "Admin only; reseller requests are temporarily rejected to protect usage accounting. Manually adjust a client’s upload + download counters. Useful for migrations from external accounting systems.",
         "operationId": "post_panel_api_clients_updateTraffic_email",
         "parameters": [
           {

@@ -70,9 +70,10 @@ type ResellerClientRow struct {
 
 // ResellerReport is the full billing/usage report for one reseller.
 type ResellerReport struct {
-	Stat         *ResellerStat                `json:"stat"`
-	Clients      []ResellerClientRow          `json:"clients"`
-	Transactions []*model.ResellerTransaction `json:"transactions"`
+	Stat            *ResellerStat                  `json:"stat"`
+	Clients         []ResellerClientRow            `json:"clients"`
+	Transactions    []*model.ResellerTransaction   `json:"transactions"`
+	TrafficArchives []model.ResellerTrafficArchive `json:"trafficArchives"`
 }
 
 // ResellerSalePrice is a reseller-declared price, in the currency's minor
@@ -1267,6 +1268,18 @@ func (s *ResellerService) Stat(reseller *model.Reseller) (*ResellerStat, error) 
 		stat.UsedTraffic = saturatingAddBytes(stat.UsedTraffic, row.Up)
 		stat.UsedTraffic = saturatingAddBytes(stat.UsedTraffic, row.Down)
 	}
+	// Reducing a live client's quota must never release traffic already used.
+	// Account for the excess per client rather than comparing only aggregate
+	// totals, since unused allocation on another client cannot offset it.
+	for _, client := range activeClients {
+		liveUsed := int64(0)
+		if row := usage[transferEmailKey(client.Email)]; row != nil {
+			liveUsed = saturatingAddBytes(row.Up, row.Down)
+		}
+		if liveUsed > max(client.TotalGB, 0) {
+			stat.AllocatedTraffic = saturatingAddBytes(stat.AllocatedTraffic, liveUsed-max(client.TotalGB, 0))
+		}
+	}
 	var archived []model.ResellerTrafficArchive
 	if err := db.Where("reseller_id = ?", reseller.Id).Find(&archived).Error; err != nil {
 		return nil, err
@@ -1282,8 +1295,9 @@ func (s *ResellerService) Stat(reseller *model.Reseller) (*ResellerStat, error) 
 			if entry.ConsumedBytes > liveUsed {
 				stat.UsedTraffic = saturatingAddBytes(stat.UsedTraffic, entry.ConsumedBytes-liveUsed)
 			}
-			if entry.ConsumedBytes > max(client.TotalGB, 0) {
-				stat.AllocatedTraffic = saturatingAddBytes(stat.AllocatedTraffic, entry.ConsumedBytes-max(client.TotalGB, 0))
+			liveAllocation := max(max(client.TotalGB, 0), liveUsed)
+			if entry.ConsumedBytes > liveAllocation {
+				stat.AllocatedTraffic = saturatingAddBytes(stat.AllocatedTraffic, entry.ConsumedBytes-liveAllocation)
 			}
 		} else {
 			stat.UsedTraffic = saturatingAddBytes(stat.UsedTraffic, entry.ConsumedBytes)
@@ -1420,7 +1434,11 @@ func (s *ResellerService) Report(resellerId int) (*ResellerReport, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ResellerReport{Stat: stat, Clients: rows, Transactions: transactions}, nil
+	var archives []model.ResellerTrafficArchive
+	if err := db.Where("reseller_id = ?", resellerId).Order("id DESC").Limit(500).Find(&archives).Error; err != nil {
+		return nil, err
+	}
+	return &ResellerReport{Stat: stat, Clients: rows, Transactions: transactions, TrafficArchives: archives}, nil
 }
 
 // Transactions lists a reseller's ledger, newest first.

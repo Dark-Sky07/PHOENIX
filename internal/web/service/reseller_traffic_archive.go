@@ -2,6 +2,7 @@ package service
 
 import (
 	"strings"
+	"time"
 
 	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
@@ -53,6 +54,7 @@ func archiveResellerClientUsage(client *model.ClientRecord) error {
 					Columns: []clause.Column{{Name: "reseller_id"}, {Name: "client_record_id"}},
 					DoUpdates: clause.Assignments(map[string]any{
 						"consumed_bytes": gorm.Expr("CASE WHEN consumed_bytes < ? THEN ? ELSE consumed_bytes END", used, used),
+						"updated_at":     time.Now().UnixMilli(),
 					}),
 				}).Create(&archive).Error; err != nil {
 					return err

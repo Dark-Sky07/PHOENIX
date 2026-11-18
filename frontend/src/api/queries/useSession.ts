@@ -69,10 +69,20 @@ export interface ResellerTransaction {
   createdAt: number;
 }
 
+export interface ResellerTrafficArchive {
+  id: number;
+  clientRecordId: number;
+  email: string;
+  consumedBytes: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface ResellerReport {
   stat: ResellerStat;
   clients: ResellerClientRow[];
   transactions: ResellerTransaction[];
+  trafficArchives?: ResellerTrafficArchive[];
 }
 
 export interface SessionInfo {

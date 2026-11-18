@@ -589,6 +589,9 @@ func (a *ClientController) attach(c *gin.Context) {
 }
 
 func (a *ClientController) resetAllTraffics(c *gin.Context) {
+	if !rejectResellerTrafficCounterMutation(c) {
+		return
+	}
 	if reseller := resellerSession(c); reseller != nil {
 		mapped, err := newResellerService().OwnedEmails(reseller.Id)
 		if err != nil {
@@ -929,6 +932,9 @@ func (a *ClientController) delDepleted(c *gin.Context) {
 }
 
 func (a *ClientController) resetTrafficByEmail(c *gin.Context) {
+	if !rejectResellerTrafficCounterMutation(c) {
+		return
+	}
 	email := c.Param("email")
 	var needRestart bool
 	var err error
@@ -971,6 +977,9 @@ type trafficUpdateRequest struct {
 }
 
 func (a *ClientController) updateTrafficByEmail(c *gin.Context) {
+	if !rejectResellerTrafficCounterMutation(c) {
+		return
+	}
 	email := c.Param("email")
 	var req trafficUpdateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -1394,6 +1403,9 @@ type bulkResetRequest struct {
 }
 
 func (a *ClientController) bulkResetTraffic(c *gin.Context) {
+	if !rejectResellerTrafficCounterMutation(c) {
+		return
+	}
 	var req bulkResetRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
