@@ -6,6 +6,7 @@ import { DownloadOutlined, ShoppingCartOutlined } from '@ant-design/icons';
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { keys } from '@/api/queryKeys';
 import { HttpUtil, SizeFormatter } from '@/utils';
+import ResellerHistoryModal from './ResellerHistoryModal';
 
 type SalesPeriod = 'daily' | 'monthly' | 'yearly';
 
@@ -13,6 +14,7 @@ type SalesBucket = {
   period: string;
   startAt: number;
   sales: number;
+  historicalSales: number;
   trafficBytes: number;
   unknownPrices: number;
   amountsMinor: Record<string, string>;
@@ -22,6 +24,7 @@ type SalesReport = {
   resellerId: number;
   period: SalesPeriod;
   totalSales: number;
+  historicalSales: number;
   totalTrafficBytes: number;
   unknownPrices: number;
   amountsMinor: Record<string, string>;
@@ -38,6 +41,7 @@ export default function ResellerSalesSection({ resellerId, self = false }: Props
   const [period, setPeriod] = useState<SalesPeriod>('monthly');
   const [messageApi, messageContextHolder] = message.useMessage();
   const [exporting, setExporting] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
 
   const reportQuery = useQuery({
     queryKey: keys.resellers.sales(resellerId, period),
@@ -85,6 +89,7 @@ export default function ResellerSalesSection({ resellerId, self = false }: Props
                 { value: 'yearly', label: t('resellers.yearly', 'Yearly') },
               ]}
             />
+            {!self && <Button size="small" onClick={() => setHistoryOpen(true)}>{t('resellers.historyTitle', 'Historical sales')}</Button>}
             <Button size="small" icon={<DownloadOutlined />} loading={exporting} onClick={exportCsv}>
               {t('resellers.exportCsv', 'Export CSV')}
             </Button>
@@ -96,6 +101,7 @@ export default function ResellerSalesSection({ resellerId, self = false }: Props
         </Typography.Paragraph>
         <Space size="large" wrap style={{ marginBottom: 16 }}>
           <Statistic title={t('resellers.totalSales', 'Accounts sold')} value={report?.totalSales ?? 0} />
+          <Statistic title={t('resellers.historyTitle', 'Historical sales')} value={report?.historicalSales ?? 0} />
           <Statistic title={t('resellers.totalQuotaSold', 'Traffic allocated')} value={SizeFormatter.sizeFormat(report?.totalTrafficBytes ?? 0)} />
           <Statistic title={t('resellers.unknownPrices', 'Unknown prices')} value={report?.unknownPrices ?? 0} />
           {Object.entries(report?.amountsMinor ?? {}).map(([currency, amount]) => (
@@ -133,6 +139,7 @@ export default function ResellerSalesSection({ resellerId, self = false }: Props
               columns={[
                 { title: t('resellers.table.date', 'Period'), dataIndex: 'period', key: 'period' },
                 { title: t('resellers.totalSales', 'Accounts sold'), dataIndex: 'sales', key: 'sales' },
+                { title: t('resellers.historyTitle', 'Historical sales'), dataIndex: 'historicalSales', key: 'historicalSales' },
                 { title: t('resellers.unknownPrices', 'Unknown prices'), dataIndex: 'unknownPrices', key: 'unknownPrices' },
                 { title: t('resellers.declaredSalesMinor', 'Declared sales (minor units)'), dataIndex: 'amountsMinor', key: 'amountsMinor', render: (values: Record<string, string> | undefined) => Object.entries(values ?? {}).map(([code, amount]) => `${code}: ${amount}`).join(', ') || '—' },
                 {
@@ -146,6 +153,7 @@ export default function ResellerSalesSection({ resellerId, self = false }: Props
           </>
         )}
       </Card>
+      {!self && <ResellerHistoryModal resellerId={resellerId} open={historyOpen} onClose={() => setHistoryOpen(false)} />}
     </>
   );
 }

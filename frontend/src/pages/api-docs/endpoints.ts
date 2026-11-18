@@ -1451,6 +1451,27 @@ export const sections: readonly Section[] = [
       },
       {
         method: 'GET',
+        path: '/panel/api/resellers/report/:id/sales/history',
+        summary: 'List the latest 500 manually recorded historical sales, with their source reference and actor.',
+        params: [{ name: 'id', in: 'path', type: 'integer', desc: 'Reseller id.' }],
+      },
+      {
+        method: 'POST',
+        path: '/panel/api/resellers/report/:id/sales/history',
+        summary: 'Administrator-only append of a historical sale. Records are self-reported, not verified payments. Reference must be unique for the reseller; check against recorded sales before importing.',
+        params: [
+          { name: 'id', in: 'path', type: 'integer', desc: 'Reseller id.' },
+          { name: 'reference', in: 'body (json)', type: 'string', desc: 'Unique source reference.' },
+          { name: 'source', in: 'body (json)', type: 'string', desc: 'Evidence or source description.' },
+          { name: 'email', in: 'body (json)', type: 'string' },
+          { name: 'soldAt', in: 'body (json)', type: 'integer', desc: 'Sale time in Unix milliseconds, not in the future.' },
+          { name: 'trafficBytes', in: 'body (json)', type: 'integer', desc: 'Initial traffic allocation in bytes.' },
+          { name: 'amountMinor', in: 'body (json)', type: 'integer', optional: true, desc: 'Declared amount in currency minor units; omit for unknown.' },
+          { name: 'currency', in: 'body (json)', type: 'string', optional: true, desc: 'Currency code when an amount is supplied.' },
+        ],
+      },
+      {
+        method: 'GET',
         path: '/panel/api/resellers/export',
         summary:
           'Download the full resellers list with live usage numbers as CSV (UTF-8 with BOM; one row per reseller).',

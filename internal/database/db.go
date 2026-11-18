@@ -84,6 +84,7 @@ func initModels() error {
 		&model.ResellerClient{},
 		&model.ResellerTransaction{},
 		&model.ResellerSale{},
+		&model.ResellerHistoricalSale{},
 		&model.BotNotifyState{},
 		&model.ClientInvite{},
 		&model.TuicTrafficReceipt{},

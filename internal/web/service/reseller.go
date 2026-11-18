@@ -109,12 +109,13 @@ func addMinorAmount(existing string, amount int64) string {
 // ResellerSalesBucket is one UTC day, month, or year of newly created client
 // accounts and the traffic quotas allocated to those accounts at sale time.
 type ResellerSalesBucket struct {
-	Period        string            `json:"period"`
-	StartAt       int64             `json:"startAt"`
-	Sales         int64             `json:"sales"`
-	TrafficBytes  int64             `json:"trafficBytes"`
-	UnknownPrices int64             `json:"unknownPrices"`
-	AmountsMinor  map[string]string `json:"amountsMinor"`
+	Period          string            `json:"period"`
+	StartAt         int64             `json:"startAt"`
+	Sales           int64             `json:"sales"`
+	HistoricalSales int64             `json:"historicalSales"`
+	TrafficBytes    int64             `json:"trafficBytes"`
+	UnknownPrices   int64             `json:"unknownPrices"`
+	AmountsMinor    map[string]string `json:"amountsMinor"`
 }
 
 // ResellerSalesReport reports snapshots and declared prices, not payments.
@@ -124,6 +125,7 @@ type ResellerSalesReport struct {
 	From              int64                 `json:"from,omitempty"`
 	To                int64                 `json:"to,omitempty"`
 	TotalSales        int64                 `json:"totalSales"`
+	HistoricalSales   int64                 `json:"historicalSales"`
 	TotalTrafficBytes int64                 `json:"totalTrafficBytes"`
 	UnknownPrices     int64                 `json:"unknownPrices"`
 	AmountsMinor      map[string]string     `json:"amountsMinor"`
@@ -405,7 +407,7 @@ func (s *ResellerService) UpdateBrandSettings(resellerID int, name, logo, color,
 func (s *ResellerService) Delete(id int) error {
 	db := database.GetDB()
 	return db.Transaction(func(tx *gorm.DB) error {
-		for _, mdl := range []any{&model.Reseller{}, &model.ResellerInbound{}, &model.ResellerClient{}, &model.ResellerTransaction{}, &model.ResellerSale{}} {
+		for _, mdl := range []any{&model.Reseller{}, &model.ResellerInbound{}, &model.ResellerClient{}, &model.ResellerTransaction{}, &model.ResellerSale{}, &model.ResellerHistoricalSale{}} {
 			q := tx
 			if _, isReseller := mdl.(*model.Reseller); isReseller {
 				if err := q.Where("id = ?", id).Delete(mdl).Error; err != nil {
@@ -1440,9 +1442,31 @@ func (s *ResellerService) SalesReport(resellerId int, period string, from, to in
 	if err := query.Order("created_at ASC, id ASC").Find(&sales).Error; err != nil {
 		return nil, err
 	}
+	historyQuery := database.GetDB().Where("reseller_id = ?", resellerId)
+	if from > 0 {
+		historyQuery = historyQuery.Where("sold_at >= ?", from)
+	}
+	if to > 0 {
+		historyQuery = historyQuery.Where("sold_at < ?", to)
+	}
+	var historical []model.ResellerHistoricalSale
+	if err := historyQuery.Find(&historical).Error; err != nil {
+		return nil, err
+	}
+	type saleEvent struct {
+		model.ResellerSale
+		historical bool
+	}
+	events := make([]saleEvent, 0, len(sales)+len(historical))
+	for _, sale := range sales {
+		events = append(events, saleEvent{ResellerSale: sale})
+	}
+	for _, sale := range historical {
+		events = append(events, saleEvent{ResellerSale: model.ResellerSale{CreatedAt: sale.SoldAt, TrafficBytes: sale.TrafficBytes, AmountMinor: sale.AmountMinor, Currency: sale.Currency}, historical: true})
+	}
 	buckets := make(map[string]*ResellerSalesBucket)
 	report := &ResellerSalesReport{ResellerId: resellerId, Period: period, From: from, To: to, AmountsMinor: map[string]string{}}
-	for _, sale := range sales {
+	for _, sale := range events {
 		if sale.CreatedAt <= 0 {
 			continue
 		}
@@ -1466,6 +1490,10 @@ func (s *ResellerService) SalesReport(resellerId int, period string, from, to in
 			buckets[key] = bucket
 		}
 		bucket.Sales++
+		if sale.historical {
+			bucket.HistoricalSales++
+			report.HistoricalSales++
+		}
 		if sale.AmountMinor == nil || sale.Currency == "" {
 			bucket.UnknownPrices++
 			report.UnknownPrices++

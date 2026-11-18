@@ -97,7 +97,7 @@ func RenderResellerClientsCSV(report *ResellerReport) []byte {
 // RenderResellerSalesCSV renders account sales, quota and declared amounts by UTC period.
 func RenderResellerSalesCSV(report *ResellerSalesReport) []byte {
 	w := &csvRowBuilder{}
-	w.row("period", "sales", "traffic_gb", "traffic_bytes", "unknown_prices", "declared_amounts_minor")
+	w.row("period", "sales", "historical_sales", "traffic_gb", "traffic_bytes", "unknown_prices", "declared_amounts_minor")
 	if report == nil {
 		return w.bytes()
 	}
@@ -110,6 +110,7 @@ func RenderResellerSalesCSV(report *ResellerSalesReport) []byte {
 		w.row(
 			bucket.Period,
 			strconv.FormatInt(bucket.Sales, 10),
+			strconv.FormatInt(bucket.HistoricalSales, 10),
 			csvGB(bucket.TrafficBytes),
 			strconv.FormatInt(bucket.TrafficBytes, 10),
 			strconv.FormatInt(bucket.UnknownPrices, 10),

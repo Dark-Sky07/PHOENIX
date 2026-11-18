@@ -49,6 +49,8 @@ func (a *ResellerController) initRouter(g *gin.RouterGroup) {
 	g.GET("/report/:id/export", a.reportExport)
 	g.GET("/report/:id/sales", a.salesReport)
 	g.GET("/report/:id/sales/export", a.salesReportExport)
+	g.GET("/report/:id/sales/history", a.historicalSales)
+	g.POST("/report/:id/sales/history", a.recordHistoricalSale)
 	g.GET("/export", a.export)
 	g.POST("/add", a.add)
 	g.POST("/update/:id", a.update)
@@ -172,6 +174,54 @@ func (a *ResellerController) salesReportExport(c *gin.Context) {
 		name = "reseller-" + reseller.Username + "-sales-" + period
 	}
 	serveCSV(c, name, service.RenderResellerSalesCSV(report))
+}
+
+func (a *ResellerController) historicalSales(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		jsonMsg(c, "", errors.New("invalid reseller id"))
+		return
+	}
+	rows, err := a.resellerService.HistoricalSales(id)
+	jsonObj(c, rows, err)
+}
+
+func (a *ResellerController) recordHistoricalSale(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		jsonMsg(c, "", errors.New("invalid reseller id"))
+		return
+	}
+	var req struct {
+		Reference    string `json:"reference"`
+		Source       string `json:"source"`
+		Email        string `json:"email"`
+		TrafficBytes int64  `json:"trafficBytes"`
+		AmountMinor  *int64 `json:"amountMinor"`
+		Currency     string `json:"currency"`
+		SoldAt       int64  `json:"soldAt"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		jsonMsg(c, "", err)
+		return
+	}
+	row := model.ResellerHistoricalSale{ResellerId: id, Reference: req.Reference, Source: req.Source, Email: req.Email, TrafficBytes: req.TrafficBytes, AmountMinor: req.AmountMinor, Currency: req.Currency, SoldAt: req.SoldAt}
+	if c.GetBool("api_authed") {
+		row.ActorType, row.ActorId, row.ActorName = "api_token", c.GetInt("api_token_id"), c.GetString("api_token_name")
+		if row.ActorName == "" {
+			row.ActorName = "api_token"
+		}
+	} else if user := session.GetLoginUser(c); user != nil && resellerSession(c) == nil {
+		row.ActorType, row.ActorId, row.ActorName = "admin", user.Id, user.Username
+	} else {
+		abortForbidden(c, "administrator required")
+		return
+	}
+	if err := a.resellerService.RecordHistoricalSale(&row); err != nil {
+		jsonMsg(c, "", err)
+		return
+	}
+	jsonObj(c, row, nil)
 }
 
 func parseResellerSalesQuery(c *gin.Context) (string, int64, int64, error) {

@@ -11026,6 +11026,133 @@
         }
       }
     },
+    "/panel/api/resellers/report/{id}/sales/history": {
+      "get": {
+        "tags": [
+          "Resellers (نمایندگی)"
+        ],
+        "summary": "List the latest 500 manually recorded historical sales, with their source reference and actor.",
+        "operationId": "get_panel_api_resellers_report_id_sales_history",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Reseller id.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Resellers (نمایندگی)"
+        ],
+        "summary": "Administrator-only append of a historical sale. Records are self-reported, not verified payments. Reference must be unique for the reseller; check against recorded sales before importing.",
+        "operationId": "post_panel_api_resellers_report_id_sales_history",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Reseller id.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "reference": {
+                    "type": "string",
+                    "description": "Unique source reference."
+                  },
+                  "source": {
+                    "type": "string",
+                    "description": "Evidence or source description."
+                  },
+                  "email": {
+                    "type": "string",
+                    "description": ""
+                  },
+                  "soldAt": {
+                    "type": "integer",
+                    "description": "Sale time in Unix milliseconds, not in the future."
+                  },
+                  "trafficBytes": {
+                    "type": "integer",
+                    "description": "Initial traffic allocation in bytes."
+                  },
+                  "amountMinor": {
+                    "type": "integer",
+                    "description": "Declared amount in currency minor units; omit for unknown."
+                  },
+                  "currency": {
+                    "type": "string",
+                    "description": "Currency code when an amount is supplied."
+                  }
+                },
+                "required": [
+                  "reference",
+                  "source",
+                  "email",
+                  "soldAt",
+                  "trafficBytes"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/panel/api/resellers/export": {
       "get": {
         "tags": [
