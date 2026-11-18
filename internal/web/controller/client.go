@@ -579,14 +579,14 @@ func (a *ClientController) delete(c *gin.Context) {
 	} else {
 		needRestart, err = a.clientService.DeleteByEmail(&a.inboundService, email, keepTraffic)
 	}
+	if needRestart {
+		a.xrayService.SetToNeedRestart()
+	}
 	if err != nil {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 		return
 	}
 	jsonMsg(c, I18nWeb(c, "pages.inbounds.toasts.inboundClientDeleteSuccess"), nil)
-	if needRestart {
-		a.xrayService.SetToNeedRestart()
-	}
 	notifyClientsChanged()
 }
 
@@ -876,14 +876,14 @@ func (a *ClientController) bulkDelete(c *gin.Context) {
 	} else {
 		result, needRestart, err = a.clientService.BulkDelete(&a.inboundService, req.Emails, req.KeepTraffic)
 	}
+	if needRestart {
+		a.xrayService.SetToNeedRestart()
+	}
 	if err != nil {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 		return
 	}
 	jsonObj(c, result, nil)
-	if needRestart {
-		a.xrayService.SetToNeedRestart()
-	}
 	notifyClientsChanged()
 }
 
@@ -961,26 +961,26 @@ func (a *ClientController) bulkCreate(c *gin.Context) {
 func (a *ClientController) delDepleted(c *gin.Context) {
 	if reseller := resellerSession(c); reseller != nil {
 		deleted, needRestart, err := a.delDepletedForReseller(reseller)
+		if needRestart {
+			a.xrayService.SetToNeedRestart()
+		}
 		if err != nil {
 			jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 			return
 		}
 		jsonObj(c, gin.H{"deleted": deleted}, nil)
-		if needRestart {
-			a.xrayService.SetToNeedRestart()
-		}
 		notifyClientsChanged()
 		return
 	}
 	deleted, needRestart, err := a.clientService.DelDepleted(&a.inboundService)
+	if needRestart {
+		a.xrayService.SetToNeedRestart()
+	}
 	if err != nil {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 		return
 	}
 	jsonObj(c, gin.H{"deleted": deleted}, nil)
-	if needRestart {
-		a.xrayService.SetToNeedRestart()
-	}
 	notifyClientsChanged()
 }
 

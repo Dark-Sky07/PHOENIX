@@ -845,6 +845,7 @@ func (s *ClientService) BulkDeleteForInbounds(inboundSvc *InboundService, emails
 		}
 
 		callRestart, err := s.DeleteByEmailForInbounds(inboundSvc, email, keepTraffic, inboundIDs)
+		needRestart = needRestart || callRestart
 		if err != nil {
 			result.Skipped = append(result.Skipped, BulkDeleteReport{Email: email, Reason: err.Error()})
 			continue

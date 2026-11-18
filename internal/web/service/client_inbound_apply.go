@@ -1043,7 +1043,8 @@ func (s *ClientService) DelInboundClientByEmail(inboundSvc *InboundService, inbo
 	}
 
 	if err := db.Save(oldInbound).Error; err != nil {
-		return false, err
+		// A local runtime removal may have succeeded before persistence failed.
+		return needRestart || (needApiDel && !emailShared && oldInbound.NodeID == nil), err
 	}
 	if err := reconcilePPPVPNRuntime(oldInbound); err != nil {
 		logger.Warning("l2tp: synchronous client deletion reconcile failed:", err)
@@ -1051,10 +1052,10 @@ func (s *ClientService) DelInboundClientByEmail(inboundSvc *InboundService, inbo
 	}
 	finalClients, gcErr := inboundSvc.GetClients(oldInbound)
 	if gcErr != nil {
-		return false, gcErr
+		return needRestart || oldInbound.NodeID == nil, gcErr
 	}
 	if err := s.SyncInbound(db, inboundId, finalClients); err != nil {
-		return false, err
+		return needRestart || oldInbound.NodeID == nil, err
 	}
 	if oldInbound.Protocol == model.AmneziaWG && oldInbound.NodeID == nil {
 		inboundSvc.applyLocalAmneziaWG(oldInbound.Id)

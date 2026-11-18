@@ -457,6 +457,7 @@ func (s *ClientService) Delete(inboundSvc *InboundService, id int, keepTraffic b
 		}
 		// Keep counters until the reseller archive is safely recorded below.
 		nr, delErr := s.DelInboundClientByEmail(inboundSvc, ibId, existing.Email, true)
+		needRestart = needRestart || nr
 		if delErr != nil {
 			// The client is already absent from this inbound (data drift or a
 			// retried delete). Skip it — deletion stays idempotent.
@@ -695,6 +696,7 @@ func (s *ClientService) DeleteByEmail(inboundSvc *InboundService, email string, 
 	needRestart := false
 	for _, ibId := range inboundIds {
 		nr, delErr := s.DelInboundClientByEmail(inboundSvc, ibId, email, false)
+		needRestart = needRestart || nr
 		if delErr != nil {
 			if errors.Is(delErr, ErrClientNotInInbound) {
 				continue
@@ -777,6 +779,7 @@ func (s *ClientService) DeleteByEmailForInbounds(inboundSvc *InboundService, ema
 		// Keep shared traffic while the client still belongs to any other
 		// inbound. The cleanup below handles the final-association case.
 		nr, delErr := s.DelInboundClientByEmail(inboundSvc, inboundID, rec.Email, true)
+		needRestart = needRestart || nr
 		if delErr != nil {
 			if errors.Is(delErr, ErrClientNotInInbound) {
 				continue
