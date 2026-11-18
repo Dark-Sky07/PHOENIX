@@ -49,11 +49,15 @@ func (s *InboundService) addTrafficLocked(inboundTraffics []*xray.Traffic, clien
 		return false, false, nil, tx.Error
 	}
 
+	renewalQuotaLocked := false
 	defer func() {
 		if err != nil {
 			tx.Rollback()
 		} else if commitErr := tx.Commit().Error; commitErr != nil {
 			err = commitErr
+		}
+		if renewalQuotaLocked {
+			resellerAllocationMu.Unlock()
 		}
 	}()
 	err = s.addInboundTraffic(tx, inboundTraffics)
@@ -70,7 +74,15 @@ func (s *InboundService) addTrafficLocked(inboundTraffics []*xray.Traffic, clien
 	if err = tx.SavePoint("automatic_renewal").Error; err != nil {
 		return false, false, nil, err
 	}
-	needRestart0, count, renewErr := s.autoRenewClients(tx)
+	var needRestart0 bool
+	var count int64
+	var renewErr error
+	// Allocation paths can submit work to this writer while holding the quota
+	// lock. Never block on that lock here: postpone renewal to the next tick.
+	if resellerAllocationMu.TryLock() {
+		renewalQuotaLocked = true
+		needRestart0, count, renewErr = s.autoRenewClients(tx)
+	}
 	if renewErr != nil {
 		if err = tx.RollbackTo("automatic_renewal").Error; err != nil {
 			return false, false, nil, err
@@ -506,6 +518,8 @@ func (s *InboundService) autoRenewClients(tx *gorm.DB) (bool, int64, error) {
 		inbounds = append(inbounds, page...)
 	}
 	renewedEmails := make(map[string]struct{})
+	deniedEmails := make(map[string]struct{})
+	quotaTracker := renewalQuotaTracker{tx: tx, accounts: make(map[int]*renewalQuotaSnapshot)}
 	for inbound_index := range inbounds {
 		settings := map[string]any{}
 		json.Unmarshal([]byte(inbounds[inbound_index].Settings), &settings)
@@ -527,7 +541,19 @@ func (s *InboundService) autoRenewClients(tx *gorm.DB) (bool, int64, error) {
 						break
 					}
 					key := transferEmailKey(traffic.Email)
+					if _, denied := deniedEmails[key]; denied {
+						break
+					}
 					if _, seen := renewedEmails[key]; !seen {
+						allowed, err := quotaTracker.reserve(traffic.Email)
+						if err != nil {
+							return false, 0, err
+						}
+						if !allowed {
+							deniedEmails[key] = struct{}{}
+							logger.Warning("Automatic renewal skipped: reseller quota or account status prevents renewal for", traffic.Email)
+							break
+						}
 						if err := closeResellerTrafficWindowTx(tx, traffic.Email); err != nil {
 							return false, 0, err
 						}
@@ -596,7 +622,7 @@ func (s *InboundService) autoRenewClients(tx *gorm.DB) (bool, int64, error) {
 	if p != nil {
 		err1 = s.xrayApi.Init(p.GetAPIPort())
 		if err1 != nil {
-			return true, int64(len(traffics)), nil
+			return true, int64(len(renewedEmails)), nil
 		}
 		for _, clientToAdd := range clientsToAdd {
 			err1 = s.xrayApi.AddUser(clientToAdd.protocol, clientToAdd.tag, clientToAdd.client)
@@ -606,7 +632,7 @@ func (s *InboundService) autoRenewClients(tx *gorm.DB) (bool, int64, error) {
 		}
 		s.xrayApi.Close()
 	}
-	return needRestart, int64(len(traffics)), nil
+	return needRestart, int64(len(renewedEmails)), nil
 }
 
 // AddClientStat inserts a per-client accounting row, no-op on email

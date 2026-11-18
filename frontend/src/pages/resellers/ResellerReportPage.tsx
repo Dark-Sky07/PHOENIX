@@ -196,6 +196,9 @@ export default function ResellerReportPage() {
                 )}
 
                 <Col span={24}>
+                  <Alert type="info" showIcon message={t('resellers.renewalQuotaNotice', 'Automatic renewal requires an active reseller account and enough remaining traffic allocation. A client may remain expired until quota is available.')} />
+                </Col>
+                <Col span={24}>
                   <ResellerTrafficArchives rows={reportQuery.data?.trafficArchives ?? []} />
                 </Col>
 

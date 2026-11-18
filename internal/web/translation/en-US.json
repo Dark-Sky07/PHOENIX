@@ -2319,6 +2319,7 @@
   },
   "resellers": {
     "resetTemporarilyUnavailable": "Traffic reset is temporarily unavailable for resellers; contact the administrator.",
+    "renewalQuotaNotice": "Automatic renewal requires an active reseller account and enough remaining traffic allocation. A client may remain expired until quota is available.",
     "archiveTitle": "Traffic snapshots",
     "archiveDescription": "Latest 500 persisted traffic records from deletion, unassignment, automatic renewal or supported resets. Prior windows and current snapshots are shown separately. Runtime traffic not yet persisted is not included. Manual counter corrections preserve the recorded usage floor.",
     "archiveClientId": "Client record ID",
