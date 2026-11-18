@@ -303,7 +303,7 @@ func (s *ClientService) AddInboundClient(inboundSvc *InboundService, data *model
 // map. Bulk callers pass a single snapshot so the global getAllEmailSubIDs scan
 // runs once for the whole batch instead of once per target inbound; a nil map
 // makes it compute its own (the single-add path).
-func (s *ClientService) addInboundClient(inboundSvc *InboundService, data *model.Inbound, emailSubIDs map[string]string) (bool, error) {
+func (s *ClientService) addInboundClient(inboundSvc *InboundService, data *model.Inbound, emailSubIDs map[string]string) (needRestart bool, err error) {
 	defer lockInbound(data.Id).Unlock()
 	if data.Protocol == model.WireGuard || data.Protocol == model.AmneziaWG {
 		tunnelAddressMutationMu.Lock()
@@ -455,14 +455,22 @@ func (s *ClientService) addInboundClient(inboundSvc *InboundService, data *model
 
 	db := database.GetDB()
 	tx := db.Begin()
+	if tx.Error != nil {
+		return false, tx.Error
+	}
 
 	markDirty := false
 	defer func() {
 		if err != nil {
+			needRestart = true // runtime may have been touched before rollback
 			tx.Rollback()
 			return
 		}
-		tx.Commit()
+		if commitErr := tx.Commit().Error; commitErr != nil {
+			err = commitErr
+			needRestart = true
+			return
+		}
 		if oldInbound.Protocol == model.TUIC && oldInbound.NodeID == nil {
 			inboundSvc.applyLocalTuic(oldInbound.Id)
 		}
@@ -473,7 +481,7 @@ func (s *ClientService) addInboundClient(inboundSvc *InboundService, data *model
 		}
 	}()
 
-	needRestart := false
+	needRestart = false
 	rt, push, dirty, perr := inboundSvc.nodePushPlan(oldInbound)
 	if perr != nil {
 		err = perr
@@ -485,7 +493,9 @@ func (s *ClientService) addInboundClient(inboundSvc *InboundService, data *model
 	if oldInbound.NodeID == nil {
 		for _, client := range clients {
 			if len(client.Email) > 0 {
-				inboundSvc.AddClientStat(tx, data.Id, &client)
+				if err = inboundSvc.AddClientStat(tx, data.Id, &client); err != nil {
+					return false, err
+				}
 			}
 		}
 		if !push {
@@ -525,7 +535,9 @@ func (s *ClientService) addInboundClient(inboundSvc *InboundService, data *model
 	} else {
 		for _, client := range clients {
 			if len(client.Email) > 0 {
-				inboundSvc.AddClientStat(tx, data.Id, &client)
+				if err = inboundSvc.AddClientStat(tx, data.Id, &client); err != nil {
+					return false, err
+				}
 			}
 			if push {
 				if err1 := rt.AddClient(context.Background(), oldInbound, client); err1 != nil {

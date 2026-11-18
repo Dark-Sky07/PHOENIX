@@ -162,13 +162,18 @@ func (s *ResellerSignupService) Register(token, email string, secret []byte, now
 	}
 
 	var inboundSvc InboundService
-	needRestart, err := clients.Create(&inboundSvc, &ClientCreatePayload{Client: client, InboundIds: template.InboundIds})
+	payload := &ClientCreatePayload{Client: client, InboundIds: template.InboundIds}
+	needRestart, err := clients.Create(&inboundSvc, payload)
 	if err != nil {
-		return "", false, err
+		rollbackRestart, rollbackErr := clients.RollbackNewClientCreate(&inboundSvc, email, payload.Client.SubID)
+		if rollbackErr != nil {
+			return "", needRestart || rollbackRestart, fmt.Errorf("client creation failed: %w (rollback: %v)", err, rollbackErr)
+		}
+		return "", needRestart || rollbackRestart, err
 	}
 	if err := resellerSvc.AssignClientsWithSales(resellerID, []string{email}, []string{email}); err != nil {
 		// Do not leave an unowned client behind if the visibility mapping fails.
-		rollbackRestart, rollbackErr := clients.DeleteByEmail(&inboundSvc, email, false)
+		rollbackRestart, rollbackErr := clients.RollbackNewClientCreate(&inboundSvc, email, payload.Client.SubID)
 		if rollbackErr != nil {
 			return "", needRestart || rollbackRestart, fmt.Errorf("client ownership failed: %w (rollback: %v)", err, rollbackErr)
 		}

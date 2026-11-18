@@ -65,6 +65,9 @@ func (s *ClientService) Create(inboundSvc *InboundService, payload *ClientCreate
 	if client.SubID == "" {
 		client.SubID = uuid.NewString()
 	}
+	// Retain the generated identity for callers that must safely compensate a
+	// partial multi-inbound create without deleting a different client.
+	payload.Client.SubID = client.SubID
 	if !client.Enable {
 		client.Enable = true
 	}
@@ -130,7 +133,7 @@ func (s *ClientService) Create(inboundSvc *InboundService, payload *ClientCreate
 			Settings: string(settingsPayload),
 		})
 		if addErr != nil {
-			return needRestart, addErr
+			return needRestart || nr, addErr
 		}
 		if nr {
 			needRestart = true
@@ -998,4 +1001,25 @@ func (s *ClientService) RevokeSubscription(inboundSvc *InboundService, email str
 		return "", err
 	}
 	return newSubID, nil
+}
+
+// RollbackNewClientCreate compensates a partial multi-inbound create only if
+// the persisted client still has the unique identity generated for that
+// request. This is best effort: runtime operations and DB writes are not one
+// transaction, and callers must surface rollback failures.
+func (s *ClientService) RollbackNewClientCreate(inboundSvc *InboundService, email, subID string) (bool, error) {
+	if strings.TrimSpace(email) == "" || strings.TrimSpace(subID) == "" {
+		return false, nil
+	}
+	rec, err := s.GetRecordByEmail(nil, email)
+	if database.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if rec.SubID != subID {
+		return false, errors.New("partial client identity changed; refusing rollback")
+	}
+	return s.Delete(inboundSvc, rec.Id, false)
 }

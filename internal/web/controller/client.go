@@ -398,8 +398,27 @@ func (a *ClientController) create(c *gin.Context) {
 			return
 		}
 	}
+	generatedIdentity := newResellerClient && strings.TrimSpace(payload.Client.SubID) == ""
 	needRestart, err := a.clientService.Create(&a.inboundService, &payload)
 	if err != nil {
+		if generatedIdentity {
+			rollbackRestart, rollbackErr := a.clientService.RollbackNewClientCreate(&a.inboundService, payload.Client.Email, payload.Client.SubID)
+			needRestart = needRestart || rollbackRestart
+			if rollbackErr != nil {
+				if needRestart {
+					a.xrayService.SetToNeedRestart()
+				}
+				jsonMsg(c, "client creation failed; rollback also failed", fmt.Errorf("%w (rollback: %v)", err, rollbackErr))
+				return
+			}
+		}
+		if needRestart {
+			a.xrayService.SetToNeedRestart()
+		}
+		if newResellerClient && !generatedIdentity {
+			jsonMsg(c, "client creation failed; verify custom-identity client manually", err)
+			return
+		}
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 		return
 	}
@@ -418,11 +437,25 @@ func (a *ClientController) create(c *gin.Context) {
 			// transaction. If this was a new client, compensate the persisted
 			// client/attachment mutation so a mapping failure cannot leave an
 			// invisible orphan behind. Existing clients are never deleted.
-			if newResellerClient {
-				if _, rollbackErr := a.clientService.DeleteByEmail(&a.inboundService, payload.Client.Email, false); rollbackErr != nil {
+			if newResellerClient && generatedIdentity {
+				rollbackRestart, rollbackErr := a.clientService.RollbackNewClientCreate(&a.inboundService, payload.Client.Email, payload.Client.SubID)
+				needRestart = needRestart || rollbackRestart
+				if rollbackErr != nil {
+					if needRestart {
+						a.xrayService.SetToNeedRestart()
+					}
 					jsonMsg(c, "client ownership failed; rollback also failed", fmt.Errorf("%w (rollback: %v)", err, rollbackErr))
 					return
 				}
+			} else if newResellerClient {
+				if needRestart {
+					a.xrayService.SetToNeedRestart()
+				}
+				jsonMsg(c, "client ownership failed; verify custom-identity client manually", err)
+				return
+			}
+			if needRestart {
+				a.xrayService.SetToNeedRestart()
 			}
 			jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 			return
