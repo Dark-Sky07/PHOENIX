@@ -15,7 +15,14 @@ func TestResellerImportRejectsOverflowBeforeCreatingClients(t *testing.T) {
 	if err := db.Create(&inbound).Error; err != nil {
 		t.Fatal(err)
 	}
-	scope := &ClientTransferScope{Reseller: true, ResellerID: 1, InboundIDs: map[int]struct{}{inbound.Id: {}}}
+	reseller := model.Reseller{Username: "transfer-overflow", Password: "hash", Enable: true}
+	if err := db.Create(&reseller).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&model.ResellerInbound{ResellerId: reseller.Id, InboundId: inbound.Id}).Error; err != nil {
+		t.Fatal(err)
+	}
+	scope := &ClientTransferScope{Reseller: true, ResellerID: reseller.Id, Emails: map[string]struct{}{}, InboundIDs: map[int]struct{}{inbound.Id: {}}}
 	envelope := ClientTransferEnvelope{Format: clientTransferFormat, Version: clientTransferVersion}
 	for _, email := range []string{"large-a@example.test", "large-b@example.test", "large-c@example.test"} {
 		envelope.Clients = append(envelope.Clients, ClientTransferEntry{Client: model.Client{Email: email, TotalGB: math.MaxInt64 / 2}, InboundIds: []int{inbound.Id}})
