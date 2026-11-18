@@ -1443,7 +1443,15 @@ func (a *ClientController) scopeResellerClientWrite(reseller *model.Reseller, pa
 		return err
 	}
 	var addBytes int64
+	seenEmails := make(map[string]bool, len(payloads))
 	for _, payload := range payloads {
+		key := strings.ToLower(strings.TrimSpace(payload.Client.Email))
+		if key != "" {
+			if previouslyPriced, exists := seenEmails[key]; exists && (previouslyPriced || payload.SalePrice != nil) {
+				return errors.New("duplicate clients with declared sale prices are not allowed")
+			}
+			seenEmails[key] = seenEmails[key] || payload.SalePrice != nil
+		}
 		if err := service.ValidateResellerSalePrice(payload.SalePrice); err != nil {
 			return err
 		}

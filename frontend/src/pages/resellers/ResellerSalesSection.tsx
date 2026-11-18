@@ -99,7 +99,11 @@ export default function ResellerSalesSection({ resellerId, self = false }: Props
           <Statistic title={t('resellers.totalQuotaSold', 'Traffic allocated')} value={SizeFormatter.sizeFormat(report?.totalTrafficBytes ?? 0)} />
           <Statistic title={t('resellers.unknownPrices', 'Unknown prices')} value={report?.unknownPrices ?? 0} />
           {Object.entries(report?.amountsMinor ?? {}).map(([currency, amount]) => (
-            <Statistic key={currency} title={`${t('resellers.declaredSales', 'Declared sales')} (${currency}, ${t('resellers.minorUnits', 'minor units')})`} value={amount} />
+            <div key={currency}>
+              <Typography.Text type="secondary">{`${t('resellers.declaredSales', 'Declared sales')} (${currency}, ${t('resellers.minorUnits', 'minor units')})`}</Typography.Text>
+              <br />
+              <Typography.Text>{amount}</Typography.Text>
+            </div>
           ))}
         </Space>
         {reportQuery.isError ? (
