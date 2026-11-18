@@ -1433,6 +1433,23 @@ export const sections: readonly Section[] = [
       },
       {
         method: 'GET',
+        path: '/panel/api/resellers/report/:id/sales',
+        summary: 'Recorded account creations and initial traffic by UTC day, month or year; historical prices are not included.',
+        params: [
+          { name: 'id', in: 'path', type: 'integer', desc: 'Reseller id.' },
+          { name: 'period', in: 'query', type: 'string', optional: true, desc: 'daily, monthly or yearly.' },
+          { name: 'from', in: 'query', type: 'integer', optional: true, desc: 'Inclusive Unix milliseconds.' },
+          { name: 'to', in: 'query', type: 'integer', optional: true, desc: 'Exclusive Unix milliseconds.' },
+        ],
+      },
+      {
+        method: 'GET',
+        path: '/panel/api/resellers/report/:id/sales/export',
+        summary: 'Export the recorded account creation report as CSV; accepts the same filters as the sales report.',
+        params: [{ name: 'id', in: 'path', type: 'integer', desc: 'Reseller id.' }],
+      },
+      {
+        method: 'GET',
         path: '/panel/api/resellers/export',
         summary:
           'Download the full resellers list with live usage numbers as CSV (UTF-8 with BOM; one row per reseller).',
@@ -1613,6 +1630,21 @@ export const sections: readonly Section[] = [
         path: '/panel/api/reseller/report/export',
         summary:
           'Download the signed-in reseller own client report as CSV (UTF-8 with BOM, CRLF rows, RFC 4180 quoting; traffic in binary GB).',
+      },
+      {
+        method: 'GET',
+        path: '/panel/api/reseller/sales',
+        summary: 'The signed-in reseller’s recorded account creations and initial traffic by UTC period.',
+        params: [
+          { name: 'period', in: 'query', type: 'string', optional: true, desc: 'daily, monthly or yearly.' },
+          { name: 'from', in: 'query', type: 'integer', optional: true, desc: 'Inclusive Unix milliseconds.' },
+          { name: 'to', in: 'query', type: 'integer', optional: true, desc: 'Exclusive Unix milliseconds.' },
+        ],
+      },
+      {
+        method: 'GET',
+        path: '/panel/api/reseller/sales/export',
+        summary: 'Export the signed-in reseller’s account creation report as CSV; accepts the same filters as the sales report.',
       },
       {
         method: 'POST',
