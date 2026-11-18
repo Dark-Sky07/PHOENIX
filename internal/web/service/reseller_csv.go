@@ -1,6 +1,7 @@
 package service
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -93,20 +94,26 @@ func RenderResellerClientsCSV(report *ResellerReport) []byte {
 	return w.bytes()
 }
 
-// RenderResellerSalesCSV renders account sales and allocated quota by UTC
-// period. It omits currency because retail sale amounts are not recorded.
+// RenderResellerSalesCSV renders account sales, quota and declared amounts by UTC period.
 func RenderResellerSalesCSV(report *ResellerSalesReport) []byte {
 	w := &csvRowBuilder{}
-	w.row("period", "sales", "traffic_gb", "traffic_bytes")
+	w.row("period", "sales", "traffic_gb", "traffic_bytes", "unknown_prices", "declared_amounts_minor")
 	if report == nil {
 		return w.bytes()
 	}
 	for _, bucket := range report.Buckets {
+		amounts := make([]string, 0, len(bucket.AmountsMinor))
+		for code, amount := range bucket.AmountsMinor {
+			amounts = append(amounts, code+":"+amount)
+		}
+		sort.Strings(amounts)
 		w.row(
 			bucket.Period,
 			strconv.FormatInt(bucket.Sales, 10),
 			csvGB(bucket.TrafficBytes),
 			strconv.FormatInt(bucket.TrafficBytes, 10),
+			strconv.FormatInt(bucket.UnknownPrices, 10),
+			csvEscape(strings.Join(amounts, ";")),
 		)
 	}
 	return w.bytes()

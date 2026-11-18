@@ -1321,6 +1321,7 @@ export default function ClientsPage() {
             inbounds={inbounds}
             tgBotEnable={tgBotEnable}
             groups={allGroups}
+            isReseller={isReseller}
             save={onSave}
             resetTraffic={resetTraffic}
             onOpenChange={setFormOpen}
@@ -1350,6 +1351,7 @@ export default function ClientsPage() {
             open={bulkAddOpen}
             inbounds={inbounds}
             groups={allGroups}
+            isReseller={isReseller}
             onOpenChange={setBulkAddOpen}
             onSaved={() => setBulkAddOpen(false)}
           />

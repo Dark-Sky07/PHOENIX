@@ -400,7 +400,7 @@ func (a *ClientController) create(c *gin.Context) {
 		// ownership, even when the target inbound is also reseller-owned.
 		var assignErr error
 		if newResellerClient {
-			assignErr = a.resellerService.AssignClientsWithSales(reseller.Id, []string{payload.Client.Email}, []string{payload.Client.Email})
+			assignErr = a.resellerService.AssignClientsWithSales(reseller.Id, []string{payload.Client.Email}, []string{payload.Client.Email}, map[string]*service.ResellerSalePrice{payload.Client.Email: payload.SalePrice})
 		} else {
 			assignErr = a.resellerService.AssignClient(reseller.Id, strings.TrimSpace(payload.Client.Email))
 		}
@@ -866,12 +866,18 @@ func (a *ClientController) bulkCreate(c *gin.Context) {
 		// Persist all explicit visibility mappings and sales snapshots in one
 		// transaction so the quota/report is current as soon as creation succeeds.
 		newSales := make([]string, 0, len(result.CreatedEmails))
+		pricesByEmail := make(map[string]*service.ResellerSalePrice, len(payloads))
+		for _, payload := range payloads {
+			pricesByEmail[strings.ToLower(strings.TrimSpace(payload.Client.Email))] = payload.SalePrice
+		}
+		salePrices := make(map[string]*service.ResellerSalePrice)
 		for _, email := range result.CreatedEmails {
 			if _, isNew := newResellerClients[strings.ToLower(strings.TrimSpace(email))]; isNew {
 				newSales = append(newSales, email)
+				salePrices[email] = pricesByEmail[strings.ToLower(strings.TrimSpace(email))]
 			}
 		}
-		if err := a.resellerService.AssignClientsWithSales(reseller.Id, result.CreatedEmails, newSales); err != nil {
+		if err := a.resellerService.AssignClientsWithSales(reseller.Id, result.CreatedEmails, newSales, salePrices); err != nil {
 			var rollbackErr error
 			for _, email := range result.CreatedEmails {
 				if _, isNew := newResellerClients[strings.ToLower(strings.TrimSpace(email))]; !isNew {
@@ -1438,8 +1444,14 @@ func (a *ClientController) scopeResellerClientWrite(reseller *model.Reseller, pa
 	}
 	var addBytes int64
 	for _, payload := range payloads {
+		if err := service.ValidateResellerSalePrice(payload.SalePrice); err != nil {
+			return err
+		}
 		if email := strings.TrimSpace(payload.Client.Email); email != "" {
 			if _, err := a.clientService.GetRecordByEmail(nil, email); err == nil {
+				if payload.SalePrice != nil {
+					return errors.New("a sale price can only be declared for a new client")
+				}
 				owned, ownerErr := a.resellerService.OwnsClient(reseller.Id, email)
 				if ownerErr != nil {
 					return ownerErr

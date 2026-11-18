@@ -6077,6 +6077,10 @@
                   "inboundIds": {
                     "type": "string",
                     "description": "Inbound IDs to attach the client to. At least one required."
+                  },
+                  "salePrice": {
+                    "type": "object",
+                    "description": "For reseller-created clients: optional self-declared {amountMinor, currency}; non-negative integer minor units and a supported currency code. Not payment verification."
                   }
                 },
                 "required": [
@@ -10918,7 +10922,7 @@
         "tags": [
           "Resellers (نمایندگی)"
         ],
-        "summary": "Recorded account creations and initial traffic by UTC day, month or year; historical prices are not included.",
+        "summary": "Recorded account creations, initial traffic and self-declared prices by UTC period. Amounts are exact decimal strings in currency minor units; unknown historical prices are counted separately. Declarations are not verified payments.",
         "operationId": "get_panel_api_resellers_report_id_sales",
         "parameters": [
           {

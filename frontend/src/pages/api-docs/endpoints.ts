@@ -593,6 +593,7 @@ export const sections: readonly Section[] = [
         params: [
           { name: 'client', in: 'body (json)', type: 'object', desc: 'Client fields: email, subId, id (uuid), password, auth, flow, totalGB, expiryTime, limitIp, tgId (numeric Telegram user ID, 0 = none), comment, enable.' },
           { name: 'inboundIds', in: 'body (json)', type: 'integer[]', desc: 'Inbound IDs to attach the client to. At least one required.' },
+          { name: 'salePrice', in: 'body (json)', type: 'object', optional: true, desc: 'For reseller-created clients: optional self-declared {amountMinor, currency}; non-negative integer minor units and a supported currency code. Not payment verification.' },
         ],
         body: '{\n  "client": {\n    "email": "alice@example.com",\n    "totalGB": 53687091200,\n    "expiryTime": 1735689600000,\n    "tgId": 0,\n    "limitIp": 0,\n    "enable": true\n  },\n  "inboundIds": [3, 5]\n}',
         response: '{\n  "success": true,\n  "msg": "Client added"\n}',
@@ -1434,7 +1435,7 @@ export const sections: readonly Section[] = [
       {
         method: 'GET',
         path: '/panel/api/resellers/report/:id/sales',
-        summary: 'Recorded account creations and initial traffic by UTC day, month or year; historical prices are not included.',
+        summary: 'Recorded account creations, initial traffic and self-declared prices by UTC period. Amounts are exact decimal strings in currency minor units; unknown historical prices are counted separately. Declarations are not verified payments.',
         params: [
           { name: 'id', in: 'path', type: 'integer', desc: 'Reseller id.' },
           { name: 'period', in: 'query', type: 'string', optional: true, desc: 'daily, monthly or yearly.' },

@@ -118,3 +118,44 @@ func TestResellerSalesReportValidatesPeriodAndRange(t *testing.T) {
 		}
 	}
 }
+
+func TestDeclaredSalePricesRemainDistinctFromUnknown(t *testing.T) {
+	setupBulkDB(t)
+	db := database.GetDB()
+	reseller := model.Reseller{Username: "declared-sales", Password: "hash", Enable: true}
+	if err := db.Create(&reseller).Error; err != nil {
+		t.Fatal(err)
+	}
+	clients := []model.ClientRecord{
+		{Email: "declared@example.test", TotalGB: 100},
+		{Email: "unknown@example.test", TotalGB: 200},
+	}
+	for i := range clients {
+		if err := db.Create(&clients[i]).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	svc := &ResellerService{}
+	emails := []string{clients[0].Email, clients[1].Email}
+	price := &ResellerSalePrice{AmountMinor: 12345, Currency: "irr"}
+	if err := svc.AssignClientsWithSales(reseller.Id, emails, emails, map[string]*ResellerSalePrice{clients[0].Email: price}); err != nil {
+		t.Fatal(err)
+	}
+	report, err := svc.SalesReport(reseller.Id, "monthly", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.UnknownPrices != 1 || report.AmountsMinor["IRR"] != "12345" || len(report.Buckets) != 1 || report.Buckets[0].UnknownPrices != 1 {
+		t.Fatalf("unexpected declared prices: %+v", report)
+	}
+	if ValidateResellerSalePrice(&ResellerSalePrice{AmountMinor: -1, Currency: "USD"}) == nil || ValidateResellerSalePrice(&ResellerSalePrice{AmountMinor: 0, Currency: "XXX"}) == nil {
+		t.Fatal("invalid prices must fail")
+	}
+}
+
+func TestDeclaredAmountTotalsDoNotLoseIntegerPrecision(t *testing.T) {
+	got := addMinorAmount("9223372036854775807", 5)
+	if got != "9223372036854775812" {
+		t.Fatalf("unexpected exact total: %s", got)
+	}
+}

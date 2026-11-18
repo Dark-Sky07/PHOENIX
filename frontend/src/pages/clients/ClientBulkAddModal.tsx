@@ -23,6 +23,7 @@ interface ClientBulkAddModalProps {
   open: boolean;
   inbounds: InboundOption[];
   groups?: string[];
+  isReseller?: boolean;
   onOpenChange: (open: boolean) => void;
   onSaved?: () => void;
 }
@@ -53,6 +54,7 @@ export default function ClientBulkAddModal({
   open,
   inbounds,
   groups = [],
+  isReseller = false,
   onOpenChange,
   onSaved,
 }: ClientBulkAddModalProps) {
@@ -61,6 +63,8 @@ export default function ClientBulkAddModal({
   const { bulkCreate } = useClients();
 
   const [form, setForm] = useState<FormState>(emptyForm);
+  const [saleAmount, setSaleAmount] = useState<number | null>(null);
+  const [saleCurrency, setSaleCurrency] = useState('');
   const [delayedStart, setDelayedStart] = useState(false);
   const [saving, setSaving] = useState(false);
   const { templates } = useUserTemplates(open);
@@ -96,6 +100,8 @@ export default function ClientBulkAddModal({
     if (!open) return;
 
     setForm(emptyForm());
+    setSaleAmount(null);
+    setSaleCurrency('');
     setDelayedStart(false);
 
   }, [open]);
@@ -204,6 +210,7 @@ export default function ClientBulkAddModal({
           enable: true,
         },
         inboundIds: form.inboundIds,
+        ...(isReseller && saleAmount !== null ? { salePrice: { amountMinor: saleAmount, currency: saleCurrency } } : {}),
       }));
       const msg = await bulkCreate(payloads);
       const ok = msg?.obj?.created ?? 0;
@@ -312,6 +319,16 @@ export default function ClientBulkAddModal({
             </Form.Item>
           )}
 
+          {isReseller && (
+            <>
+              <Form.Item label={t('resellers.declaredSaleAmountEach', 'Declared amount per account (minor units)')} extra={t('resellers.declaredSaleAmountHelp', 'Optional; self-reported, not verified payment. Enter cents or the currency’s smallest unit.')}>
+                <InputNumber min={0} max={Number.MAX_SAFE_INTEGER} precision={0} value={saleAmount} onChange={(v) => setSaleAmount(v === null ? null : Number(v))} />
+              </Form.Item>
+              <Form.Item label={t('resellers.saleCurrency', 'Currency code')}>
+                <Input maxLength={3} placeholder="IRR" value={saleCurrency} onChange={(e) => setSaleCurrency(e.target.value.toUpperCase())} />
+              </Form.Item>
+            </>
+          )}
           <Form.Item label={t('pages.clients.subId')}>
             <Space.Compact style={{ display: 'flex' }}>
               <Input

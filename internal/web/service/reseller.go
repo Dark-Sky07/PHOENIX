@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"net"
 	"net/url"
 	"sort"
@@ -74,17 +75,49 @@ type ResellerReport struct {
 	Transactions []*model.ResellerTransaction `json:"transactions"`
 }
 
+// ResellerSalePrice is a reseller-declared price, in the currency's minor
+// units. It is not a verified payment. Absence means the amount is unknown.
+type ResellerSalePrice struct {
+	AmountMinor int64  `json:"amountMinor"`
+	Currency    string `json:"currency"`
+}
+
+func ValidateResellerSalePrice(price *ResellerSalePrice) error {
+	if price == nil {
+		return nil
+	}
+	if price.AmountMinor < 0 || price.AmountMinor > 9007199254740991 {
+		return errors.New("invalid declared sale amount")
+	}
+	code, ok := moneycurrency.Normalize(price.Currency)
+	if !ok {
+		return errors.New("unsupported sale currency")
+	}
+	price.Currency = code
+	return nil
+}
+
+// addMinorAmount preserves exact totals across int64 and JavaScript number limits.
+func addMinorAmount(existing string, amount int64) string {
+	value := new(big.Int)
+	if existing != "" {
+		value.SetString(existing, 10)
+	}
+	return value.Add(value, big.NewInt(amount)).String()
+}
+
 // ResellerSalesBucket is one UTC day, month, or year of newly created client
 // accounts and the traffic quotas allocated to those accounts at sale time.
 type ResellerSalesBucket struct {
-	Period       string `json:"period"`
-	StartAt      int64  `json:"startAt"`
-	Sales        int64  `json:"sales"`
-	TrafficBytes int64  `json:"trafficBytes"`
+	Period        string            `json:"period"`
+	StartAt       int64             `json:"startAt"`
+	Sales         int64             `json:"sales"`
+	TrafficBytes  int64             `json:"trafficBytes"`
+	UnknownPrices int64             `json:"unknownPrices"`
+	AmountsMinor  map[string]string `json:"amountsMinor"`
 }
 
-// ResellerSalesReport reports recorded account/traffic sales. Currency is
-// deliberately omitted because the product does not record retail sale prices.
+// ResellerSalesReport reports snapshots and declared prices, not payments.
 type ResellerSalesReport struct {
 	ResellerId        int                   `json:"resellerId"`
 	Period            string                `json:"period"`
@@ -92,6 +125,8 @@ type ResellerSalesReport struct {
 	To                int64                 `json:"to,omitempty"`
 	TotalSales        int64                 `json:"totalSales"`
 	TotalTrafficBytes int64                 `json:"totalTrafficBytes"`
+	UnknownPrices     int64                 `json:"unknownPrices"`
+	AmountsMinor      map[string]string     `json:"amountsMinor"`
 	Buckets           []ResellerSalesBucket `json:"buckets"`
 }
 
@@ -927,7 +962,19 @@ func (s *ResellerService) AssignClients(resellerId int, emails []string) error {
 // AssignClientsWithSales records immutable account/traffic sale snapshots for
 // newly created reseller clients in the same transaction as their ownership
 // mappings. Manually assigned pre-existing clients are passed only in emails.
-func (s *ResellerService) AssignClientsWithSales(resellerId int, emails, saleEmails []string) error {
+func (s *ResellerService) AssignClientsWithSales(resellerId int, emails, saleEmails []string, declaredPrices ...map[string]*ResellerSalePrice) error {
+	prices := map[string]*ResellerSalePrice{}
+	if len(declaredPrices) > 1 {
+		return errors.New("multiple sale price maps are not allowed")
+	}
+	if len(declaredPrices) == 1 {
+		for email, price := range declaredPrices[0] {
+			if err := ValidateResellerSalePrice(price); err != nil {
+				return err
+			}
+			prices[transferEmailKey(email)] = price
+		}
+	}
 	resellerScopeMutationMu.Lock()
 	defer resellerScopeMutationMu.Unlock()
 	keys := make([]string, 0, len(emails))
@@ -965,6 +1012,11 @@ func (s *ResellerService) AssignClientsWithSales(resellerId int, emails, saleEma
 		}
 		saleSet[key] = struct{}{}
 		saleKeys = append(saleKeys, key)
+	}
+	for key := range prices {
+		if _, ok := saleSet[key]; !ok {
+			return fmt.Errorf("priced client %q is not a sale", key)
+		}
 	}
 	db := database.GetDB()
 	return db.Transaction(func(tx *gorm.DB) error {
@@ -1036,6 +1088,11 @@ func (s *ResellerService) AssignClientsWithSales(resellerId int, emails, saleEma
 					Email:          client.Email,
 					TrafficBytes:   max(client.TotalGB, 0),
 					CreatedAt:      createdAt,
+				}
+				if price := prices[key]; price != nil {
+					amount := price.AmountMinor
+					sale.AmountMinor = &amount
+					sale.Currency = price.Currency
 				}
 				if err := tx.Clauses(clause.OnConflict{
 					Columns:   []clause.Column{{Name: "reseller_id"}, {Name: "client_record_id"}},
@@ -1384,7 +1441,7 @@ func (s *ResellerService) SalesReport(resellerId int, period string, from, to in
 		return nil, err
 	}
 	buckets := make(map[string]*ResellerSalesBucket)
-	report := &ResellerSalesReport{ResellerId: resellerId, Period: period, From: from, To: to}
+	report := &ResellerSalesReport{ResellerId: resellerId, Period: period, From: from, To: to, AmountsMinor: map[string]string{}}
 	for _, sale := range sales {
 		if sale.CreatedAt <= 0 {
 			continue
@@ -1405,10 +1462,17 @@ func (s *ResellerService) SalesReport(resellerId int, period string, from, to in
 		}
 		bucket := buckets[key]
 		if bucket == nil {
-			bucket = &ResellerSalesBucket{Period: key, StartAt: start.UnixMilli()}
+			bucket = &ResellerSalesBucket{Period: key, StartAt: start.UnixMilli(), AmountsMinor: map[string]string{}}
 			buckets[key] = bucket
 		}
 		bucket.Sales++
+		if sale.AmountMinor == nil || sale.Currency == "" {
+			bucket.UnknownPrices++
+			report.UnknownPrices++
+		} else {
+			bucket.AmountsMinor[sale.Currency] = addMinorAmount(bucket.AmountsMinor[sale.Currency], *sale.AmountMinor)
+			report.AmountsMinor[sale.Currency] = addMinorAmount(report.AmountsMinor[sale.Currency], *sale.AmountMinor)
+		}
 		bucket.TrafficBytes = saturatingAddBytes(bucket.TrafficBytes, sale.TrafficBytes)
 		report.TotalSales++
 		report.TotalTrafficBytes = saturatingAddBytes(report.TotalTrafficBytes, sale.TrafficBytes)

@@ -14,6 +14,8 @@ type SalesBucket = {
   startAt: number;
   sales: number;
   trafficBytes: number;
+  unknownPrices: number;
+  amountsMinor: Record<string, string>;
 };
 
 type SalesReport = {
@@ -21,6 +23,8 @@ type SalesReport = {
   period: SalesPeriod;
   totalSales: number;
   totalTrafficBytes: number;
+  unknownPrices: number;
+  amountsMinor: Record<string, string>;
   buckets: SalesBucket[];
 };
 
@@ -88,11 +92,15 @@ export default function ResellerSalesSection({ resellerId, self = false }: Props
         )}
       >
         <Typography.Paragraph type="secondary" style={{ marginBottom: 12 }}>
-          {t('resellers.salesReportDescription', 'Successful reseller-created accounts and their initial allocated traffic, grouped by UTC period.')}
+          {t('resellers.salesReportDescription', 'Successful reseller-created accounts and their initial allocated traffic, grouped by UTC period. Prices are self-declared, not verified payments; missing prices remain unknown.')}
         </Typography.Paragraph>
         <Space size="large" wrap style={{ marginBottom: 16 }}>
           <Statistic title={t('resellers.totalSales', 'Accounts sold')} value={report?.totalSales ?? 0} />
           <Statistic title={t('resellers.totalQuotaSold', 'Traffic allocated')} value={SizeFormatter.sizeFormat(report?.totalTrafficBytes ?? 0)} />
+          <Statistic title={t('resellers.unknownPrices', 'Unknown prices')} value={report?.unknownPrices ?? 0} />
+          {Object.entries(report?.amountsMinor ?? {}).map(([currency, amount]) => (
+            <Statistic key={currency} title={`${t('resellers.declaredSales', 'Declared sales')} (${currency}, ${t('resellers.minorUnits', 'minor units')})`} value={amount} />
+          ))}
         </Space>
         {reportQuery.isError ? (
           <Typography.Text type="danger">{t('somethingWentWrong')}</Typography.Text>
@@ -121,6 +129,8 @@ export default function ResellerSalesSection({ resellerId, self = false }: Props
               columns={[
                 { title: t('resellers.table.date', 'Period'), dataIndex: 'period', key: 'period' },
                 { title: t('resellers.totalSales', 'Accounts sold'), dataIndex: 'sales', key: 'sales' },
+                { title: t('resellers.unknownPrices', 'Unknown prices'), dataIndex: 'unknownPrices', key: 'unknownPrices' },
+                { title: t('resellers.declaredSalesMinor', 'Declared sales (minor units)'), dataIndex: 'amountsMinor', key: 'amountsMinor', render: (values: Record<string, string> | undefined) => Object.entries(values ?? {}).map(([code, amount]) => `${code}: ${amount}`).join(', ') || '—' },
                 {
                   title: t('resellers.totalQuotaSold', 'Traffic allocated'),
                   dataIndex: 'trafficBytes',
