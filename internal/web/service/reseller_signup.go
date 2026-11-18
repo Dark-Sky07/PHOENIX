@@ -132,6 +132,9 @@ func (s *ResellerSignupService) Register(token, email string, secret []byte, now
 	} else if !database.IsNotFound(err) {
 		return "", false, err
 	}
+	if err := ValidateResellerAllocation(reseller, template.TotalGB); err != nil {
+		return "", false, err
+	}
 	if err := resellerSvc.CheckClientQuota(reseller, 1, template.TotalGB); err != nil {
 		return "", false, err
 	}

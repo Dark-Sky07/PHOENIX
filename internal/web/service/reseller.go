@@ -1536,6 +1536,21 @@ func checkTrafficQuotaSnapshot(reseller *model.Reseller, stat *ResellerStat, add
 	return nil
 }
 
+// ValidateResellerAllocation rejects an unlimited client under a finite reseller
+// traffic limit. A zero client quota means unlimited, not zero bytes allocated.
+func ValidateResellerAllocation(reseller *model.Reseller, allocation int64) error {
+	if reseller == nil {
+		return errors.New("reseller is required")
+	}
+	if allocation < 0 {
+		return errors.New("client traffic quota cannot be negative")
+	}
+	if reseller.TrafficLimit > 0 && allocation == 0 {
+		return errors.New("unlimited client traffic is not allowed for a limited reseller")
+	}
+	return nil
+}
+
 // CheckClientQuota verifies that adding `adding` clients is allowed and that
 // their quota fits into the traffic volume.
 func (s *ResellerService) CheckClientQuota(reseller *model.Reseller, adding int, addBytes int64) error {

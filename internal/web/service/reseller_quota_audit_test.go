@@ -136,3 +136,21 @@ func TestResellerQuotaArithmeticSaturatesAtInt64Limit(t *testing.T) {
 		t.Fatal("allocation at the integer maximum must not wrap around and be accepted")
 	}
 }
+
+func TestValidateResellerAllocationUnlimitedAndNegative(t *testing.T) {
+	for _, tc := range []struct {
+		limit, allocation int64
+		wantErr           bool
+	}{
+		{100, 0, true}, {100, -1, true}, {100, 1, false},
+		{0, 0, false}, {0, -1, true}, {0, 100, false},
+	} {
+		err := ValidateResellerAllocation(&model.Reseller{TrafficLimit: tc.limit}, tc.allocation)
+		if (err != nil) != tc.wantErr {
+			t.Fatalf("limit=%d allocation=%d: got %v, wantErr=%v", tc.limit, tc.allocation, err, tc.wantErr)
+		}
+	}
+	if ValidateResellerAllocation(nil, 1) == nil {
+		t.Fatal("missing reseller must fail")
+	}
+}

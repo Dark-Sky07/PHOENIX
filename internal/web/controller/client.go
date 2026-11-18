@@ -281,6 +281,12 @@ func (a *ClientController) importClients(c *gin.Context) {
 		return
 	}
 	if reseller != nil {
+		for _, entry := range envelope.Clients {
+			if err := service.ValidateResellerAllocation(reseller, entry.Client.TotalGB); err != nil {
+				jsonMsgObj(c, "Client transfer quota validation failed", preflight, err)
+				return
+			}
+		}
 		if err := a.resellerService.CheckClientQuota(reseller, preflight.NewClients, preflight.AdditionalQuota); err != nil {
 			jsonMsgObj(c, "Client transfer quota validation failed", preflight, err)
 			return
@@ -1447,8 +1453,8 @@ func (a *ClientController) scopeResellerClientWrite(reseller *model.Reseller, pa
 			}
 		}
 		allocation := payload.Client.TotalGB
-		if allocation < 0 {
-			return errors.New("client traffic quota cannot be negative")
+		if err := service.ValidateResellerAllocation(reseller, allocation); err != nil {
+			return err
 		}
 		if addBytes > math.MaxInt64-allocation {
 			addBytes = math.MaxInt64
@@ -1462,6 +1468,9 @@ func (a *ClientController) scopeResellerClientWrite(reseller *model.Reseller, pa
 // checkResellerClientQuotaDelta charges only the growth of a single client's
 // quota, so lowering it is always allowed.
 func (a *ClientController) checkResellerClientQuotaDelta(reseller *model.Reseller, email string, newTotalBytes int64) error {
+	if err := service.ValidateResellerAllocation(reseller, newTotalBytes); err != nil {
+		return err
+	}
 	current, err := a.clientService.GetRecordByEmail(nil, email)
 	if err != nil || current == nil {
 		return err
