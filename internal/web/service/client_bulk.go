@@ -1146,6 +1146,8 @@ type BulkCreateResult struct {
 	Created       int                `json:"created"`
 	CreatedEmails []string           `json:"createdEmails,omitempty"`
 	Skipped       []BulkCreateReport `json:"skipped,omitempty"`
+	// Generated identities are retained only for safe compensation by callers.
+	CreatedIdentities map[string]string `json:"-"`
 }
 
 type BulkCreateReport struct {
@@ -1174,6 +1176,7 @@ func (s *ClientService) BulkCreate(inboundSvc *InboundService, payloads []Client
 	type prepared struct {
 		client     model.Client
 		inboundIds []int
+		generated  bool
 	}
 	prep := make([]prepared, 0, len(payloads))
 	emails := make([]string, 0, len(payloads))
@@ -1202,7 +1205,8 @@ func (s *ClientService) BulkCreate(inboundSvc *InboundService, payloads []Client
 		}
 
 		client.Email = email
-		if client.SubID == "" {
+		generated := client.SubID == ""
+		if generated {
 			client.SubID = uuid.NewString()
 		}
 		if !client.Enable {
@@ -1226,7 +1230,7 @@ func (s *ClientService) BulkCreate(inboundSvc *InboundService, payloads []Client
 		seenEmail[le] = struct{}{}
 		seenSubID[client.SubID] = le
 
-		prep = append(prep, prepared{client: client, inboundIds: payloads[i].InboundIds})
+		prep = append(prep, prepared{client: client, inboundIds: payloads[i].InboundIds, generated: generated})
 		emails = append(emails, le)
 		subIDs = append(subIDs, client.SubID)
 	}
@@ -1327,7 +1331,7 @@ func (s *ClientService) BulkCreate(inboundSvc *InboundService, payloads []Client
 		if e == nil {
 			var nr bool
 			nr, e = s.addInboundClient(inboundSvc, &model.Inbound{Id: ibId, Settings: string(payload)}, emailSubIDs)
-			if e == nil && nr {
+			if nr {
 				needRestart = true
 			}
 		}
@@ -1341,12 +1345,30 @@ func (s *ClientService) BulkCreate(inboundSvc *InboundService, payloads []Client
 		}
 	}
 
+	result.CreatedIdentities = make(map[string]string)
 	for idx := range prep {
+		client := prep[idx].client
+		key := transferEmailKey(client.Email)
+		_, existed := existingEmailSub[key]
 		if failed[idx] {
-			skip(prep[idx].client.Email, reason[idx])
+			// Some earlier inbound may already have committed. Never delete a
+			// pre-existing client or one whose identity was caller-supplied.
+			if !existed && prep[idx].generated {
+				nr, err := s.RollbackNewClientCreate(inboundSvc, client.Email, client.SubID)
+				needRestart = needRestart || nr
+				if err != nil {
+					reason[idx] += "; rollback failed: " + err.Error()
+				}
+			} else if !existed {
+				reason[idx] += "; verify custom-identity client manually"
+			}
+			skip(client.Email, reason[idx])
 		} else {
 			result.Created++
-			result.CreatedEmails = append(result.CreatedEmails, prep[idx].client.Email)
+			result.CreatedEmails = append(result.CreatedEmails, client.Email)
+			if !existed && prep[idx].generated {
+				result.CreatedIdentities[key] = client.SubID
+			}
 		}
 	}
 	return result, needRestart, nil

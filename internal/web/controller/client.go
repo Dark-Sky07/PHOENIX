@@ -915,6 +915,9 @@ func (a *ClientController) bulkCreate(c *gin.Context) {
 	}
 	result, needRestart, err := a.clientService.BulkCreate(&a.inboundService, payloads)
 	if err != nil {
+		if needRestart {
+			a.xrayService.SetToNeedRestart()
+		}
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 		return
 	}
@@ -939,9 +942,19 @@ func (a *ClientController) bulkCreate(c *gin.Context) {
 				if _, isNew := newResellerClients[strings.ToLower(strings.TrimSpace(email))]; !isNew {
 					continue
 				}
-				if _, err := a.clientService.DeleteByEmail(&a.inboundService, email, false); err != nil && rollbackErr == nil {
-					rollbackErr = err
+				identity := result.CreatedIdentities[strings.ToLower(strings.TrimSpace(email))]
+				if identity == "" {
+					rollbackErr = errors.Join(rollbackErr, fmt.Errorf("verify custom-identity client %q manually", email))
+					continue
 				}
+				nr, err := a.clientService.RollbackNewClientCreate(&a.inboundService, email, identity)
+				needRestart = needRestart || nr
+				if err != nil {
+					rollbackErr = errors.Join(rollbackErr, err)
+				}
+			}
+			if needRestart {
+				a.xrayService.SetToNeedRestart()
 			}
 			if rollbackErr != nil {
 				jsonMsg(c, "client ownership failed; rollback also failed", fmt.Errorf("%w (rollback: %v)", err, rollbackErr))
