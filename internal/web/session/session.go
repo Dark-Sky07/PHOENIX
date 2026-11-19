@@ -14,12 +14,13 @@ import (
 )
 
 const (
-	loginUserKey      = "LOGIN_USER"
-	loginEpochKey     = "LOGIN_EPOCH"
-	loginResellerKey  = "LOGIN_RESELLER"
-	resellerEpochKey  = "LOGIN_RESELLER_EPOCH"
-	apiAuthUserKey    = "api_auth_user"
-	sessionCookieName = "phoenix"
+	loginUserKey       = "LOGIN_USER"
+	loginEpochKey      = "LOGIN_EPOCH"
+	loginResellerKey   = "LOGIN_RESELLER"
+	resellerEpochKey   = "LOGIN_RESELLER_EPOCH"
+	apiAuthUserKey     = "api_auth_user"
+	requestResellerKey = "authenticated_reseller"
+	sessionCookieName  = "phoenix"
 )
 
 func init() {
@@ -44,6 +45,24 @@ func SetLoginReseller(c *gin.Context, reseller *model.Reseller) error {
 // GetLoginReseller returns the reseller bound to the current session, or nil
 // when the session belongs to the admin (or nobody).
 func GetLoginReseller(c *gin.Context) *model.Reseller {
+	if reseller, ok := c.Get(requestResellerKey); ok {
+		return reseller.(*model.Reseller)
+	}
+	return GetCurrentLoginReseller(c)
+}
+
+// PinLoginReseller keeps the authenticated role stable for this request. A
+// revoked or temporarily unreadable session must not be mistaken for an admin.
+func PinLoginReseller(c *gin.Context, reseller *model.Reseller) {
+	if reseller != nil {
+		c.Set(requestResellerKey, reseller)
+	}
+}
+
+// GetCurrentLoginReseller revalidates the backing session and database rather
+// than returning the request-scoped principal. Callers can reject a revoked
+// session after waiting for a lock without changing the request's role.
+func GetCurrentLoginReseller(c *gin.Context) *model.Reseller {
 	if apiUser, ok := c.Get(apiAuthUserKey); ok {
 		if _, isUser := apiUser.(*model.User); isUser {
 			return nil

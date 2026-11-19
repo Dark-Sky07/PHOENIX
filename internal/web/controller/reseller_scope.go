@@ -186,7 +186,7 @@ func withResellerAllocationLock(handler gin.HandlerFunc) gin.HandlerFunc {
 		}
 		defer unlock()
 		if reseller != nil {
-			current := resellerSession(c)
+			current := session.GetCurrentLoginReseller(c)
 			if current == nil || current.Id != reseller.Id {
 				abortForbidden(c, "reseller session is no longer valid")
 				return
@@ -195,6 +195,7 @@ func withResellerAllocationLock(handler gin.HandlerFunc) gin.HandlerFunc {
 				abortForbidden(c, err.Error())
 				return
 			}
+			session.PinLoginReseller(c, current)
 		}
 		handler(c)
 	}
