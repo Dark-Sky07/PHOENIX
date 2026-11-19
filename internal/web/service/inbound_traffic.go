@@ -81,15 +81,15 @@ func (s *InboundService) addTrafficLocked(id string, inboundTraffics []*xray.Tra
 		return false, false, nil, tx.Error
 	}
 
-	renewalQuotaLocked := false
+	var unlockRenewalQuota func()
 	defer func() {
 		if err != nil {
 			tx.Rollback()
 		} else if commitErr := tx.Commit().Error; commitErr != nil {
 			err = commitErr
 		}
-		if renewalQuotaLocked {
-			resellerAllocationMu.Unlock()
+		if unlockRenewalQuota != nil {
+			unlockRenewalQuota()
 		}
 	}()
 	if id != "" {
@@ -128,8 +128,8 @@ func (s *InboundService) addTrafficLocked(id string, inboundTraffics []*xray.Tra
 	var renewErr error
 	// Allocation paths can submit work to this writer while holding the quota
 	// lock. Never block on that lock here: postpone renewal to the next tick.
-	if resellerAllocationMu.TryLock() {
-		renewalQuotaLocked = true
+	unlockRenewalQuota, renewErr = tryLockResellerAllocation()
+	if renewErr == nil && unlockRenewalQuota != nil {
 		needRestart0, count, renewErr = s.autoRenewClients(tx)
 	}
 	if renewErr != nil {

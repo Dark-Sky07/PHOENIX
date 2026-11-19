@@ -262,7 +262,11 @@ func (a *ClientController) exportClients(c *gin.Context) {
 
 func (a *ClientController) importClients(c *gin.Context) {
 	if resellerSession(c) != nil {
-		unlock := service.LockResellerAllocation()
+		unlock, err := service.LockResellerAllocation()
+		if err != nil {
+			jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
+			return
+		}
 		defer unlock()
 	}
 	var envelope service.ClientTransferEnvelope
@@ -377,7 +381,11 @@ func (a *ClientController) get(c *gin.Context) {
 
 func (a *ClientController) create(c *gin.Context) {
 	if resellerSession(c) != nil {
-		unlock := service.LockResellerAllocation()
+		unlock, err := service.LockResellerAllocation()
+		if err != nil {
+			jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
+			return
+		}
 		defer unlock()
 	}
 	var payload service.ClientCreatePayload
@@ -470,7 +478,11 @@ func (a *ClientController) create(c *gin.Context) {
 
 func (a *ClientController) update(c *gin.Context) {
 	if resellerSession(c) != nil {
-		unlock := service.LockResellerAllocation()
+		unlock, err := service.LockResellerAllocation()
+		if err != nil {
+			jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
+			return
+		}
 		defer unlock()
 	}
 	email := c.Param("email")
@@ -699,7 +711,11 @@ func resellerBulkAllocation(count int, addBytes int64) (int64, error) {
 
 func (a *ClientController) bulkAdjust(c *gin.Context) {
 	if resellerSession(c) != nil {
-		unlock := service.LockResellerAllocation()
+		unlock, err := service.LockResellerAllocation()
+		if err != nil {
+			jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
+			return
+		}
 		defer unlock()
 	}
 	var req bulkAdjustRequest
@@ -889,7 +905,11 @@ func (a *ClientController) bulkDelete(c *gin.Context) {
 
 func (a *ClientController) bulkCreate(c *gin.Context) {
 	if resellerSession(c) != nil {
-		unlock := service.LockResellerAllocation()
+		unlock, err := service.LockResellerAllocation()
+		if err != nil {
+			jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
+			return
+		}
 		defer unlock()
 	}
 	var payloads []service.ClientCreatePayload

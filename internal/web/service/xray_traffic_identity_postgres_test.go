@@ -1,12 +1,14 @@
 package service
 
 import (
+	"errors"
 	"os"
 	"testing"
 
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
@@ -65,8 +67,9 @@ func TestXrayTrafficIdentityLocksExistingRowsPostgres(t *testing.T) {
 		}
 		err := other.Where("email = ?", email).Delete(table).Error
 		other.Rollback()
-		if err == nil {
-			t.Fatalf("concurrent deletion of %T was not blocked", table)
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "55P03" {
+			t.Fatalf("deletion of %T: expected PostgreSQL lock timeout, got %v", table, err)
 		}
 	}
 	if err := tx.Commit().Error; err != nil {
@@ -75,4 +78,41 @@ func TestXrayTrafficIdentityLocksExistingRowsPostgres(t *testing.T) {
 	if err := db.Where("email = ?", email).Delete(&model.ResellerClient{}).Error; err != nil {
 		t.Fatal(err)
 	}
+}
+
+// Independent database sessions must contend on the same advisory lock.
+func TestResellerAllocationAdvisoryLockPostgres(t *testing.T) {
+	dsn := os.Getenv("PHOENIX_TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("PHOENIX_TEST_POSTGRES_DSN not set")
+	}
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = pool.Close() })
+	unlock, ok, err := acquirePostgresAllocationLock(db, true)
+	if err != nil || !ok {
+		t.Fatalf("initial acquisition: %v %v", ok, err)
+	}
+	defer func() {
+		if unlock != nil {
+			unlock()
+		}
+	}()
+	second, ok, err := acquirePostgresAllocationLock(db, false)
+	if err != nil || ok || second != nil {
+		t.Fatalf("competing acquisition: %v %v", ok, err)
+	}
+	unlock()
+	unlock = nil
+	second, ok, err = acquirePostgresAllocationLock(db, false)
+	if err != nil || !ok {
+		t.Fatalf("acquisition after release: %v %v", ok, err)
+	}
+	second()
 }

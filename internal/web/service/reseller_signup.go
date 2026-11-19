@@ -103,9 +103,12 @@ func (s *ResellerSignupService) Info(token string, secret []byte, now time.Time)
 
 // Register checks current reseller limits, creates a client from the selected
 // reusable plan, and assigns it to the reseller. The steps are serialized in
-// process but are not a single database transaction.
+// process and on PostgreSQL across participating processes, but are not a single database transaction.
 func (s *ResellerSignupService) Register(token, email string, secret []byte, now time.Time) (string, bool, error) {
-	unlock := LockResellerAllocation()
+	unlock, lockErr := LockResellerAllocation()
+	if lockErr != nil {
+		return "", false, lockErr
+	}
 	defer unlock()
 	resellerID, templateID, err := parseResellerSignupToken(token, secret, now)
 	if err != nil {

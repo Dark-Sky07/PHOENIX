@@ -181,7 +181,7 @@ jobs:
           cache: true
       - name: Stub internal/web/dist for go:embed
         run: mkdir -p internal/web/dist && touch internal/web/dist/.gitkeep
-      - name: Test PostgreSQL identity locking
+      - name: Test PostgreSQL accounting locks
         env:
           PHOENIX_TEST_POSTGRES_DSN: postgres://phoenix:phoenix@localhost:5432/phoenix_test?sslmode=disable
-        run: go test ./internal/web/service -run '^TestXrayTrafficIdentityLocksExistingRowsPostgres$' -count=1
+        run: go test ./internal/web/service -run '^(TestXrayTrafficIdentityLocksExistingRowsPostgres|TestResellerAllocationAdvisoryLockPostgres)$' -count=1
