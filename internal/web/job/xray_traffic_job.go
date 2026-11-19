@@ -2,6 +2,7 @@ package job
 
 import (
 	"encoding/json"
+	"sync"
 
 	"github.com/Dark-Sky07/phoenix/internal/logger"
 	"github.com/Dark-Sky07/phoenix/internal/web/service"
@@ -14,6 +15,7 @@ import (
 
 // XrayTrafficJob collects and processes traffic statistics from Xray, updating the database and optionally informing external APIs.
 type XrayTrafficJob struct {
+	runMu           sync.Mutex
 	settingService  service.SettingService
 	xrayService     service.XrayService
 	inboundService  service.InboundService
@@ -29,6 +31,21 @@ func NewXrayTrafficJob() *XrayTrafficJob {
 // real-time updates over WebSocket using compact delta payloads — no REST
 // fallback, scales to 10k–20k+ clients per inbound.
 func (j *XrayTrafficJob) Run() {
+	j.runOnce(j.run)
+}
+
+// A poll and its database writes must remain ordered. Cron can invoke Run
+// again while a slow poll is still persisting its previous delta; skip that
+// tick rather than advance the baseline and persist a later interval first.
+func (j *XrayTrafficJob) runOnce(run func()) {
+	if !j.runMu.TryLock() {
+		return
+	}
+	defer j.runMu.Unlock()
+	run()
+}
+
+func (j *XrayTrafficJob) run() {
 	if !j.xrayService.IsXrayRunning() {
 		return
 	}
