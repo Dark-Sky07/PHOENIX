@@ -291,3 +291,47 @@ func TestResellerQuotaCountsMixedCaseClientAllocation(t *testing.T) {
 		t.Fatalf("exact remaining allocation rejected: %v", err)
 	}
 }
+
+func TestResellerReportIncludesMixedCaseClientAndOwnedInbound(t *testing.T) {
+	setupBulkDB(t)
+	db := database.GetDB()
+	r := model.Reseller{Username: "mixed-case-report", Password: "hash", Enable: true}
+	c := model.ClientRecord{Email: "Mixed.Report@Example.Test", TotalGB: 700, Enable: true}
+	ib := mkInbound(t, 29241, model.VLESS, `{"clients":[]}`)
+	for _, v := range []any{&r, &c} {
+		if err := db.Create(v).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, v := range []any{&model.ResellerClient{ResellerId: r.Id, Email: c.Email}, &model.ResellerInbound{ResellerId: r.Id, InboundId: ib.Id}, &model.ClientInbound{ClientId: c.Id, InboundId: ib.Id}, &xray.ClientTraffic{Email: c.Email, Up: 123}} {
+		if err := db.Create(v).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	report, err := (&ResellerService{}).Report(r.Id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Clients) != 1 || report.Clients[0].Email != c.Email || report.Clients[0].Used != 123 || len(report.Clients[0].InboundIds) != 1 || report.Clients[0].InboundIds[0] != ib.Id {
+		t.Fatalf("mixed-case report lost client or attachment: %+v", report.Clients)
+	}
+}
+
+func TestResellerQuotaRejectsDanglingClientMapping(t *testing.T) {
+	setupBulkDB(t)
+	db := database.GetDB()
+	r := model.Reseller{Username: "dangling-quota", Password: "hash", Enable: true, TrafficLimit: 1000}
+	if err := db.Create(&r).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&model.ResellerClient{ResellerId: r.Id, Email: "missing@example.test"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	svc := &ResellerService{}
+	if _, err := svc.Stat(&r); err == nil {
+		t.Fatal("missing client incorrectly treated as free quota")
+	}
+	if err := svc.CheckTrafficQuota(&r, 1); err == nil {
+		t.Fatal("allocation accepted with dangling mapping")
+	}
+}

@@ -1364,6 +1364,14 @@ func (s *ResellerService) Stat(reseller *model.Reseller) (*ResellerStat, error) 
 		}
 	}
 
+	// A dangling ownership mapping can hide an allocation or usage. Do not
+	// treat it as free capacity until an administrator reconciles the record.
+	for _, key := range clientKeys {
+		if !seenClients[key] {
+			return nil, errors.New("reseller client mapping has no client record; reconciliation required")
+		}
+	}
+
 	usage, err := s.ClientUsage(usageEmails)
 	if err != nil {
 		return nil, err
@@ -1475,8 +1483,12 @@ func (s *ResellerService) Report(resellerId int) (*ResellerReport, error) {
 	}
 
 	db := database.GetDB()
+	clientKeys := make([]string, 0, len(emails))
+	for _, email := range emails {
+		clientKeys = append(clientKeys, transferEmailKey(email))
+	}
 	records := make([]*model.ClientRecord, 0, len(emails))
-	for _, batch := range chunkStrings(emails, sqlInChunk) {
+	for _, batch := range chunkStrings(clientKeys, sqlInChunk) {
 		var part []*model.ClientRecord
 		if err := db.Model(model.ClientRecord{}).Where("LOWER(TRIM(email)) IN ?", batch).Find(&part).Error; err != nil {
 			return nil, err
@@ -1491,7 +1503,7 @@ func (s *ResellerService) Report(resellerId int) (*ResellerReport, error) {
 			InboundId int
 		}
 		rows := make([]row, 0)
-		for _, batch := range chunkStrings(emails, sqlInChunk) {
+		for _, batch := range chunkStrings(clientKeys, sqlInChunk) {
 			var part []row
 			if err := db.Raw(`
 				SELECT c.email AS email, ci.inbound_id AS inbound_id
