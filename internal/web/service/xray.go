@@ -36,6 +36,9 @@ type XrayService struct {
 	inboundService InboundService
 	settingService SettingService
 	xrayAPI        xray.XrayAPI
+	trafficAPI     xray.XrayAPI
+	trafficMu      sync.Mutex
+	trafficProcess *xray.Process
 }
 
 // IsXrayRunning checks if the Xray process is currently running.
@@ -917,26 +920,35 @@ func resolveXrayLogPaths(logCfg json_util.RawMessage) json_util.RawMessage {
 
 // GetXrayTraffic fetches the current traffic statistics from the running Xray process.
 func (s *XrayService) GetXrayTraffic() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
-	if !s.IsXrayRunning() {
+	// Polls can overlap when a slow RPC exceeds the cron interval. Keep the
+	// counter baseline and dedicated connection private to one poll at a time.
+	s.trafficMu.Lock()
+	defer s.trafficMu.Unlock()
+	lock.Lock()
+	defer lock.Unlock()
+	current := p
+	if current == nil || !current.IsRunning() {
 		err := errors.New("xray is not running")
 		logger.Debug("Attempted to fetch Xray traffic, but Xray is not running:", err)
 		return nil, nil, err
 	}
-	apiPort := p.GetAPIPort()
-	if err := s.xrayAPI.Init(apiPort); err != nil {
+	if s.trafficProcess != current {
+		// The first observation might attach to an already-running core, so
+		// baseline it. Subsequent process replacements start fresh counters.
+		s.trafficAPI.ResetTrafficBaseline(s.trafficProcess != nil)
+		s.trafficProcess = current
+	}
+	if err := s.trafficAPI.Init(current.GetAPIPort()); err != nil {
 		logger.Debug("Failed to initialize Xray API:", err)
 		return nil, nil, err
 	}
-	defer s.xrayAPI.Close()
-
-	traffic, clientTraffic, err := s.xrayAPI.GetTraffic()
+	defer s.trafficAPI.Close()
+	traffic, clientTraffic, err := s.trafficAPI.GetTraffic()
 	if err != nil {
 		logger.Debug("Failed to fetch Xray traffic:", err)
 		return nil, nil, err
 	}
-	// OpenVPN/L2TP relay listeners carry traffic the daemons already account
-	// for; drop the core's copy so nothing is counted twice.
-	traffic = dropDaemonRelayTraffic(p.GetConfig(), traffic)
+	traffic = dropDaemonRelayTraffic(current.GetConfig(), traffic)
 	return traffic, clientTraffic, nil
 }
 

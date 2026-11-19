@@ -24,3 +24,17 @@ func TestTrafficCounterDeltaNewClientsAndReset(t *testing.T) {
 		t.Fatalf("negative counter changed baseline: %d %v", got, ok)
 	}
 }
+
+func TestTrafficBaselineResetOnNewCore(t *testing.T) {
+	api := &XrayAPI{}
+	api.trafficCounterDelta("user>>>alice>>>traffic>>>uplink", 200)
+	api.statsBaselineReady = true
+	api.ResetTrafficBaseline(true)
+	if got, ok := api.trafficCounterDelta("user>>>alice>>>traffic>>>uplink", 500); !ok || got != 500 {
+		t.Fatalf("new core inherited stale baseline: got %d include %v", got, ok)
+	}
+	api.ResetTrafficBaseline(false)
+	if _, ok := api.trafficCounterDelta("user>>>alice>>>traffic>>>uplink", 800); ok {
+		t.Fatal("reattaching to an existing core must establish a baseline")
+	}
+}

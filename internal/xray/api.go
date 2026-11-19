@@ -588,6 +588,14 @@ func (x *XrayAPI) GetTraffic() ([]*Traffic, []*ClientTraffic, error) {
 	return mapToSlice(tagTrafficMap), mapToSlice(emailTrafficMap), nil
 }
 
+// ResetTrafficBaseline starts a new counter epoch. Set fromZero only when the
+// caller knows the core process is newly started, not when attaching to an
+// already running process whose counters may have been persisted earlier.
+func (x *XrayAPI) ResetTrafficBaseline(fromZero bool) {
+	x.StatsLastValues = nil
+	x.statsBaselineReady = fromZero
+}
+
 // trafficCounterDelta establishes an initial baseline for a possibly already
 // running core. Counters first appearing on later polls belong to new users or
 // inbounds and their first interval must not be discarded. A counter that
