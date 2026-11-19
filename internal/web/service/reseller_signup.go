@@ -13,6 +13,7 @@ import (
 
 	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
+	"github.com/google/uuid"
 )
 
 const resellerSignupTTL = 30 * 24 * time.Hour
@@ -103,7 +104,8 @@ func (s *ResellerSignupService) Info(token string, secret []byte, now time.Time)
 
 // Register checks current reseller limits, creates a client from the selected
 // reusable plan, and assigns it to the reseller. The steps are serialized in
-// process and on PostgreSQL across participating processes, but are not a single database transaction.
+// across participating processes. A durable intent fences incomplete work,
+// but client, runtime, and ownership writes are not a single transaction.
 func (s *ResellerSignupService) Register(token, email string, secret []byte, now time.Time) (string, bool, error) {
 	unlock, lockErr := LockResellerAllocation()
 	if lockErr != nil {
@@ -145,6 +147,7 @@ func (s *ResellerSignupService) Register(token, email string, secret []byte, now
 
 	client := model.Client{
 		Email:       email,
+		SubID:       uuid.NewString(),
 		Enable:      true,
 		Security:    "auto",
 		TotalGB:     template.TotalGB,
@@ -166,19 +169,34 @@ func (s *ResellerSignupService) Register(token, email string, secret []byte, now
 
 	var inboundSvc InboundService
 	payload := &ClientCreatePayload{Client: client, InboundIds: template.InboundIds}
+	intent, err := BeginResellerClientCreation(resellerID, payload)
+	if err != nil {
+		return "", false, err
+	}
 	needRestart, err := clients.Create(&inboundSvc, payload)
 	if err != nil {
 		rollbackRestart, rollbackErr := clients.RollbackNewClientCreate(&inboundSvc, email, payload.Client.SubID)
 		if rollbackErr != nil {
 			return "", needRestart || rollbackRestart, fmt.Errorf("client creation failed: %w (rollback: %v)", err, rollbackErr)
 		}
+		if discardErr := DiscardResellerClientCreation(intent); discardErr != nil {
+			return "", needRestart || rollbackRestart, fmt.Errorf("client creation failed: %w (intent: %v)", err, discardErr)
+		}
 		return "", needRestart || rollbackRestart, err
 	}
-	if err := resellerSvc.AssignClientsWithSales(resellerID, []string{email}, []string{email}); err != nil {
-		// Do not leave an unowned client behind if the visibility mapping fails.
+	if err := resellerSvc.CompleteResellerClientCreation(resellerID, email, intent.Id, nil); err != nil {
+		// An absent intent may mean an ambiguous successful commit. Never
+		// delete a possibly committed client; require reconciliation instead.
+		exists, lookupErr := ResellerCreationIntentExists(intent)
+		if lookupErr != nil || !exists {
+			return "", needRestart, fmt.Errorf("client ownership outcome uncertain; manual reconciliation required: %w", err)
+		}
 		rollbackRestart, rollbackErr := clients.RollbackNewClientCreate(&inboundSvc, email, payload.Client.SubID)
 		if rollbackErr != nil {
 			return "", needRestart || rollbackRestart, fmt.Errorf("client ownership failed: %w (rollback: %v)", err, rollbackErr)
+		}
+		if discardErr := DiscardResellerClientCreation(intent); discardErr != nil {
+			return "", needRestart || rollbackRestart, fmt.Errorf("client ownership failed: %w (intent: %v)", err, discardErr)
 		}
 		return "", needRestart || rollbackRestart, err
 	}

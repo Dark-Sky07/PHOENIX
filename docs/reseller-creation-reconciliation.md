@@ -1,6 +1,6 @@
 # Interrupted single reseller client creation
 
-Single-client reseller creation records a durable intent before creating the
+Single-client reseller creation and public signup record a durable intent before creating the
 client. Completion removes the intent in the same database transaction as the
 ownership mapping and sale. If the panel stops mid-operation or compensation
 fails, an intent may remain in `reseller_creation_intents`. While it remains,
@@ -14,4 +14,4 @@ and runtime traffic may not be fully accounted for. Reconcile and document the
 actual state before removing any marker. An absent marker after a database
 error does not itself prove whether an operation succeeded; verify the sale,
 client and mappings. This is a safety barrier, not an atomic creation protocol.
-Bulk creation, imports and public signup do not yet use this intent mechanism.
+Bulk creation and imports do not yet use this intent mechanism.
