@@ -185,3 +185,7 @@ jobs:
         env:
           PHOENIX_TEST_POSTGRES_DSN: postgres://phoenix:phoenix@localhost:5432/phoenix_test?sslmode=disable
         run: go test ./internal/web/service -run '^(TestXrayTrafficIdentityLocksExistingRowsPostgres|TestResellerAllocationAdvisoryLockPostgres)$' -count=1
+      - name: Test PostgreSQL quota across processes
+        env:
+          PHOENIX_TEST_POSTGRES_DSN: postgres://phoenix:phoenix@localhost:5432/phoenix_test?sslmode=disable
+        run: go test ./internal/web/controller -run '^TestConcurrentResellerCreationAcrossPostgresProcesses$' -count=1

@@ -47,7 +47,7 @@ func TestResellerMultiprocessQuotaHelper(t *testing.T) {
 	}
 	defer database.CloseDB()
 	var reseller model.Reseller
-	if err := database.GetDB().Where("username = ?", "sara").First(&reseller).Error; err != nil {
+	if err := database.GetDB().Where("username = ?", os.Getenv("PHOENIX_QUOTA_USERNAME")).First(&reseller).Error; err != nil {
 		t.Fatal(err)
 	}
 	inboundID, err := strconv.Atoi(os.Getenv("PHOENIX_QUOTA_INBOUND_ID"))
@@ -103,15 +103,48 @@ func TestConcurrentResellerCreationAcrossSQLiteProcesses(t *testing.T) {
 	if err := db.Create(&model.ResellerInbound{ResellerId: reseller.Id, InboundId: inbound.Id}).Error; err != nil {
 		t.Fatal(err)
 	}
-	dir := os.Getenv("XUI_DB_FOLDER")
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	runResellerMultiprocessQuotaScenario(t, os.Getenv("XUI_DB_FOLDER"), reseller, inbound)
+}
+
+func TestConcurrentResellerCreationAcrossPostgresProcesses(t *testing.T) {
+	dsn := os.Getenv("PHOENIX_TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("PHOENIX_TEST_POSTGRES_DSN not set")
+	}
+	dir := t.TempDir()
+	t.Setenv("XUI_DB_TYPE", "postgres")
+	t.Setenv("XUI_DB_DSN", dsn)
+	t.Setenv("XUI_DB_FOLDER", dir)
+	if err := database.InitDB(""); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.CloseDB() })
+	db := database.GetDB()
+	reseller := model.Reseller{Username: "postgres-quota-test", Password: "hash", Enable: true, LoginEpoch: 1, TrafficLimit: 100}
+	if err := db.Create(&reseller).Error; err != nil {
+		t.Fatal(err)
+	}
+	inbound := model.Inbound{UserId: 1, Port: 19372, Protocol: model.VLESS, Settings: `{"clients":[]}`, Tag: "multiprocess-pg-quota"}
+	if err := db.Create(&inbound).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&model.ResellerInbound{ResellerId: reseller.Id, InboundId: inbound.Id}).Error; err != nil {
+		t.Fatal(err)
+	}
+	runResellerMultiprocessQuotaScenario(t, dir, reseller, inbound)
+}
+
+func runResellerMultiprocessQuotaScenario(t *testing.T, dir string, reseller model.Reseller, inbound model.Inbound) {
+	t.Helper()
+	db := database.GetDB()
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	cmds := make([]*exec.Cmd, 0, 2)
 	outputs := make([]*bytes.Buffer, 0, 2)
 	for i := 0; i < 2; i++ {
 		index := strconv.Itoa(i)
 		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestResellerMultiprocessQuotaHelper$", "-test.v")
-		cmd.Env = append(os.Environ(), "PHOENIX_QUOTA_CHILD_DIR="+dir, "PHOENIX_QUOTA_CHILD_INDEX="+index, "PHOENIX_QUOTA_INBOUND_ID="+strconv.Itoa(inbound.Id))
+		cmd.Env = append(os.Environ(), "PHOENIX_QUOTA_CHILD_DIR="+dir, "PHOENIX_QUOTA_CHILD_INDEX="+index, "PHOENIX_QUOTA_INBOUND_ID="+strconv.Itoa(inbound.Id), "PHOENIX_QUOTA_USERNAME="+reseller.Username)
 		output := &bytes.Buffer{}
 		cmd.Stdout, cmd.Stderr = output, output
 		if err := cmd.Start(); err != nil {
