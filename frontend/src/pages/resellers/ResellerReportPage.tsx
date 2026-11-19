@@ -119,6 +119,9 @@ export default function ResellerReportPage() {
                 )}
               />
 
+              {stat && (stat.processingRenewals ?? 0) > 0 && (
+                <Alert type="warning" showIcon message={t('resellers.processingRenewalTitle', 'Client renewal is processing or needs reconciliation')} description={t('resellers.processingRenewalReseller', 'Some operations are temporarily blocked. Contact your administrator if the renewal remains in progress.')} />
+              )}
               {stat?.hasUnlimitedClient && stat.reseller.trafficLimit > 0 && (
                 <Alert type="warning" showIcon message={t('resellers.unlimitedClientWarning', 'A client has unlimited traffic under a limited reseller. New allocations and renewals are blocked until an administrator resolves this.')} />
               )}

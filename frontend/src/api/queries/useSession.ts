@@ -33,6 +33,7 @@ export interface ResellerStat {
   clientCount: number;
   onlineCount: number;
   pendingCreations?: number;
+  processingRenewals?: number;
   hasUnlimitedClient?: boolean;
   usedTraffic: number;
   allocatedTraffic: number;
@@ -87,6 +88,7 @@ export interface ResellerReport {
   transactions: ResellerTransaction[];
   trafficArchives?: ResellerTrafficArchive[];
   creationIssues?: { id: string; operation: string; email: string; createdAt: number }[];
+  renewalIssues?: { orderId: string; targetRef: string; createdAt: number }[];
 }
 
 export interface SessionInfo {

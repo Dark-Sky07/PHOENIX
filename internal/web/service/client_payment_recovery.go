@@ -28,17 +28,46 @@ func checkProcessingClientRenewal(tx *gorm.DB, email string) error {
 	return nil
 }
 
-func checkResellerProcessingClientRenewals(tx *gorm.DB, resellerID int) error {
+func processingClientRenewalsQuery(tx *gorm.DB, resellerID int) *gorm.DB {
+	// EXISTS avoids duplicate counts if legacy ownership mappings differ only
+	// by case or whitespace.
+	return tx.Model(&model.PaymentOrder{}).
+		Where("payment_orders.target_type = ? AND payment_orders.status = ?", "client_renew", "processing").
+		Where("EXISTS (SELECT 1 FROM reseller_clients rc WHERE rc.reseller_id = ? AND LOWER(TRIM(rc.email)) = LOWER(TRIM(payment_orders.target_ref)))", resellerID)
+}
+
+func countResellerProcessingClientRenewals(tx *gorm.DB, resellerID int) (int64, error) {
 	var count int64
-	if err := tx.Model(&model.PaymentOrder{}).
-		Joins("JOIN reseller_clients rc ON LOWER(TRIM(rc.email)) = LOWER(TRIM(payment_orders.target_ref))").
-		Where("rc.reseller_id = ? AND payment_orders.target_type = ? AND payment_orders.status = ?", resellerID, "client_renew", "processing").Count(&count).Error; err != nil {
+	err := processingClientRenewalsQuery(tx, resellerID).Count(&count).Error
+	return count, err
+}
+
+func checkResellerProcessingClientRenewals(tx *gorm.DB, resellerID int) error {
+	count, err := countResellerProcessingClientRenewals(tx, resellerID)
+	if err != nil {
 		return err
 	}
 	if count > 0 {
 		return errors.New("reseller client renewal requires manual reconciliation; contact the administrator")
 	}
 	return nil
+}
+
+// ProcessingRenewalIssue is deliberately restricted to administrators. A
+// processing order may still be running; its presence is not proof of failure.
+type ProcessingRenewalIssue struct {
+	OrderId   string `json:"orderId"`
+	TargetRef string `json:"targetRef"`
+	CreatedAt int64  `json:"createdAt"`
+}
+
+func (s *ResellerService) ProcessingRenewalIssues(resellerID int) ([]ProcessingRenewalIssue, error) {
+	if resellerID <= 0 {
+		return nil, errors.New("invalid reseller id")
+	}
+	rows := make([]ProcessingRenewalIssue, 0)
+	err := processingClientRenewalsQuery(database.GetDB(), resellerID).Select("payment_orders.order_id", "payment_orders.target_ref", "payment_orders.created_at").Order("payment_orders.id DESC").Limit(100).Scan(&rows).Error
+	return rows, err
 }
 
 // CheckResellerProcessingClientRenewals is used before reseller mutations and

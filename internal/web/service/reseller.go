@@ -43,6 +43,7 @@ type ResellerStat struct {
 	ClientCount        int             `json:"clientCount"`
 	OnlineCount        int             `json:"onlineCount"`
 	PendingCreations   int64           `json:"pendingCreations"`
+	ProcessingRenewals int64           `json:"processingRenewals"`
 	HasUnlimitedClient bool            `json:"hasUnlimitedClient"`
 	UsedTraffic        int64           `json:"usedTraffic"`
 	AllocatedTraffic   int64           `json:"allocatedTraffic"`
@@ -78,7 +79,8 @@ type ResellerReport struct {
 	TrafficArchives []model.ResellerTrafficArchive `json:"trafficArchives"`
 	// Populated by the admin report handler only; self-service never exposes
 	// operational details of potentially unowned client records.
-	CreationIssues []ResellerCreationIssue `json:"creationIssues,omitempty"`
+	CreationIssues []ResellerCreationIssue  `json:"creationIssues,omitempty"`
+	RenewalIssues  []ProcessingRenewalIssue `json:"renewalIssues,omitempty"`
 }
 
 // ResellerSalePrice is a reseller-declared price, in the currency's minor
@@ -1304,6 +1306,11 @@ func (s *ResellerService) Stat(reseller *model.Reseller) (*ResellerStat, error) 
 	db := database.GetDB()
 	stat := &ResellerStat{Reseller: reseller, Currency: "USD"}
 	if err := db.Model(&model.ResellerCreationIntent{}).Where("reseller_id = ?", reseller.Id).Count(&stat.PendingCreations).Error; err != nil {
+		return nil, err
+	}
+	var err error
+	stat.ProcessingRenewals, err = countResellerProcessingClientRenewals(db, reseller.Id)
+	if err != nil {
 		return nil, err
 	}
 	var settingSvc SettingService

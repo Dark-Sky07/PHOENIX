@@ -269,3 +269,35 @@ func TestInterruptedPaidRenewalBlocksResellerClientMutation(t *testing.T) {
 		t.Fatalf("mutation not blocked: %d %s", w.Code, w.Body.String())
 	}
 }
+
+func TestProcessingRenewalReportRestrictsOrderDetailsToAdmin(t *testing.T) {
+	router := setupResellerInboundRouter(t)
+	db := database.GetDB()
+	var reseller model.Reseller
+	if err := db.Where("username = ?", "sara").First(&reseller).Error; err != nil {
+		t.Fatal(err)
+	}
+	client := model.ClientRecord{Email: "test-renewal@example.test", TotalGB: 100, Enable: true}
+	if err := db.Create(&client).Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range []any{&model.ResellerClient{ResellerId: reseller.Id, Email: client.Email}, &model.PaymentOrder{OrderId: "order-sensitive", TargetType: "client_renew", TargetRef: "TEST-RENEWAL@example.test", Status: "processing"}} {
+		if err := db.Create(v).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	NewResellerController(router.Group("/panel/api/resellers"))
+	NewResellerSelfController(router.Group("/panel/api/reseller"))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, fmt.Sprintf("/panel/api/resellers/report/%d", reseller.Id), nil))
+	body := w.Body.String()
+	if !strings.Contains(body, `"processingRenewals":1`) || !strings.Contains(body, "order-sensitive") || !strings.Contains(body, `"renewalIssues"`) {
+		t.Fatalf("admin details missing: %s", body)
+	}
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/panel/api/reseller/report", nil))
+	body = w.Body.String()
+	if !strings.Contains(body, `"processingRenewals":1`) || strings.Contains(body, "order-sensitive") || strings.Contains(body, "renewalIssues") {
+		t.Fatalf("self report missing status or leaked details: %s", body)
+	}
+}

@@ -117,6 +117,11 @@ func (a *ResellerController) report(c *gin.Context) {
 		jsonMsg(c, "", err)
 		return
 	}
+	report.RenewalIssues, err = a.resellerService.ProcessingRenewalIssues(id)
+	if err != nil {
+		jsonMsg(c, "", err)
+		return
+	}
 	jsonObj(c, report, nil)
 }
 
