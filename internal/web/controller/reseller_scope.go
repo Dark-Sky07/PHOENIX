@@ -199,6 +199,10 @@ func withResellerAllocationLock(handler gin.HandlerFunc) gin.HandlerFunc {
 				abortForbidden(c, err.Error())
 				return
 			}
+			if err := service.CheckResellerProcessingClientRenewals(current.Id); err != nil {
+				abortForbidden(c, err.Error())
+				return
+			}
 			session.PinLoginReseller(c, current)
 		}
 		handler(c)

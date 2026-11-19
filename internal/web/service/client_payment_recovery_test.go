@@ -6,6 +6,7 @@ import (
 
 	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
+	"gorm.io/gorm"
 )
 
 func TestClientRenewalAmbiguousCompletionIsNotReplayed(t *testing.T) {
@@ -47,5 +48,42 @@ func TestClientRenewalAmbiguousCompletionIsNotReplayed(t *testing.T) {
 	}
 	if second.ExpiryTime != first.ExpiryTime {
 		t.Fatalf("replay changed expiry: %d -> %d", first.ExpiryTime, second.ExpiryTime)
+	}
+}
+
+func TestInterruptedClientRenewalBlocksSubsequentOrdersAndResellerQuota(t *testing.T) {
+	r, client := seedResellerRenewal(t)
+	db := database.GetDB()
+	first := model.PaymentOrder{OrderId: "first-ambiguous", TargetType: "client_renew", TargetRef: client.Email, Amount: 10, Status: "processing"}
+	second := model.PaymentOrder{OrderId: "second-payment", TargetType: "client_renew", TargetRef: strings.ToUpper(client.Email), Amount: 10, AddDays: 1, Status: "pending"}
+	for _, v := range []any{&first, &second} {
+		if err := db.Create(v).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := (&ClientService{}).GetRecordByEmail(nil, client.Email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&PaymentWebhookService{}).ProcessWebhook(PaymentWebhookPayload{OrderId: second.OrderId, Amount: 10}); err == nil || !strings.Contains(err.Error(), "reconciliation") {
+		t.Fatalf("second payment not blocked: %v", err)
+	}
+	var reloaded model.PaymentOrder
+	if err := db.First(&reloaded, second.Id).Error; err != nil || reloaded.Status != "pending" {
+		t.Fatalf("second order changed: %+v %v", reloaded, err)
+	}
+	after, err := (&ClientService{}).GetRecordByEmail(nil, client.Email)
+	if err != nil || after.ExpiryTime != before.ExpiryTime {
+		t.Fatalf("client changed: %+v %v", after, err)
+	}
+	if err := (&ResellerService{}).CheckClientQuota(&r, 1, 1); err == nil {
+		t.Fatal("allocation allowed with ambiguous renewal")
+	}
+	err = db.Transaction(func(tx *gorm.DB) error {
+		_, err := (&renewalQuotaTracker{tx: tx, accounts: map[int]*renewalQuotaSnapshot{}}).load(r.Id)
+		return err
+	})
+	if err == nil {
+		t.Fatal("automatic renewal allowed with ambiguous renewal")
 	}
 }

@@ -245,3 +245,27 @@ func TestCreationIssueReportShowsStatusWithoutLeakingSecrets(t *testing.T) {
 		t.Fatalf("self report exposed issue details or omitted count: %s", body)
 	}
 }
+
+func TestInterruptedPaidRenewalBlocksResellerClientMutation(t *testing.T) {
+	router := setupResellerInboundRouter(t)
+	NewClientController(router.Group("/panel/api/clients"))
+	db := database.GetDB()
+	var reseller model.Reseller
+	if err := db.Where("username = ?", "sara").First(&reseller).Error; err != nil {
+		t.Fatal(err)
+	}
+	client := model.ClientRecord{Email: "paid@example.test", Enable: true, TotalGB: 100}
+	if err := db.Create(&client).Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range []any{&model.ResellerClient{ResellerId: reseller.Id, Email: client.Email}, &model.PaymentOrder{OrderId: "pending-review", TargetType: "client_renew", TargetRef: "PAID@EXAMPLE.TEST", Status: "processing"}} {
+		if err := db.Create(v).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/panel/api/clients/add", strings.NewReader(`{}`)))
+	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "reconciliation") {
+		t.Fatalf("mutation not blocked: %d %s", w.Code, w.Body.String())
+	}
+}

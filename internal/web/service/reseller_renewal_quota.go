@@ -28,6 +28,9 @@ func (t *renewalQuotaTracker) load(id int) (*renewalQuotaSnapshot, error) {
 	if found := t.accounts[id]; found != nil {
 		return found, nil
 	}
+	if err := checkResellerProcessingClientRenewals(t.tx, id); err != nil {
+		return nil, err
+	}
 	var pending int64
 	if err := t.tx.Model(&model.ResellerCreationIntent{}).Where("reseller_id = ?", id).Count(&pending).Error; err != nil {
 		return nil, err

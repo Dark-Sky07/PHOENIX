@@ -10,8 +10,42 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
 	moneycurrency "github.com/Dark-Sky07/phoenix/internal/util/currency"
+	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
+
+// Interrupted renewals must not be obscured by later changes. Callers hold
+// the allocation lock; processing remains ambiguous until an operator checks
+// the payment and its SQL/runtime effects.
+func checkProcessingClientRenewal(tx *gorm.DB, email string) error {
+	var count int64
+	if err := tx.Model(&model.PaymentOrder{}).Where("target_type = ? AND status = ? AND LOWER(TRIM(target_ref)) = ?", "client_renew", "processing", transferEmailKey(email)).Count(&count).Error; err != nil {
+		return err
+	}
+	if count > 0 {
+		return errors.New("client renewal requires manual reconciliation")
+	}
+	return nil
+}
+
+func checkResellerProcessingClientRenewals(tx *gorm.DB, resellerID int) error {
+	var count int64
+	if err := tx.Model(&model.PaymentOrder{}).
+		Joins("JOIN reseller_clients rc ON LOWER(TRIM(rc.email)) = LOWER(TRIM(payment_orders.target_ref))").
+		Where("rc.reseller_id = ? AND payment_orders.target_type = ? AND payment_orders.status = ?", resellerID, "client_renew", "processing").Count(&count).Error; err != nil {
+		return err
+	}
+	if count > 0 {
+		return errors.New("reseller client renewal requires manual reconciliation; contact the administrator")
+	}
+	return nil
+}
+
+// CheckResellerProcessingClientRenewals is used before reseller mutations and
+// allocation checks. Admin corrections require the documented manual process.
+func CheckResellerProcessingClientRenewals(resellerID int) error {
+	return checkResellerProcessingClientRenewals(database.GetDB(), resellerID)
+}
 
 // A client renewal touches both SQL and runtime services. Until those effects
 // can be committed atomically, claim the order durably before touching either.
@@ -50,6 +84,9 @@ func (s *PaymentWebhookService) processClientRenewalPayment(p PaymentWebhookPayl
 	tolerance := 0.5 / math.Pow10(moneycurrency.FractionDigits(currency))
 	if math.IsNaN(order.Amount) || math.IsInf(order.Amount, 0) || (p.Amount > 0 && order.Amount > 0 && math.Abs(p.Amount-order.Amount) > tolerance) {
 		return nil, errors.New("webhook amount does not match pending order")
+	}
+	if err := checkProcessingClientRenewal(db, order.TargetRef); err != nil {
+		return nil, err
 	}
 	updated, err := s.preparePaidClientRenewal(&order)
 	if err != nil {

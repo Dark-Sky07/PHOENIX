@@ -16,3 +16,10 @@ change the status back to pending**, because this can grant a renewal twice.
 There is currently no automatic reconciliation or transaction spanning the
 runtime and the database. Coordinate any manual correction with a backup and an
 audit record.
+
+While a `client_renew` order remains `processing`, a subsequent payment for the
+same normalized email is rejected. Reseller client mutations, participating
+quota checks and automatic renewals are also blocked while the affected client
+remains mapped to that reseller. These safeguards do not fence admin actions,
+external runtime changes, or changes to ownership outside the participating
+paths. Review those separately during reconciliation.

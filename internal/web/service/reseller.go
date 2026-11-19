@@ -1774,6 +1774,9 @@ func (s *ResellerService) CheckTrafficQuota(reseller *model.Reseller, addBytes i
 	if err := CheckPendingResellerCreations(reseller.Id); err != nil {
 		return err
 	}
+	if err := CheckResellerProcessingClientRenewals(reseller.Id); err != nil {
+		return err
+	}
 	if addBytes < 0 {
 		return errors.New("traffic allocation cannot be negative")
 	}
@@ -1833,6 +1836,9 @@ func (s *ResellerService) CheckClientQuota(reseller *model.Reseller, adding int,
 		return errors.New("reseller is required")
 	}
 	if err := CheckPendingResellerCreations(reseller.Id); err != nil {
+		return err
+	}
+	if err := CheckResellerProcessingClientRenewals(reseller.Id); err != nil {
 		return err
 	}
 	if adding < 0 {
