@@ -2547,6 +2547,7 @@
     "depositLinkCopied": "Wallet top-up link copied",
     "exportCsv": "Export CSV",
     "exportListCsv": "Export list (CSV)",
+    "unlimitedClientWarning": "A client has unlimited traffic under a limited reseller. New allocations and renewals are blocked until an administrator resolves this.",
     "pendingCreationTitle": "Client operations need reconciliation",
     "pendingCreationAdmin": "Client operations are blocked until an administrator investigates. Do not blindly retry or remove the records.",
     "pendingCreationReseller": "Some client operations are temporarily blocked. Contact your administrator; do not retry the interrupted operation.",

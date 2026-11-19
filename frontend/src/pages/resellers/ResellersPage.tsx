@@ -911,6 +911,9 @@ export default function ResellersPage() {
                       />
                     </Col>
                   </Row>
+                  {reportQuery.data.stat.hasUnlimitedClient && reportQuery.data.stat.reseller.trafficLimit > 0 && (
+                    <Alert type="warning" showIcon message={t('resellers.unlimitedClientWarning', 'A client has unlimited traffic under a limited reseller. New allocations and renewals are blocked until an administrator resolves this.')} />
+                  )}
                   {(reportQuery.data.stat.pendingCreations ?? 0) > 0 && (
                     <Alert
                       type="warning"

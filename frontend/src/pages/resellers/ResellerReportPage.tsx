@@ -119,6 +119,9 @@ export default function ResellerReportPage() {
                 )}
               />
 
+              {stat?.hasUnlimitedClient && stat.reseller.trafficLimit > 0 && (
+                <Alert type="warning" showIcon message={t('resellers.unlimitedClientWarning', 'A client has unlimited traffic under a limited reseller. New allocations and renewals are blocked until an administrator resolves this.')} />
+              )}
               {stat && (stat.pendingCreations ?? 0) > 0 && (
                 <Alert type="warning" showIcon message={t('resellers.pendingCreationTitle', 'Client operations need reconciliation')} description={t('resellers.pendingCreationReseller', 'Some client operations are temporarily blocked. Contact your administrator; do not retry the interrupted operation.')} />
               )}

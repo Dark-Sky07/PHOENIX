@@ -33,6 +33,7 @@ export interface ResellerStat {
   clientCount: number;
   onlineCount: number;
   pendingCreations?: number;
+  hasUnlimitedClient?: boolean;
   usedTraffic: number;
   allocatedTraffic: number;
   remainingTraffic: number;

@@ -359,7 +359,7 @@ func TestLimitedResellerWithUnlimitedClientCannotAllocateOrRenew(t *testing.T) {
 	}
 	svc := &ResellerService{}
 	stat, err := svc.Stat(&r)
-	if err != nil || !stat.OverQuota || !stat.HasUnlimitedClient || stat.AllocatedTraffic != 110 {
+	if err != nil || !stat.OverQuota || !stat.HasUnlimitedClient || stat.AllocatedTraffic != 110 || stat.RemainingTraffic != 0 {
 		t.Fatalf("unlimited client must exhaust finite allocation: %+v %v", stat, err)
 	}
 	if err := svc.CheckClientQuota(&r, 1, 1); err == nil {

@@ -1446,6 +1446,9 @@ func (s *ResellerService) Stat(reseller *model.Reseller) (*ResellerStat, error) 
 	stat.Expired = IsExpired(reseller.ExpiryTime)
 	if reseller.TrafficLimit > 0 {
 		stat.RemainingTraffic = reseller.TrafficLimit - stat.AllocatedTraffic
+		if stat.HasUnlimitedClient {
+			stat.RemainingTraffic = 0
+		}
 	}
 	stat.OverQuota = stat.Expired || !reseller.Enable ||
 		(reseller.TrafficLimit > 0 && (stat.HasUnlimitedClient || stat.AllocatedTraffic > reseller.TrafficLimit || stat.UsedTraffic >= reseller.TrafficLimit)) ||
