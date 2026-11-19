@@ -21,10 +21,10 @@ type XrayTrafficIdentity struct {
 }
 
 func (s *InboundService) CaptureXrayTrafficIdentities(traffic []*xray.ClientTraffic) ([]XrayTrafficIdentity, error) {
-	return captureXrayTrafficIdentities(database.GetDB(), traffic)
+	return captureXrayTrafficIdentities(database.GetDB(), traffic, false)
 }
 
-func captureXrayTrafficIdentities(db *gorm.DB, traffic []*xray.ClientTraffic) ([]XrayTrafficIdentity, error) {
+func captureXrayTrafficIdentities(db *gorm.DB, traffic []*xray.ClientTraffic, lockRows bool) ([]XrayTrafficIdentity, error) {
 	set := map[string]struct{}{}
 	for _, row := range traffic {
 		if row != nil && (row.Up != 0 || row.Down != 0) {
@@ -45,22 +45,31 @@ func captureXrayTrafficIdentities(db *gorm.DB, traffic []*xray.ClientTraffic) ([
 		byEmail[key] = &identities[i]
 	}
 	for _, batch := range chunkStrings(keys, sqlInChunk) {
+		// PostgreSQL must keep existing identities stable until accounting
+		// commits. The capture before journaling is deliberately unlocked.
+		query := func() *gorm.DB {
+			q := db.Session(&gorm.Session{})
+			if lockRows {
+				q = q.Clauses(clause.Locking{Strength: "UPDATE"})
+			}
+			return q
+		}
 		var clients []model.ClientRecord
-		if err := db.Select("id", "email").Where("LOWER(TRIM(email)) IN ?", batch).Find(&clients).Error; err != nil {
+		if err := query().Select("id", "email").Where("LOWER(TRIM(email)) IN ?", batch).Order("id").Find(&clients).Error; err != nil {
 			return nil, err
 		}
 		for _, c := range clients {
 			byEmail[transferEmailKey(c.Email)].ClientIDs = append(byEmail[transferEmailKey(c.Email)].ClientIDs, c.Id)
 		}
 		var counters []xray.ClientTraffic
-		if err := db.Select("id", "email").Where("LOWER(TRIM(email)) IN ?", batch).Find(&counters).Error; err != nil {
+		if err := query().Select("id", "email").Where("LOWER(TRIM(email)) IN ?", batch).Order("id").Find(&counters).Error; err != nil {
 			return nil, err
 		}
 		for _, c := range counters {
 			byEmail[transferEmailKey(c.Email)].TrafficIDs = append(byEmail[transferEmailKey(c.Email)].TrafficIDs, c.Id)
 		}
 		var owners []model.ResellerClient
-		if err := db.Select("email", "reseller_id").Where("LOWER(TRIM(email)) IN ?", batch).Find(&owners).Error; err != nil {
+		if err := query().Select("email", "reseller_id").Where("LOWER(TRIM(email)) IN ?", batch).Order("reseller_id, email").Find(&owners).Error; err != nil {
 			return nil, err
 		}
 		for _, c := range owners {
@@ -80,7 +89,7 @@ func captureXrayTrafficIdentities(db *gorm.DB, traffic []*xray.ClientTraffic) ([
 // was captured, a unique archived owner can safely receive the late bytes.
 // Ambiguous identities remain in the journal for manual reconciliation.
 func reconcileXrayTrafficIdentities(tx *gorm.DB, traffic []*xray.ClientTraffic, expected []XrayTrafficIdentity) ([]*xray.ClientTraffic, error) {
-	actual, err := captureXrayTrafficIdentities(tx, traffic)
+	actual, err := captureXrayTrafficIdentities(tx, traffic, true)
 	if err != nil {
 		return nil, err
 	}
