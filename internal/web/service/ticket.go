@@ -247,6 +247,11 @@ func (s *PaymentWebhookService) ProcessWebhook(p PaymentWebhookPayload) (*model.
 	if p.OrderId == "" {
 		return nil, common.NewError("orderId is required")
 	}
+	unlock, err := LockResellerAllocation()
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 
 	db := database.GetDB()
 	// Reseller payments commit the order, balance/ledger, and quota together.
@@ -365,23 +370,38 @@ func (s *PaymentWebhookService) applyOrderEffects(order *model.PaymentOrder) err
 		if err != nil {
 			return fmt.Errorf("client %q not found: %w", order.TargetRef, err)
 		}
-		if order.ResetTraffic {
-			_ = s.inboundService.ResetClientTrafficByEmail(order.TargetRef)
-		}
 		updated := *rec.ToClient()
+		if order.AddGB < 0 || order.AddGB > math.MaxInt64/bytesPerGB || updated.TotalGB < 0 || (order.AddGB > 0 && updated.TotalGB > math.MaxInt64-order.AddGB*bytesPerGB) {
+			return errors.New("client renewal quota exceeds supported range")
+		}
 		if order.AddGB > 0 {
 			updated.TotalGB += order.AddGB * bytesPerGB
 		}
+		if err := validatePaidClientRenewal(rec, updated.TotalGB, order.ResetTraffic); err != nil {
+			return err
+		}
+		if order.AddDays < 0 || int64(order.AddDays) > math.MaxInt64/86400000 {
+			return errors.New("client renewal expiry exceeds supported range")
+		}
 		if order.AddDays > 0 {
+			period := int64(order.AddDays) * 86400000
 			nowMs := time.Now().UnixMilli()
 			if updated.ExpiryTime < 0 {
-				updated.ExpiryTime -= int64(order.AddDays) * 86400000
-			} else {
-				base := nowMs
-				if updated.ExpiryTime > nowMs {
-					base = updated.ExpiryTime
+				if updated.ExpiryTime < math.MinInt64+period {
+					return errors.New("client renewal expiry exceeds supported range")
 				}
-				updated.ExpiryTime = base + int64(order.AddDays)*86400000
+				updated.ExpiryTime -= period
+			} else {
+				base := max(nowMs, updated.ExpiryTime)
+				if base > math.MaxInt64-period {
+					return errors.New("client renewal expiry exceeds supported range")
+				}
+				updated.ExpiryTime = base + period
+			}
+		}
+		if order.ResetTraffic {
+			if err := s.inboundService.ResetClientTrafficByEmail(order.TargetRef); err != nil {
+				return err
 			}
 		}
 		updated.Enable = true
