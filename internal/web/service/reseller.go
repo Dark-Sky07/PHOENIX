@@ -37,20 +37,21 @@ const bytesPerGB = 1024 * 1024 * 1024
 // ResellerStat is one reseller's live usage snapshot. It is what both the
 // admin's reseller table and the reseller's own dashboard render.
 type ResellerStat struct {
-	Reseller         *model.Reseller `json:"reseller"`
-	Currency         string          `json:"currency"` // Currency denomination for reseller financial values.
-	InboundCount     int             `json:"inboundCount"`
-	ClientCount      int             `json:"clientCount"`
-	OnlineCount      int             `json:"onlineCount"`
-	PendingCreations int64           `json:"pendingCreations"`
-	UsedTraffic      int64           `json:"usedTraffic"`
-	AllocatedTraffic int64           `json:"allocatedTraffic"`
-	RemainingTraffic int64           `json:"remainingTraffic"` // TrafficLimit - AllocatedTraffic (0 when unlimited)
-	Cost             float64         `json:"cost"`             // UsedTraffic priced at PricePerGB
-	Balance          float64         `json:"balance"`          // Deposit - Cost (negative = debt)
-	Expired          bool            `json:"expired"`
-	OverQuota        bool            `json:"overQuota"` // Any quota exceeded
-	Disabled         bool            `json:"disabled"`  // Auto-disabled because a quota ran out
+	Reseller           *model.Reseller `json:"reseller"`
+	Currency           string          `json:"currency"` // Currency denomination for reseller financial values.
+	InboundCount       int             `json:"inboundCount"`
+	ClientCount        int             `json:"clientCount"`
+	OnlineCount        int             `json:"onlineCount"`
+	PendingCreations   int64           `json:"pendingCreations"`
+	HasUnlimitedClient bool            `json:"hasUnlimitedClient"`
+	UsedTraffic        int64           `json:"usedTraffic"`
+	AllocatedTraffic   int64           `json:"allocatedTraffic"`
+	RemainingTraffic   int64           `json:"remainingTraffic"` // TrafficLimit - AllocatedTraffic (0 when unlimited)
+	Cost               float64         `json:"cost"`             // UsedTraffic priced at PricePerGB
+	Balance            float64         `json:"balance"`          // Deposit - Cost (negative = debt)
+	Expired            bool            `json:"expired"`
+	OverQuota          bool            `json:"overQuota"` // Any quota exceeded
+	Disabled           bool            `json:"disabled"`  // Auto-disabled because a quota ran out
 }
 
 // ResellerClientRow is a single client inside a reseller report.
@@ -1362,11 +1363,10 @@ func (s *ResellerService) Stat(reseller *model.Reseller) (*ResellerStat, error) 
 				// A zero client limit is unlimited, not a free allocation. Legacy
 				// or administrator-assigned unlimited clients must exhaust a
 				// finite reseller's available allocation until reconciled.
-				if reseller.TrafficLimit > 0 && record.TotalGB <= 0 {
-					stat.AllocatedTraffic = math.MaxInt64
-				} else {
-					stat.AllocatedTraffic = saturatingAddBytes(stat.AllocatedTraffic, record.TotalGB)
+				if record.TotalGB <= 0 {
+					stat.HasUnlimitedClient = true
 				}
+				stat.AllocatedTraffic = saturatingAddBytes(stat.AllocatedTraffic, record.TotalGB)
 			}
 		}
 	}
@@ -1448,7 +1448,7 @@ func (s *ResellerService) Stat(reseller *model.Reseller) (*ResellerStat, error) 
 		stat.RemainingTraffic = reseller.TrafficLimit - stat.AllocatedTraffic
 	}
 	stat.OverQuota = stat.Expired || !reseller.Enable ||
-		(reseller.TrafficLimit > 0 && (stat.AllocatedTraffic > reseller.TrafficLimit || stat.UsedTraffic >= reseller.TrafficLimit)) ||
+		(reseller.TrafficLimit > 0 && (stat.HasUnlimitedClient || stat.AllocatedTraffic > reseller.TrafficLimit || stat.UsedTraffic >= reseller.TrafficLimit)) ||
 		(reseller.ClientLimit > 0 && stat.ClientCount > reseller.ClientLimit)
 	stat.Disabled = !reseller.Enable
 	return stat, nil
@@ -1790,6 +1790,9 @@ func checkTrafficQuotaSnapshot(reseller *model.Reseller, stat *ResellerStat, add
 	}
 	if addBytes < 0 {
 		return errors.New("traffic allocation cannot be negative")
+	}
+	if stat.HasUnlimitedClient {
+		return errors.New("limited reseller has an unlimited client; administrator reconciliation required")
 	}
 	if stat.UsedTraffic >= reseller.TrafficLimit {
 		return fmt.Errorf("traffic quota exhausted: %s of %s used", FormatBytes(stat.UsedTraffic), FormatBytes(reseller.TrafficLimit))

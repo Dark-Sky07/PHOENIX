@@ -43,6 +43,9 @@ func validatePaidClientRenewal(client *model.ClientRecord, newQuota int64, reset
 			if state.limit <= 0 {
 				continue
 			}
+			if state.unlimitedClient {
+				return errors.New("limited reseller has an unlimited client; administrator reconciliation required")
+			}
 			if newQuota == 0 {
 				return errors.New("unlimited client traffic is not allowed for a limited reseller")
 			}

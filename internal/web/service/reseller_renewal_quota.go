@@ -2,7 +2,6 @@ package service
 
 import (
 	"errors"
-	"math"
 
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
@@ -14,6 +13,7 @@ type renewalQuotaSnapshot struct {
 	currentUsage           map[int]int64
 	currentQuota           map[int]int64
 	disabled               bool
+	unlimitedClient        bool
 }
 
 type renewalQuotaTracker struct {
@@ -124,11 +124,10 @@ func (t *renewalQuotaTracker) load(id int) (*renewalQuotaSnapshot, error) {
 	for id, c := range clients {
 		state.used = saturatingAddBytes(state.used, state.currentUsage[id])
 		state.currentQuota[id] = max(c.TotalGB, 0)
-		if state.limit > 0 && c.TotalGB <= 0 {
-			state.allocated = math.MaxInt64
-		} else {
-			state.allocated = saturatingAddBytes(state.allocated, max(state.currentQuota[id], state.currentUsage[id]))
+		if c.TotalGB <= 0 {
+			state.unlimitedClient = true
 		}
+		state.allocated = saturatingAddBytes(state.allocated, max(state.currentQuota[id], state.currentUsage[id]))
 	}
 	t.accounts[id] = state
 	return state, nil
@@ -165,7 +164,7 @@ func (t *renewalQuotaTracker) reserve(email string) (bool, error) {
 		if !ok {
 			return false, errors.New("reseller renewal ownership changed")
 		}
-		if state.disabled || (state.limit > 0 && quota == 0) {
+		if state.disabled || (state.limit > 0 && state.unlimitedClient) {
 			return false, nil
 		}
 		delta := min(quota, state.currentUsage[clients[0].Id])
