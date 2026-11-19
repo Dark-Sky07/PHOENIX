@@ -11,5 +11,7 @@ type ResellerCreationIntent struct {
 	InboundIDs     string `gorm:"not null"`
 	AmountMinor    *int64
 	Currency       string
+	Operation      string `gorm:"size:32"`
+	Details        string
 	CreatedAt      int64 `gorm:"autoCreateTime:milli"`
 }

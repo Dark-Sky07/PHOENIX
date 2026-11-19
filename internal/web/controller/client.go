@@ -293,16 +293,44 @@ func (a *ClientController) importClients(c *gin.Context) {
 			return
 		}
 	}
+	var intent *model.ResellerCreationIntent
+	if reseller != nil && len(envelope.Clients) > 0 {
+		entries := make([]service.ResellerBatchIntentEntry, 0, len(envelope.Clients))
+		for _, entry := range envelope.Clients {
+			entries = append(entries, service.ResellerBatchIntentEntry{Email: entry.Client.Email, SubID: entry.Client.SubID, RequestedBytes: entry.Client.TotalGB, InboundIDs: entry.InboundIds, InboundRefs: entry.InboundRefs})
+		}
+		intent, err = service.BeginResellerBatchOperation(reseller.Id, "import", entries)
+		if err != nil {
+			jsonMsg(c, "import could not be recorded", err)
+			return
+		}
+	}
 	report, err := a.clientService.ImportClients(&a.inboundService, envelope, scope)
 	if err != nil {
 		if report != nil && report.NeedRestart {
 			a.xrayService.SetToNeedRestart()
+		}
+		if intent != nil {
+			notifyClientsChanged()
+			jsonMsgObj(c, "import may be incomplete; manual reconciliation required", report, err)
+			return
 		}
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 		return
 	}
 	if report.NeedRestart {
 		a.xrayService.SetToNeedRestart()
+	}
+	if intent != nil {
+		if report.Failed > 0 || report.Preflight {
+			notifyClientsChanged()
+			jsonMsgObj(c, "import may be incomplete; manual reconciliation required", report, errors.New("reseller import requires manual reconciliation"))
+			return
+		}
+		if err := service.DiscardResellerClientCreation(intent); err != nil {
+			jsonMsgObj(c, "import completed; manual reconciliation required", report, err)
+			return
+		}
 	}
 	notifyClientsChanged()
 	jsonObj(c, report, nil)
@@ -930,6 +958,19 @@ func (a *ClientController) bulkCreate(c *gin.Context) {
 			}
 		}
 	}
+	var intent *model.ResellerCreationIntent
+	if reseller := resellerSession(c); reseller != nil && len(payloads) > 0 {
+		entries := make([]service.ResellerBatchIntentEntry, 0, len(payloads))
+		for _, payload := range payloads {
+			entries = append(entries, service.ResellerBatchIntentEntry{Email: payload.Client.Email, SubID: payload.Client.SubID, RequestedBytes: payload.Client.TotalGB, InboundIDs: payload.InboundIds})
+		}
+		var intentErr error
+		intent, intentErr = service.BeginResellerBatchOperation(reseller.Id, "bulk_create", entries)
+		if intentErr != nil {
+			jsonMsg(c, "bulk creation could not be recorded", intentErr)
+			return
+		}
+	}
 	result, needRestart, err := a.clientService.BulkCreate(&a.inboundService, payloads)
 	if err != nil {
 		if needRestart {
@@ -954,30 +995,30 @@ func (a *ClientController) bulkCreate(c *gin.Context) {
 			}
 		}
 		if err := a.resellerService.AssignClientsWithSales(reseller.Id, result.CreatedEmails, newSales, salePrices); err != nil {
-			var rollbackErr error
-			for _, email := range result.CreatedEmails {
-				if _, isNew := newResellerClients[strings.ToLower(strings.TrimSpace(email))]; !isNew {
-					continue
-				}
-				identity := result.CreatedIdentities[strings.ToLower(strings.TrimSpace(email))]
-				if identity == "" {
-					rollbackErr = errors.Join(rollbackErr, fmt.Errorf("verify custom-identity client %q manually", email))
-					continue
-				}
-				nr, err := a.clientService.RollbackNewClientCreate(&a.inboundService, email, identity)
-				needRestart = needRestart || nr
-				if err != nil {
-					rollbackErr = errors.Join(rollbackErr, err)
-				}
-			}
+			// The mapping commit may be ambiguous. Do not compensate blindly;
+			// the batch intent preserves the operation for reconciliation.
 			if needRestart {
 				a.xrayService.SetToNeedRestart()
 			}
-			if rollbackErr != nil {
-				jsonMsg(c, "client ownership failed; rollback also failed", fmt.Errorf("%w (rollback: %v)", err, rollbackErr))
-				return
+			notifyClientsChanged()
+			jsonMsgObj(c, "bulk client ownership failed; manual reconciliation required", result, err)
+			return
+		}
+	}
+	if intent != nil {
+		if len(result.Skipped) > 0 {
+			if needRestart {
+				a.xrayService.SetToNeedRestart()
 			}
-			jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
+			notifyClientsChanged()
+			jsonMsgObj(c, "bulk creation may be incomplete; manual reconciliation required", result, errors.New("reseller bulk creation requires manual reconciliation"))
+			return
+		}
+		if err := service.DiscardResellerClientCreation(intent); err != nil {
+			if needRestart {
+				a.xrayService.SetToNeedRestart()
+			}
+			jsonMsgObj(c, "bulk creation completed; manual reconciliation required", result, err)
 			return
 		}
 	}

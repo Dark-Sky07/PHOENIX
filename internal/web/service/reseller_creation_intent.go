@@ -66,3 +66,35 @@ func ResellerCreationIntentExists(intent *model.ResellerCreationIntent) (bool, e
 	err := database.GetDB().Model(&model.ResellerCreationIntent{}).Where("id = ? AND reseller_id = ?", intent.Id, intent.ResellerId).Count(&count).Error
 	return count == 1, err
 }
+
+// ResellerBatchIntentEntry contains only the identity and allocation metadata
+// needed to investigate an interrupted batch. Subscription IDs are sensitive;
+// the table intentionally excludes passwords and protocol credentials.
+type ResellerBatchIntentEntry struct {
+	Email          string                     `json:"email"`
+	SubID          string                     `json:"subId,omitempty"`
+	RequestedBytes int64                      `json:"requestedBytes"`
+	InboundIDs     []int                      `json:"inboundIds,omitempty"`
+	InboundRefs    []ClientTransferInboundRef `json:"inboundRefs,omitempty"`
+}
+
+// BeginResellerBatchOperation must be called under the allocation lock before
+// the first mutation. A batch may have partially succeeded, so failures retain
+// the marker for manual reconciliation.
+func BeginResellerBatchOperation(id int, operation string, entries []ResellerBatchIntentEntry) (*model.ResellerCreationIntent, error) {
+	if id <= 0 || (operation != "bulk_create" && operation != "import") || len(entries) == 0 {
+		return nil, errors.New("invalid reseller batch intent")
+	}
+	if err := CheckPendingResellerCreations(id); err != nil {
+		return nil, err
+	}
+	data, err := json.Marshal(entries)
+	if err != nil {
+		return nil, err
+	}
+	intent := &model.ResellerCreationIntent{Id: uuid.NewString(), ResellerId: id, Email: "[batch]", SubID: uuid.NewString(), InboundIDs: "[]", Operation: operation, Details: string(data)}
+	if err := database.GetDB().Create(intent).Error; err != nil {
+		return nil, err
+	}
+	return intent, nil
+}
