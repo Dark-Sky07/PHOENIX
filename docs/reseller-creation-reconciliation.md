@@ -19,3 +19,15 @@ client and mappings. This is a safety barrier, not an atomic creation protocol.
 Batch metadata contains subscription IDs, which are sensitive; restrict database and backup access.
 The batch marker is not removed atomically with all client/runtime changes, so a
 crash after successful changes can still require manual reconciliation.
+
+## Ambiguous client traffic identities
+
+Quota calculations, renewal and reseller traffic archives reject multiple local
+traffic rows whose emails are equal after trimming and lowercasing, rather than
+charging the same global counter more than once or silently dropping usage.
+Likewise, archiving rejects ambiguous client records. These errors require
+administrator investigation. Back up the database first; compare the exact
+emails, client ownership, local and master counters, prior archives and runtime
+state. Do not simply delete or merge counters without determining their origin
+and preserving consumed bytes. Archives produced before this guard may already
+contain an inflated snapshot and require evidence-based reconciliation.
