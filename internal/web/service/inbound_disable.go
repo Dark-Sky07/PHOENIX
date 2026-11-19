@@ -48,17 +48,15 @@ func (s *InboundService) disableInvalidInbounds(tx *gorm.DB) (bool, int64, error
 	return needRestart, count, err
 }
 
-// depletedClientsCond matches clients that exhausted their quota or expired.
-// Besides the local counters it also trips on the cross-panel usage a master
-// pushed into client_global_traffics — that's what lets a node cut a client
-// whose combined usage exceeds the quota even though the local share doesn't
-// (placeholders: now).
-const depletedClientsCond = `((total > 0 AND up + down >= total)
-	OR (expiry_time > 0 AND expiry_time <= ?)
-	OR (total > 0 AND EXISTS (
-		SELECT 1 FROM client_global_traffics g
-		WHERE LOWER(TRIM(g.email)) = LOWER(TRIM(client_traffics.email)) AND g.up + g.down >= client_traffics.total
-	)))`
+// The effective usage is the per-direction maximum of local counters and all
+// master snapshots, matching overlayGlobalTraffic and reseller accounting.
+// Use subtraction rather than adding counters: PostgreSQL bigint addition can
+// overflow and SQLite may round oversized integers to float.
+const maxGlobalUp = `COALESCE((SELECT MAX(g.up) FROM client_global_traffics g WHERE LOWER(TRIM(g.email)) = LOWER(TRIM(client_traffics.email))), 0)`
+const maxGlobalDown = `COALESCE((SELECT MAX(g.down) FROM client_global_traffics g WHERE LOWER(TRIM(g.email)) = LOWER(TRIM(client_traffics.email))), 0)`
+const effectiveUp = `(CASE WHEN client_traffics.up > ` + maxGlobalUp + ` THEN client_traffics.up ELSE ` + maxGlobalUp + ` END)`
+const effectiveDown = `(CASE WHEN client_traffics.down > ` + maxGlobalDown + ` THEN client_traffics.down ELSE ` + maxGlobalDown + ` END)`
+const depletedClientsCond = `((total > 0 AND (` + effectiveUp + ` >= total OR ` + effectiveDown + ` >= total - ` + effectiveUp + `)) OR (expiry_time > 0 AND expiry_time <= ?))`
 
 func (s *InboundService) disableInvalidClients(tx *gorm.DB) (bool, int64, []int, error) {
 	now := time.Now().Unix() * 1000
