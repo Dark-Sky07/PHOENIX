@@ -119,22 +119,22 @@ func (a *ClientController) initRouter(g *gin.RouterGroup) {
 	g.GET("/openvpn/:email", a.getOpenvpnProfile)
 	g.GET("/export", a.exportClients)
 
-	g.POST("/add", a.create)
-	g.POST("/import", a.importClients)
-	g.POST("/update/:email", a.update)
-	g.POST("/del/:email", a.delete)
-	g.POST("/:email/attach", a.attach)
-	g.POST("/:email/detach", a.detach)
-	g.POST("/resetAllTraffics", a.resetAllTraffics)
-	g.POST("/delDepleted", a.delDepleted)
-	g.POST("/bulkAdjust", a.bulkAdjust)
-	g.POST("/bulkDel", a.bulkDelete)
-	g.POST("/bulkCreate", a.bulkCreate)
-	g.POST("/bulkAttach", a.bulkAttach)
-	g.POST("/bulkDetach", a.bulkDetach)
-	g.POST("/bulkResetTraffic", a.bulkResetTraffic)
-	g.POST("/resetTraffic/:email", a.resetTrafficByEmail)
-	g.POST("/updateTraffic/:email", a.updateTrafficByEmail)
+	g.POST("/add", withResellerAllocationLock(a.create))
+	g.POST("/import", withResellerAllocationLock(a.importClients))
+	g.POST("/update/:email", withResellerAllocationLock(a.update))
+	g.POST("/del/:email", withResellerAllocationLock(a.delete))
+	g.POST("/:email/attach", withResellerAllocationLock(a.attach))
+	g.POST("/:email/detach", withResellerAllocationLock(a.detach))
+	g.POST("/resetAllTraffics", withResellerAllocationLock(a.resetAllTraffics))
+	g.POST("/delDepleted", withResellerAllocationLock(a.delDepleted))
+	g.POST("/bulkAdjust", withResellerAllocationLock(a.bulkAdjust))
+	g.POST("/bulkDel", withResellerAllocationLock(a.bulkDelete))
+	g.POST("/bulkCreate", withResellerAllocationLock(a.bulkCreate))
+	g.POST("/bulkAttach", withResellerAllocationLock(a.bulkAttach))
+	g.POST("/bulkDetach", withResellerAllocationLock(a.bulkDetach))
+	g.POST("/bulkResetTraffic", withResellerAllocationLock(a.bulkResetTraffic))
+	g.POST("/resetTraffic/:email", withResellerAllocationLock(a.resetTrafficByEmail))
+	g.POST("/updateTraffic/:email", withResellerAllocationLock(a.updateTrafficByEmail))
 	g.POST("/ips/:email", a.getIps)
 	g.POST("/clearIps/:email", a.clearIps)
 	g.GET("/devices/:email", a.getClientDevices)
@@ -261,14 +261,6 @@ func (a *ClientController) exportClients(c *gin.Context) {
 }
 
 func (a *ClientController) importClients(c *gin.Context) {
-	if resellerSession(c) != nil {
-		unlock, err := service.LockResellerAllocation()
-		if err != nil {
-			jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
-			return
-		}
-		defer unlock()
-	}
 	var envelope service.ClientTransferEnvelope
 	if err := c.ShouldBindJSON(&envelope); err != nil {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
@@ -380,14 +372,6 @@ func (a *ClientController) get(c *gin.Context) {
 }
 
 func (a *ClientController) create(c *gin.Context) {
-	if resellerSession(c) != nil {
-		unlock, err := service.LockResellerAllocation()
-		if err != nil {
-			jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
-			return
-		}
-		defer unlock()
-	}
 	var payload service.ClientCreatePayload
 	if err := c.ShouldBindJSON(&payload); err != nil {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
@@ -477,14 +461,6 @@ func (a *ClientController) create(c *gin.Context) {
 }
 
 func (a *ClientController) update(c *gin.Context) {
-	if resellerSession(c) != nil {
-		unlock, err := service.LockResellerAllocation()
-		if err != nil {
-			jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
-			return
-		}
-		defer unlock()
-	}
 	email := c.Param("email")
 	var updated model.Client
 	if err := c.ShouldBindJSON(&updated); err != nil {
@@ -710,14 +686,6 @@ func resellerBulkAllocation(count int, addBytes int64) (int64, error) {
 }
 
 func (a *ClientController) bulkAdjust(c *gin.Context) {
-	if resellerSession(c) != nil {
-		unlock, err := service.LockResellerAllocation()
-		if err != nil {
-			jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
-			return
-		}
-		defer unlock()
-	}
 	var req bulkAdjustRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
@@ -904,14 +872,6 @@ func (a *ClientController) bulkDelete(c *gin.Context) {
 }
 
 func (a *ClientController) bulkCreate(c *gin.Context) {
-	if resellerSession(c) != nil {
-		unlock, err := service.LockResellerAllocation()
-		if err != nil {
-			jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
-			return
-		}
-		defer unlock()
-	}
 	var payloads []service.ClientCreatePayload
 	if err := c.ShouldBindJSON(&payloads); err != nil {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)

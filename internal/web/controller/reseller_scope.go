@@ -171,3 +171,31 @@ func filterInboundIDs(ids []int, owned map[int]struct{}) []int {
 	}
 	return out
 }
+
+// Serialize participating HTTP mutations with reseller quota checks, including
+// administrator changes and deletion/unassignment. Revalidate a reseller
+// session after waiting: revocation while blocked must never turn the request
+// into an administrator request merely because the session lookup returns nil.
+func withResellerAllocationLock(handler gin.HandlerFunc) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		reseller := resellerSession(c)
+		unlock, err := service.LockResellerAllocation()
+		if err != nil {
+			jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
+			return
+		}
+		defer unlock()
+		if reseller != nil {
+			current := resellerSession(c)
+			if current == nil || current.Id != reseller.Id {
+				abortForbidden(c, "reseller session is no longer valid")
+				return
+			}
+			if err := newResellerService().EnsureActive(current); err != nil {
+				abortForbidden(c, err.Error())
+				return
+			}
+		}
+		handler(c)
+	}
+}
