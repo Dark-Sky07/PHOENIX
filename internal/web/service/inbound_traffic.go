@@ -128,7 +128,7 @@ func (s *InboundService) addTrafficLocked(id string, inboundTraffics []*xray.Tra
 	var renewErr error
 	// Allocation paths can submit work to this writer while holding the quota
 	// lock. Never block on that lock here: postpone renewal to the next tick.
-	unlockRenewalQuota, renewErr = tryLockResellerAllocation()
+	unlockRenewalQuota, renewErr = tryLockResellerAllocation(tx)
 	if renewErr == nil && unlockRenewalQuota != nil {
 		needRestart0, count, renewErr = s.autoRenewClients(tx)
 	}

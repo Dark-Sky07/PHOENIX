@@ -67,9 +67,9 @@ func releasePostgresAllocationLock(conn *sql.Conn) {
 }
 
 // LockResellerAllocation coordinates participating allocation paths in this
-// process and, on PostgreSQL, with other processes using the same database.
-// SQLite still uses an in-process mutex; this is not a fencing mechanism for
-// a lost PostgreSQL connection or a substitute for atomic creation.
+// process and with participating processes sharing the database. SQLite uses
+// a sidecar file lock and PostgreSQL uses a session advisory lock. Neither is
+// a substitute for atomic creation or fencing a lost database connection.
 func LockResellerAllocation() (func(), error) {
 	resellerAllocationMu.Lock()
 	db := database.GetDB()
@@ -77,10 +77,17 @@ func LockResellerAllocation() (func(), error) {
 		resellerAllocationMu.Unlock()
 		return nil, errors.New("database is not available")
 	}
-	if db.Dialector.Name() != "postgres" {
-		return resellerAllocationMu.Unlock, nil
+	var unlock func()
+	var ok bool
+	var err error
+	switch db.Dialector.Name() {
+	case "postgres":
+		unlock, ok, err = acquirePostgresAllocationLock(db, true)
+	case "sqlite":
+		unlock, ok, err = acquireSQLiteAllocationLock(db, true)
+	default:
+		err = errors.New("unsupported database for reseller allocation locking")
 	}
-	unlock, ok, err := acquirePostgresAllocationLock(db, true)
 	if err != nil || !ok {
 		resellerAllocationMu.Unlock()
 		if err == nil {
@@ -93,7 +100,7 @@ func LockResellerAllocation() (func(), error) {
 
 // tryLockResellerAllocation never waits on another allocation while the
 // traffic writer holds its transaction. Renewal can be deferred to a later tick.
-func tryLockResellerAllocation() (func(), error) {
+func tryLockResellerAllocation(tx *gorm.DB) (func(), error) {
 	if !resellerAllocationMu.TryLock() {
 		return nil, nil
 	}
@@ -102,10 +109,19 @@ func tryLockResellerAllocation() (func(), error) {
 		resellerAllocationMu.Unlock()
 		return nil, errors.New("database is not available")
 	}
-	if db.Dialector.Name() != "postgres" {
-		return resellerAllocationMu.Unlock, nil
+	var unlock func()
+	var ok bool
+	var err error
+	switch db.Dialector.Name() {
+	case "postgres":
+		unlock, ok, err = acquirePostgresAllocationLock(db, false)
+	case "sqlite":
+		// Use the existing writer transaction for PRAGMA: a second pooled
+		// connection may be unavailable while that transaction is open.
+		unlock, ok, err = acquireSQLiteAllocationLock(tx, false)
+	default:
+		err = errors.New("unsupported database for reseller allocation locking")
 	}
-	unlock, ok, err := acquirePostgresAllocationLock(db, false)
 	if err != nil || !ok {
 		resellerAllocationMu.Unlock()
 		return nil, err
