@@ -46,6 +46,7 @@ type XrayAPI struct {
 	grpcClient           *grpc.ClientConn
 	isConnected          bool
 	StatsLastValues      map[string]int64
+	statsBaselineReady   bool
 }
 
 func getRequiredUserString(user map[string]any, key string) (string, error) {
@@ -573,20 +574,40 @@ func (x *XrayAPI) GetTraffic() ([]*Traffic, []*ClientTraffic, error) {
 	emailTrafficMap := make(map[string]*ClientTraffic)
 
 	for _, stat := range resp.GetStat() {
-		lastValue, ok := x.StatsLastValues[stat.Name]
-		x.StatsLastValues[stat.Name] = stat.Value
-		if !ok || stat.Value < lastValue {
-			// skip first time of seen stat
+		value, include := x.trafficCounterDelta(stat.Name, stat.Value)
+		if !include {
 			continue
 		}
-		value := stat.Value - lastValue
 		if matches := trafficRegex.FindStringSubmatch(stat.Name); len(matches) == 4 {
 			processTraffic(matches, value, tagTrafficMap)
 		} else if matches := clientTrafficRegex.FindStringSubmatch(stat.Name); len(matches) == 3 {
 			processClientTraffic(matches, value, emailTrafficMap)
 		}
 	}
+	x.statsBaselineReady = true
 	return mapToSlice(tagTrafficMap), mapToSlice(emailTrafficMap), nil
+}
+
+// trafficCounterDelta establishes an initial baseline for a possibly already
+// running core. Counters first appearing on later polls belong to new users or
+// inbounds and their first interval must not be discarded. A counter that
+// decreases has reset: its current nonnegative value is the new interval.
+func (x *XrayAPI) trafficCounterDelta(name string, value int64) (int64, bool) {
+	if value < 0 {
+		return 0, false
+	}
+	if x.StatsLastValues == nil {
+		x.StatsLastValues = make(map[string]int64)
+	}
+	previous, existed := x.StatsLastValues[name]
+	x.StatsLastValues[name] = value
+	if !existed {
+		return value, x.statsBaselineReady
+	}
+	if value < previous {
+		return value, true
+	}
+	return value - previous, true
 }
 
 // OnlineIP is one source address of a live connection, with the unix time (seconds)
