@@ -1081,10 +1081,10 @@ func (s *ResellerService) AssignClientsWithSales(resellerId int, emails, saleEma
 				if err := tx.Where("LOWER(TRIM(email)) = ?", key).First(&client).Error; err != nil {
 					return err
 				}
-				createdAt := client.CreatedAt
-				if createdAt <= 0 {
-					createdAt = time.Now().UnixMilli()
-				}
+				// Client metadata can be supplied by the reseller. A live sale's
+				// reporting date must instead be the server's recording time;
+				// backdated entries use the audited historical-sale API.
+				createdAt := time.Now().UnixMilli()
 				sale := model.ResellerSale{
 					ResellerId:     resellerId,
 					ClientRecordId: client.Id,

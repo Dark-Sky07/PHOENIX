@@ -31,6 +31,14 @@ func TestAssignClientsWithSalesRecordsCreationAndQuotaAllocation(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Seed controlled reporting dates directly, rather than trusting client
+	// metadata to backdate a newly recorded sale.
+	for _, client := range clients {
+		if err := db.Model(&model.ResellerSale{}).Where("reseller_id = ? AND client_record_id = ?", reseller.Id, client.Id).Update("created_at", client.CreatedAt).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	// The reseller's remaining quota is computed from assigned clients' actual
 	// total_gb allocations, not from a display-only or stale counter.
 	stat, err := service.Stat(&reseller)
