@@ -146,7 +146,7 @@ func (s *InboundService) disableInvalidClients(tx *gorm.DB) (bool, int64, []int,
 
 	for inboundID, emails := range localByInbound {
 		if _, _, mErr := s.markClientsDisabledInSettings(tx, inboundID, emails); mErr != nil {
-			logger.Warning("disableInvalidClients: settings.JSON sync failed for inbound", inboundID, ":", mErr)
+			return true, 0, nil, fmt.Errorf("disable client settings for inbound %d: %w", inboundID, mErr)
 		}
 	}
 
@@ -163,7 +163,7 @@ func (s *InboundService) disableInvalidClients(tx *gorm.DB) (bool, int64, []int,
 		if err := tx.Model(&model.ClientRecord{}).
 			Where("LOWER(TRIM(email)) IN ?", depletedEmails).
 			Updates(map[string]any{"enable": false, "updated_at": now}).Error; err != nil {
-			logger.Warning("disableInvalidClients update clients.enable:", err)
+			return true, 0, nil, fmt.Errorf("disable client records: %w", err)
 		}
 	}
 

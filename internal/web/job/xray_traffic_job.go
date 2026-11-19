@@ -88,6 +88,9 @@ func (j *XrayTrafficJob) run() {
 		return j.applyJournaledXrayBatch(b)
 	})
 	if err != nil {
+		if needRestart0 {
+			j.xrayService.SetToNeedRestart()
+		}
 		logger.Warning("add inbound traffic failed; retaining batch for retry:", err)
 		return
 	}

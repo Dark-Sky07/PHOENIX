@@ -130,7 +130,10 @@ func (s *InboundService) addTrafficLocked(id string, inboundTraffics []*xray.Tra
 	disabledClientsCount := int64(0)
 	needRestart1, count, disabledNodeIDs, err := s.disableInvalidClients(tx)
 	if err != nil {
-		logger.Warning("Error in disabling invalid clients:", err)
+		// Runtime calls may already have taken effect, but the database must not
+		// commit counters or partial disable state. The caller can retry the
+		// whole traffic batch and reconcile the runtime on restart.
+		return true, false, nil, fmt.Errorf("disable invalid clients: %w", err)
 	} else if count > 0 {
 		logger.Debugf("%v clients disabled", count)
 		disabledClientsCount = count
@@ -138,7 +141,7 @@ func (s *InboundService) addTrafficLocked(id string, inboundTraffics []*xray.Tra
 
 	needRestart2, count, err := s.disableInvalidInbounds(tx)
 	if err != nil {
-		logger.Warning("Error in disabling invalid inbounds:", err)
+		return true, false, nil, fmt.Errorf("disable invalid inbounds: %w", err)
 	} else if count > 0 {
 		logger.Debugf("%v inbounds disabled", count)
 	}
