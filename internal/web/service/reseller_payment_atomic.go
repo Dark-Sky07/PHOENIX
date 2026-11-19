@@ -67,6 +67,12 @@ func (s *PaymentWebhookService) processResellerPayment(p PaymentWebhookPayload) 
 		now := time.Now().UnixMilli()
 		updates := map[string]any{"updated_at": now}
 		if result.AddGB > 0 {
+			// Zero denotes unlimited, not an empty bucket. Never silently
+			// turn unlimited access into a smaller finite quota or consume a
+			// paid grant that cannot be represented.
+			if reseller.TrafficLimit == 0 {
+				return errors.New("cannot apply traffic grant to an unlimited reseller; administrator reconciliation required")
+			}
 			addition := result.AddGB * bytesPerGB
 			if reseller.TrafficLimit < 0 || reseller.TrafficLimit > math.MaxInt64-addition {
 				return errors.New("traffic quota exceeds supported range")

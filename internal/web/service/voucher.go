@@ -117,7 +117,10 @@ func (s *VoucherService) Redeem(resellerId int, rawCode string) (*model.Reseller
 			}
 			updates["deposit"] = newBalance
 		}
-		if v.TrafficGB > 0 && r.TrafficLimit > 0 {
+		if v.TrafficGB > 0 && r.TrafficLimit <= 0 {
+			return errors.New("cannot redeem traffic grant for an unlimited or invalid reseller quota")
+		}
+		if v.TrafficGB > 0 {
 			addition := v.TrafficGB * bytesPerGB
 			if r.TrafficLimit > math.MaxInt64-addition {
 				return errors.New("voucher traffic quota exceeds supported range")

@@ -130,3 +130,52 @@ func TestConcurrentResellerPaymentPostgres(t *testing.T) {
 		t.Fatalf("duplicate payment: %+v ledger=%d", r, count)
 	}
 }
+
+func TestResellerPaymentDoesNotReplaceUnlimitedQuotaOrConsumeGrant(t *testing.T) {
+	setupBulkDB(t)
+	db := database.GetDB()
+	r := model.Reseller{Username: "unlimited-paid", Password: "hash", Enable: true, TrafficLimit: 0}
+	if err := db.Create(&r).Error; err != nil {
+		t.Fatal(err)
+	}
+	order := model.PaymentOrder{OrderId: "unlimited-grant", TargetType: "reseller_deposit", TargetRef: r.Username, Amount: 10, AddGB: 1, Status: "pending"}
+	if err := db.Create(&order).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&PaymentWebhookService{}).ProcessWebhook(PaymentWebhookPayload{OrderId: order.OrderId, Amount: 10}); err == nil {
+		t.Fatal("unrepresentable traffic grant accepted")
+	}
+	if err := db.First(&r, r.Id).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.First(&order, order.Id).Error; err != nil {
+		t.Fatal(err)
+	}
+	var count int64
+	if err := db.Model(&model.ResellerTransaction{}).Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if r.TrafficLimit != 0 || r.Deposit != 0 || order.Status != "pending" || count != 0 {
+		t.Fatalf("partial payment changed unlimited account: %+v %+v ledger=%d", r, order, count)
+	}
+	// Once an administrator gives the account a finite limit, the same order
+	// remains payable exactly once.
+	if err := db.Model(&r).Update("traffic_limit", 100).Error; err != nil {
+		t.Fatal(err)
+	}
+	svc := &PaymentWebhookService{}
+	for i := 0; i < 2; i++ {
+		if _, err := svc.ProcessWebhook(PaymentWebhookPayload{OrderId: order.OrderId, Amount: 10}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.First(&r, r.Id).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&model.ResellerTransaction{}).Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if r.Deposit != 10 || r.TrafficLimit != 100+bytesPerGB || count != 1 {
+		t.Fatalf("grant replay accounting: %+v ledger=%d", r, count)
+	}
+}

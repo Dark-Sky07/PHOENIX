@@ -84,3 +84,48 @@ func TestConcurrentVoucherRedemptionPostgres(t *testing.T) {
 		t.Fatalf("duplicate or missing accounting: reseller=%+v voucher=%+v ledger=%d", r, v, count)
 	}
 }
+
+func TestVoucherTrafficGrantDoesNotConsumeUnlimitedAccountVoucher(t *testing.T) {
+	setupBulkDB(t)
+	db := database.GetDB()
+	r := model.Reseller{Username: "unlimited-voucher", Password: "hash", Enable: true, TrafficLimit: 0}
+	if err := db.Create(&r).Error; err != nil {
+		t.Fatal(err)
+	}
+	svc := &VoucherService{}
+	voucher, err := svc.Create("UNLIMITED-CHECK", 10, 1, 1, 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.Redeem(r.Id, voucher.Code); err == nil {
+		t.Fatal("voucher traffic grant accepted without capacity to apply it")
+	}
+	if err := db.First(&r, r.Id).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.First(voucher, voucher.Id).Error; err != nil {
+		t.Fatal(err)
+	}
+	var count int64
+	if err := db.Model(&model.ResellerTransaction{}).Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if r.TrafficLimit != 0 || r.Deposit != 0 || voucher.UsedCount != 0 || count != 0 {
+		t.Fatalf("partial voucher redemption: %+v %+v ledger=%d", r, voucher, count)
+	}
+	if err := db.Model(&r).Update("traffic_limit", 100).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.Redeem(r.Id, voucher.Code); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.First(&r, r.Id).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.First(voucher, voucher.Id).Error; err != nil {
+		t.Fatal(err)
+	}
+	if r.TrafficLimit != 100+bytesPerGB || r.Deposit != 10 || voucher.UsedCount != 1 {
+		t.Fatalf("voucher retry failed: %+v %+v", r, voucher)
+	}
+}
