@@ -87,6 +87,9 @@ func (t *renewalQuotaTracker) load(id int) (*renewalQuotaSnapshot, error) {
 		seenTraffic := map[string]bool{}
 		for _, row := range traffic {
 			key := transferEmailKey(row.Email)
+			if seenTraffic[key] {
+				return nil, errors.New("ambiguous client traffic counters require reconciliation")
+			}
 			seenTraffic[key] = true
 			if cid, ok := clientByEmail[key]; ok {
 				state.currentUsage[cid] = saturatingAddBytes(state.currentUsage[cid], saturatingAddBytes(max(row.Up, up[key]), max(row.Down, down[key])))

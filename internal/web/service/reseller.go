@@ -1261,8 +1261,16 @@ func (s *ResellerService) ClientUsage(emails []string) (map[string]*xray.ClientT
 			globalDown[key] = max(globalDown[key], g.Down)
 		}
 	}
+	// Exact-email uniqueness does not prevent case/whitespace variants. Their
+	// ownership and counter overlap are ambiguous; applying the same global
+	// total to each row would double-charge, while merging could undercount.
+	localSeen := make(map[string]bool, len(rows))
 	for _, row := range rows {
 		key := transferEmailKey(row.Email)
+		if localSeen[key] {
+			return nil, errors.New("ambiguous client traffic counters require reconciliation")
+		}
+		localSeen[key] = true
 		row.Up = max(row.Up, globalUp[key])
 		row.Down = max(row.Down, globalDown[key])
 	}
@@ -1333,13 +1341,23 @@ func (s *ResellerService) Stat(reseller *model.Reseller) (*ResellerStat, error) 
 	}
 
 	activeClients := make(map[int]model.ClientRecord)
-	if len(emails) > 0 {
-		for _, batch := range chunkStrings(emails, sqlInChunk) {
+	clientKeys := make([]string, 0, len(emails))
+	for _, email := range emails {
+		clientKeys = append(clientKeys, transferEmailKey(email))
+	}
+	seenClients := make(map[string]bool, len(clientKeys))
+	if len(clientKeys) > 0 {
+		for _, batch := range chunkStrings(clientKeys, sqlInChunk) {
 			var records []model.ClientRecord
 			if err := db.Select("id", "email", "total_gb").Where("LOWER(TRIM(email)) IN ?", batch).Find(&records).Error; err != nil {
 				return nil, err
 			}
 			for _, record := range records {
+				key := transferEmailKey(record.Email)
+				if seenClients[key] {
+					return nil, errors.New("ambiguous reseller client requires reconciliation")
+				}
+				seenClients[key] = true
 				activeClients[record.Id] = record
 				stat.AllocatedTraffic = saturatingAddBytes(stat.AllocatedTraffic, record.TotalGB)
 			}

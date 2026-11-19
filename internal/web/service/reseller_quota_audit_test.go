@@ -7,6 +7,7 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
+	"gorm.io/gorm"
 )
 
 func TestResellerQuotaBoundariesUseAllocatedAndMeasuredBytesSafely(t *testing.T) {
@@ -222,5 +223,71 @@ func TestResellerQuotaIncludesGlobalOnlyTrafficAndFailsClosed(t *testing.T) {
 	}
 	if err := svc.CheckTrafficQuota(&r, 1); err == nil {
 		t.Fatal("quota check must fail when global traffic cannot be read")
+	}
+}
+
+// Case variants can coexist under the exact-email unique index. Treat them as
+// ambiguous rather than overlaying one master total onto each local row.
+func TestAmbiguousTrafficFailsClosedForQuotaRenewalAndArchive(t *testing.T) {
+	setupBulkDB(t)
+	db := database.GetDB()
+	r := model.Reseller{Username: "ambiguous-traffic", Password: "hash", Enable: true, TrafficLimit: 1000}
+	c := model.ClientRecord{Email: "example@test", Enable: true, TotalGB: 100}
+	for _, v := range []any{&r, &c} {
+		if err := db.Create(v).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, v := range []any{&model.ResellerClient{ResellerId: r.Id, Email: c.Email}, &xray.ClientTraffic{Email: c.Email, Up: 10}, &xray.ClientTraffic{Email: " Example@Test ", Up: 20}, &model.ClientGlobalTraffic{MasterGuid: "master", Email: c.Email, Up: 100}} {
+		if err := db.Create(v).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	svc := &ResellerService{}
+	if _, err := svc.Stat(&r); err == nil {
+		t.Fatal("quota snapshot accepted ambiguous counters")
+	}
+	if err := svc.CheckTrafficQuota(&r, 1); err == nil {
+		t.Fatal("quota allocation accepted ambiguous counters")
+	}
+	if err := archiveResellerClientUsage(&c); err == nil {
+		t.Fatal("archive accepted ambiguous counters")
+	}
+	var count int64
+	if err := db.Model(&model.ResellerTrafficArchive{}).Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("archive unexpectedly changed: %d %v", count, err)
+	}
+	err := db.Transaction(func(tx *gorm.DB) error {
+		_, err := (&renewalQuotaTracker{tx: tx, accounts: map[int]*renewalQuotaSnapshot{}}).load(r.Id)
+		return err
+	})
+	if err == nil {
+		t.Fatal("renewal accepted ambiguous counters")
+	}
+}
+
+func TestResellerQuotaCountsMixedCaseClientAllocation(t *testing.T) {
+	setupBulkDB(t)
+	db := database.GetDB()
+	r := model.Reseller{Username: "mixed-case-quota", Password: "hash", Enable: true, TrafficLimit: 1000}
+	c := model.ClientRecord{Email: "Mixed.Case@Example.Test", TotalGB: 700, Enable: true}
+	for _, v := range []any{&r, &c} {
+		if err := db.Create(v).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Create(&model.ResellerClient{ResellerId: r.Id, Email: c.Email}).Error; err != nil {
+		t.Fatal(err)
+	}
+	svc := &ResellerService{}
+	stat, err := svc.Stat(&r)
+	if err != nil || stat.AllocatedTraffic != 700 || stat.RemainingTraffic != 300 {
+		t.Fatalf("mixed-case allocation not counted: %+v %v", stat, err)
+	}
+	if err := svc.CheckTrafficQuota(&r, 301); err == nil {
+		t.Fatal("allocation exceeding remaining quota accepted")
+	}
+	if err := svc.CheckTrafficQuota(&r, 300); err != nil {
+		t.Fatalf("exact remaining allocation rejected: %v", err)
 	}
 }

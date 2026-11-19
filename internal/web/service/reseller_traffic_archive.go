@@ -47,6 +47,16 @@ func archiveResellerClientUsageTx(tx *gorm.DB, client *model.ClientRecord, resel
 	if err := tx.Where("LOWER(TRIM(email)) = ?", transferEmailKey(client.Email)).Find(&rows).Error; err != nil {
 		return err
 	}
+	if len(rows) > 1 {
+		return errors.New("ambiguous client traffic counters require reconciliation")
+	}
+	var matchingClients int64
+	if err := tx.Model(&model.ClientRecord{}).Where("LOWER(TRIM(email)) = ?", transferEmailKey(client.Email)).Count(&matchingClients).Error; err != nil {
+		return err
+	}
+	if matchingClients != 1 {
+		return errors.New("ambiguous reseller client requires reconciliation")
+	}
 	var globals []model.ClientGlobalTraffic
 	if err := tx.Where("LOWER(TRIM(email)) = ?", transferEmailKey(client.Email)).Find(&globals).Error; err != nil {
 		return err
