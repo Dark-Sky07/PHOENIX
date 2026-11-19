@@ -89,6 +89,7 @@ func initModels() error {
 		&model.BotNotifyState{},
 		&model.ClientInvite{},
 		&model.TuicTrafficReceipt{},
+		&model.XrayTrafficReceipt{},
 		&model.UserTemplate{},
 		&model.SupportTicket{},
 		&model.SupportTicketMessage{},

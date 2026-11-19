@@ -30,10 +30,33 @@ func (s *InboundService) DeletePPPTrafficCheckpoints(sessionIDs []string) error 
 }
 
 func (s *InboundService) AddTraffic(inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic) (needRestart bool, clientsDisabled bool, err error) {
+	return s.addTrafficBatch("", inboundTraffics, clientTraffics)
+}
+
+// AddXrayTrafficBatch makes retries after an uncertain database commit
+// idempotent. The receipt and counters commit in the same transaction.
+func (s *InboundService) AddXrayTrafficBatch(id string, inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic) (bool, bool, error) {
+	if id == "" {
+		return false, false, errors.New("Xray traffic batch has no ID")
+	}
+	return s.addTrafficBatch(id, inboundTraffics, clientTraffics)
+}
+
+// ForgetXrayTrafficBatch is safe only after the caller has discarded the
+// corresponding retry batch. It prevents a receipt on every poll accumulating
+// indefinitely; leftovers after a crash are harmless.
+func (s *InboundService) ForgetXrayTrafficBatch(id string) error {
+	if id == "" {
+		return errors.New("Xray traffic batch has no ID")
+	}
+	return database.GetDB().Where("id = ?", id).Delete(&model.XrayTrafficReceipt{}).Error
+}
+
+func (s *InboundService) addTrafficBatch(id string, inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic) (needRestart bool, clientsDisabled bool, err error) {
 	var disabledNodeIDs []int
 	err = submitTrafficWrite(func() error {
 		var inner error
-		needRestart, clientsDisabled, disabledNodeIDs, inner = s.addTrafficLocked(inboundTraffics, clientTraffics)
+		needRestart, clientsDisabled, disabledNodeIDs, inner = s.addTrafficLocked(id, inboundTraffics, clientTraffics)
 		return inner
 	})
 	if err == nil && len(disabledNodeIDs) > 0 {
@@ -42,7 +65,7 @@ func (s *InboundService) AddTraffic(inboundTraffics []*xray.Traffic, clientTraff
 	return
 }
 
-func (s *InboundService) addTrafficLocked(inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic) (needRestart bool, clientsDisabled bool, disabledNodeIDs []int, err error) {
+func (s *InboundService) addTrafficLocked(id string, inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic) (needRestart bool, clientsDisabled bool, disabledNodeIDs []int, err error) {
 	db := database.GetDB()
 	tx := db.Begin()
 	if tx.Error != nil {
@@ -60,6 +83,17 @@ func (s *InboundService) addTrafficLocked(inboundTraffics []*xray.Traffic, clien
 			resellerAllocationMu.Unlock()
 		}
 	}()
+	if id != "" {
+		result := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&model.XrayTrafficReceipt{ID: id})
+		if result.Error != nil {
+			return false, false, nil, result.Error
+		}
+		if result.RowsAffected == 0 {
+			// An earlier commit succeeded despite returning an error. Request a
+			// conservative restart in case its runtime side effects were missed.
+			return true, false, nil, nil
+		}
+	}
 	err = s.addInboundTraffic(tx, inboundTraffics)
 	if err != nil {
 		return false, false, nil, err
