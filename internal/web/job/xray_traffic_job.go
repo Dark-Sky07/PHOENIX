@@ -2,6 +2,7 @@ package job
 
 import (
 	"encoding/json"
+	"fmt"
 	"sync"
 
 	"github.com/Dark-Sky07/phoenix/internal/logger"
@@ -18,6 +19,7 @@ import (
 type XrayTrafficJob struct {
 	runMu           sync.Mutex
 	pending         *xrayTrafficBatch
+	captureUnlock   func()
 	settingService  service.SettingService
 	xrayService     service.XrayService
 	inboundService  service.InboundService
@@ -67,6 +69,46 @@ func (j *XrayTrafficJob) applyPending(apply func(*xrayTrafficBatch) (bool, bool,
 	return restart, disabled, err
 }
 
+// Poll and identity capture must be ordered with participating client and
+// reseller mutations. If capture fails after polling advanced the baseline,
+// retain both the batch and lock until capture can be retried: releasing the
+// lock earlier could attribute the delta to a replacement client or owner.
+// This coordinates only paths that take the allocation lock; it is not a
+// fencing mechanism for lost database sessions or an atomic runtime journal.
+func (j *XrayTrafficJob) prepareXrayBatch(
+	poll func() ([]*xray.Traffic, []*xray.ClientTraffic, error),
+	capture func([]*xray.ClientTraffic) ([]service.XrayTrafficIdentity, error),
+) error {
+	if j.pending == nil {
+		unlock, err := service.LockResellerAllocation()
+		if err != nil {
+			return err
+		}
+		traffic, clients, err := poll()
+		if err != nil {
+			unlock()
+			return err
+		}
+		j.pending = &xrayTrafficBatch{id: uuid.NewString(), traffic: traffic, clients: clients}
+		j.captureUnlock = unlock
+	}
+	if j.pending.identities == nil {
+		identities, err := capture(j.pending.clients)
+		if err != nil {
+			return fmt.Errorf("capture Xray traffic identity: %w", err)
+		}
+		if identities == nil {
+			return fmt.Errorf("capture Xray traffic identity returned no snapshot")
+		}
+		j.pending.identities = identities
+	}
+	if j.captureUnlock != nil {
+		j.captureUnlock()
+		j.captureUnlock = nil
+	}
+	return nil
+}
+
 func (j *XrayTrafficJob) run() {
 	// Never advance the in-memory baseline again while a previous batch is
 	// uncommitted. The receipt makes an ambiguous commit safe to retry.
@@ -78,11 +120,10 @@ func (j *XrayTrafficJob) run() {
 		if !j.xrayService.IsXrayRunning() {
 			return
 		}
-		traffics, clients, err := j.xrayService.GetXrayTraffic()
-		if err != nil {
-			return
-		}
-		j.pending = &xrayTrafficBatch{id: uuid.NewString(), traffic: traffics, clients: clients}
+	}
+	if err := j.prepareXrayBatch(j.xrayService.GetXrayTraffic, j.inboundService.CaptureXrayTrafficIdentities); err != nil {
+		logger.Warning("prepare Xray traffic batch failed; retaining capture lock when necessary:", err)
+		return
 	}
 	batch := j.pending
 	needRestart0, clientsDisabled, err := j.applyPending(func(b *xrayTrafficBatch) (bool, bool, error) {

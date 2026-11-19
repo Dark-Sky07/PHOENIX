@@ -31,3 +31,14 @@ emails, client ownership, local and master counters, prior archives and runtime
 state. Do not simply delete or merge counters without determining their origin
 and preserving consumed bytes. Archives produced before this guard may already
 contain an inflated snapshot and require evidence-based reconciliation.
+
+## Xray poll identity capture
+
+The Xray poll now holds the participating reseller-allocation lock from before
+reading runtime counters until their database identity snapshot is captured. A
+capture error retains the batch and lock and retries capture on a later tick;
+client allocation/mutation requests may wait while the database is unavailable.
+This closes the identity-change race only for paths that take that lock. It
+cannot fence a lost PostgreSQL lock session, cover unrelated runtime operations,
+or recover traffic lost if the process crashes before its journal is durable.
+Never assume this mechanism accounts for unpolled usage at deletion.
