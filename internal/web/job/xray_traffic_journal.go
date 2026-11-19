@@ -8,6 +8,7 @@ import (
 
 	"github.com/Dark-Sky07/phoenix/internal/config"
 	"github.com/Dark-Sky07/phoenix/internal/logger"
+	"github.com/Dark-Sky07/phoenix/internal/web/service"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
 	"github.com/google/uuid"
 )
@@ -16,9 +17,10 @@ import (
 // baseline advances during the poll. Journal the resulting batch before the
 // database write so a failed write can be retried after a panel restart.
 type xrayTrafficJournalEntry struct {
-	ID      string                `json:"id"`
-	Traffic []*xray.Traffic       `json:"traffic"`
-	Clients []*xray.ClientTraffic `json:"clients"`
+	ID         string                        `json:"id"`
+	Traffic    []*xray.Traffic               `json:"traffic"`
+	Clients    []*xray.ClientTraffic         `json:"clients"`
+	Identities []service.XrayTrafficIdentity `json:"identities"`
 }
 
 func xrayJournalDir() string { return filepath.Join(config.GetDBFolderPath(), "xray-traffic-journal") }
@@ -47,7 +49,7 @@ func storeXrayBatch(batch *xrayTrafficBatch) error {
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	data, err := json.Marshal(xrayTrafficJournalEntry{ID: batch.id, Traffic: batch.traffic, Clients: batch.clients})
+	data, err := json.Marshal(xrayTrafficJournalEntry{ID: batch.id, Traffic: batch.traffic, Clients: batch.clients, Identities: batch.identities})
 	if err != nil {
 		return err
 	}
@@ -77,10 +79,17 @@ func storeXrayBatch(batch *xrayTrafficBatch) error {
 // applyJournaledXrayBatch retains the receipt until the removal of its journal
 // file is durable. Otherwise a crash could replay a committed batch twice.
 func (j *XrayTrafficJob) applyJournaledXrayBatch(batch *xrayTrafficBatch) (bool, bool, error) {
+	if batch.identities == nil {
+		identities, err := j.inboundService.CaptureXrayTrafficIdentities(batch.clients)
+		if err != nil {
+			return false, false, fmt.Errorf("capture Xray traffic identity: %w", err)
+		}
+		batch.identities = identities
+	}
 	if err := storeXrayBatch(batch); err != nil {
 		return false, false, fmt.Errorf("journal Xray traffic: %w", err)
 	}
-	restart, disabled, err := j.inboundService.AddXrayTrafficBatch(batch.id, batch.traffic, batch.clients)
+	restart, disabled, err := j.inboundService.AddCheckedXrayTrafficBatch(batch.id, batch.traffic, batch.clients, batch.identities)
 	if err != nil {
 		return restart, disabled, err
 	}
@@ -122,7 +131,10 @@ func (j *XrayTrafficJob) replayXrayJournal() error {
 		if !validXrayBatchID(saved.ID) || entry.Name() != saved.ID+".json" {
 			return fmt.Errorf("invalid Xray journal batch ID")
 		}
-		batch := &xrayTrafficBatch{id: saved.ID, traffic: saved.Traffic, clients: saved.Clients}
+		if saved.Identities == nil {
+			return fmt.Errorf("legacy Xray journal %s has no identity snapshot; manual reconciliation required", entry.Name())
+		}
+		batch := &xrayTrafficBatch{id: saved.ID, traffic: saved.Traffic, clients: saved.Clients, identities: saved.Identities}
 		restart, disabled, err := j.applyJournaledXrayBatch(batch)
 		if err != nil {
 			return err

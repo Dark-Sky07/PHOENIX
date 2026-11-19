@@ -48,9 +48,10 @@ func (j *XrayTrafficJob) runOnce(run func()) {
 }
 
 type xrayTrafficBatch struct {
-	id      string
-	traffic []*xray.Traffic
-	clients []*xray.ClientTraffic
+	id         string
+	traffic    []*xray.Traffic
+	clients    []*xray.ClientTraffic
+	identities []service.XrayTrafficIdentity
 }
 
 // applyPending keeps the same identity and counters on error, including an

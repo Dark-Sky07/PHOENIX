@@ -30,7 +30,7 @@ func (s *InboundService) DeletePPPTrafficCheckpoints(sessionIDs []string) error 
 }
 
 func (s *InboundService) AddTraffic(inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic) (needRestart bool, clientsDisabled bool, err error) {
-	return s.addTrafficBatch("", inboundTraffics, clientTraffics)
+	return s.addTrafficBatch("", inboundTraffics, clientTraffics, nil)
 }
 
 // AddXrayTrafficBatch makes retries after an uncertain database commit
@@ -39,7 +39,16 @@ func (s *InboundService) AddXrayTrafficBatch(id string, inboundTraffics []*xray.
 	if id == "" {
 		return false, false, errors.New("Xray traffic batch has no ID")
 	}
-	return s.addTrafficBatch(id, inboundTraffics, clientTraffics)
+	return s.addTrafficBatch(id, inboundTraffics, clientTraffics, nil)
+}
+
+// AddCheckedXrayTrafficBatch rejects a stale journal when its client or
+// reseller identity has changed, rather than billing a replacement account.
+func (s *InboundService) AddCheckedXrayTrafficBatch(id string, inbounds []*xray.Traffic, clients []*xray.ClientTraffic, identities []XrayTrafficIdentity) (bool, bool, error) {
+	if id == "" || identities == nil {
+		return false, false, errors.New("Xray batch identity snapshot is required")
+	}
+	return s.addTrafficBatch(id, inbounds, clients, identities)
 }
 
 // ForgetXrayTrafficBatch is safe only after the caller has discarded the
@@ -52,11 +61,11 @@ func (s *InboundService) ForgetXrayTrafficBatch(id string) error {
 	return database.GetDB().Where("id = ?", id).Delete(&model.XrayTrafficReceipt{}).Error
 }
 
-func (s *InboundService) addTrafficBatch(id string, inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic) (needRestart bool, clientsDisabled bool, err error) {
+func (s *InboundService) addTrafficBatch(id string, inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic, identities []XrayTrafficIdentity) (needRestart bool, clientsDisabled bool, err error) {
 	var disabledNodeIDs []int
 	err = submitTrafficWrite(func() error {
 		var inner error
-		needRestart, clientsDisabled, disabledNodeIDs, inner = s.addTrafficLocked(id, inboundTraffics, clientTraffics)
+		needRestart, clientsDisabled, disabledNodeIDs, inner = s.addTrafficLocked(id, inboundTraffics, clientTraffics, identities)
 		return inner
 	})
 	if err == nil && len(disabledNodeIDs) > 0 {
@@ -65,7 +74,7 @@ func (s *InboundService) addTrafficBatch(id string, inboundTraffics []*xray.Traf
 	return
 }
 
-func (s *InboundService) addTrafficLocked(id string, inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic) (needRestart bool, clientsDisabled bool, disabledNodeIDs []int, err error) {
+func (s *InboundService) addTrafficLocked(id string, inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic, identities []XrayTrafficIdentity) (needRestart bool, clientsDisabled bool, disabledNodeIDs []int, err error) {
 	db := database.GetDB()
 	tx := db.Begin()
 	if tx.Error != nil {
@@ -92,6 +101,11 @@ func (s *InboundService) addTrafficLocked(id string, inboundTraffics []*xray.Tra
 			// An earlier commit succeeded despite returning an error. Request a
 			// conservative restart in case its runtime side effects were missed.
 			return true, false, nil, nil
+		}
+	}
+	if identities != nil {
+		if err := verifyXrayTrafficIdentities(tx, clientTraffics, identities); err != nil {
+			return false, false, nil, err
 		}
 	}
 	err = s.addInboundTraffic(tx, inboundTraffics)
