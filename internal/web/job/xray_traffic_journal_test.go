@@ -1,0 +1,72 @@
+package job
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/Dark-Sky07/phoenix/internal/database"
+	"github.com/Dark-Sky07/phoenix/internal/database/model"
+	"github.com/Dark-Sky07/phoenix/internal/xray"
+	"github.com/google/uuid"
+)
+
+func TestXrayJournalSurvivesDatabaseFailureAndReplaysOnce(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XUI_DB_FOLDER", dir)
+	if err := database.InitDB(filepath.Join(dir, "x-ui.db")); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.CloseDB() })
+	db := database.GetDB()
+	client := model.ClientRecord{Email: "xray-journal@example.test", Enable: true}
+	row := xray.ClientTraffic{Email: client.Email, Enable: true}
+	if err := db.Create(&client).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	batch := &xrayTrafficBatch{id: uuid.NewString(), clients: []*xray.ClientTraffic{{Email: row.Email, Up: 123, Down: 456}}}
+	if err := db.Exec("CREATE TRIGGER reject_xray_journal BEFORE UPDATE ON client_traffics BEGIN SELECT RAISE(ABORT, 'injected failure'); END").Error; err != nil {
+		t.Fatal(err)
+	}
+	j := NewXrayTrafficJob()
+	if _, _, err := j.applyJournaledXrayBatch(batch); err == nil {
+		t.Fatal("expected injected failure")
+	}
+	path := filepath.Join(xrayJournalDir(), batch.id+".json")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("journal lost: %v", err)
+	}
+	if err := db.Exec("DROP TRIGGER reject_xray_journal").Error; err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a commit followed by a crash before removing the journal.
+	if _, _, err := j.inboundService.AddXrayTrafficBatch(batch.id, nil, batch.clients); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewXrayTrafficJob().replayXrayJournal(); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Where("id = ?", row.Id).First(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.Up != 123 || row.Down != 456 {
+		t.Fatalf("replayed batch counted incorrectly: %d/%d", row.Up, row.Down)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("journal not removed: %v", err)
+	}
+	var count int64
+	if err := db.Model(&model.XrayTrafficReceipt{}).Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("receipt cleanup = %d, %v", count, err)
+	}
+}
+
+func TestXrayJournalRejectsInvalidBatchID(t *testing.T) {
+	t.Setenv("XUI_DB_FOLDER", t.TempDir())
+	if err := storeXrayBatch(&xrayTrafficBatch{id: "../escape"}); err == nil {
+		t.Fatal("invalid batch ID accepted")
+	}
+}

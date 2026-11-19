@@ -70,6 +70,10 @@ func (j *XrayTrafficJob) run() {
 	// Never advance the in-memory baseline again while a previous batch is
 	// uncommitted. The receipt makes an ambiguous commit safe to retry.
 	if j.pending == nil {
+		if err := j.replayXrayJournal(); err != nil {
+			logger.Warning("recover Xray traffic journal failed:", err)
+			return
+		}
 		if !j.xrayService.IsXrayRunning() {
 			return
 		}
@@ -81,16 +85,11 @@ func (j *XrayTrafficJob) run() {
 	}
 	batch := j.pending
 	needRestart0, clientsDisabled, err := j.applyPending(func(b *xrayTrafficBatch) (bool, bool, error) {
-		return j.inboundService.AddXrayTrafficBatch(b.id, b.traffic, b.clients)
+		return j.applyJournaledXrayBatch(b)
 	})
 	if err != nil {
 		logger.Warning("add inbound traffic failed; retaining batch for retry:", err)
 		return
-	}
-	// Pending batches only live in memory; after success this ID can no longer
-	// be retried by this job. Cleanup is best effort, not part of accounting.
-	if err := j.inboundService.ForgetXrayTrafficBatch(batch.id); err != nil {
-		logger.Warning("clean Xray traffic receipt failed:", err)
 	}
 	traffics, clientTraffics := batch.traffic, batch.clients
 	err, needRestart1 := j.outboundService.AddTraffic(traffics, clientTraffics)
