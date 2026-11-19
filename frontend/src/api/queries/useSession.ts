@@ -32,6 +32,7 @@ export interface ResellerStat {
   inboundCount: number;
   clientCount: number;
   onlineCount: number;
+  pendingCreations?: number;
   usedTraffic: number;
   allocatedTraffic: number;
   remainingTraffic: number;
@@ -84,6 +85,7 @@ export interface ResellerReport {
   clients: ResellerClientRow[];
   transactions: ResellerTransaction[];
   trafficArchives?: ResellerTrafficArchive[];
+  creationIssues?: { id: string; operation: string; email: string; createdAt: number }[];
 }
 
 export interface SessionInfo {

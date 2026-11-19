@@ -98,3 +98,21 @@ func BeginResellerBatchOperation(id int, operation string, entries []ResellerBat
 	}
 	return intent, nil
 }
+
+// ResellerCreationIssue is the non-secret operational summary for an admin.
+// Raw subscription IDs and batch manifests remain in the protected database.
+type ResellerCreationIssue struct {
+	ID        string `json:"id"`
+	Operation string `json:"operation"`
+	Email     string `json:"email"`
+	CreatedAt int64  `json:"createdAt"`
+}
+
+func (s *ResellerService) CreationIssues(id int) ([]ResellerCreationIssue, error) {
+	if id <= 0 {
+		return nil, errors.New("invalid reseller id")
+	}
+	rows := make([]ResellerCreationIssue, 0)
+	err := database.GetDB().Model(&model.ResellerCreationIntent{}).Select("id", "operation", "email", "created_at").Where("reseller_id = ?", id).Order("created_at DESC, id DESC").Limit(100).Scan(&rows).Error
+	return rows, err
+}

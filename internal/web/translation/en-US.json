@@ -2547,6 +2547,9 @@
     "depositLinkCopied": "Wallet top-up link copied",
     "exportCsv": "Export CSV",
     "exportListCsv": "Export list (CSV)",
+    "pendingCreationTitle": "Client operations need reconciliation",
+    "pendingCreationAdmin": "Client operations are blocked until an administrator investigates. Do not blindly retry or remove the records.",
+    "pendingCreationReseller": "Some client operations are temporarily blocked. Contact your administrator; do not retry the interrupted operation.",
     "validation": {
       "username": "Enter a username",
       "password": "Enter a password",

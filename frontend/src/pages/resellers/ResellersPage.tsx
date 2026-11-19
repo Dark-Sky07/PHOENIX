@@ -911,6 +911,21 @@ export default function ResellersPage() {
                       />
                     </Col>
                   </Row>
+                  {(reportQuery.data.stat.pendingCreations ?? 0) > 0 && (
+                    <Alert
+                      type="warning"
+                      showIcon
+                      message={t('resellers.pendingCreationTitle', 'Client operations need reconciliation')}
+                      description={(
+                        <Space orientation="vertical">
+                          <span>{t('resellers.pendingCreationAdmin', 'Client operations are blocked until an administrator investigates. Do not blindly retry or remove the records.')}</span>
+                          {(reportQuery.data.creationIssues ?? []).map((issue) => (
+                            <span key={issue.id}>{issue.operation || 'single_create'} · {issue.email} · {new Date(issue.createdAt).toLocaleString()} · {issue.id}</span>
+                          ))}
+                        </Space>
+                      )}
+                    />
+                  )}
                   <ResellerSalesSection resellerId={reportQuery.data.stat.reseller.id} />
                   <ResellerTrafficArchives rows={reportQuery.data.trafficArchives ?? []} />
                   <Descriptions size="small" bordered column={isMobile ? 1 : 2}>

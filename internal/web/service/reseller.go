@@ -42,6 +42,7 @@ type ResellerStat struct {
 	InboundCount     int             `json:"inboundCount"`
 	ClientCount      int             `json:"clientCount"`
 	OnlineCount      int             `json:"onlineCount"`
+	PendingCreations int64           `json:"pendingCreations"`
 	UsedTraffic      int64           `json:"usedTraffic"`
 	AllocatedTraffic int64           `json:"allocatedTraffic"`
 	RemainingTraffic int64           `json:"remainingTraffic"` // TrafficLimit - AllocatedTraffic (0 when unlimited)
@@ -74,6 +75,9 @@ type ResellerReport struct {
 	Clients         []ResellerClientRow            `json:"clients"`
 	Transactions    []*model.ResellerTransaction   `json:"transactions"`
 	TrafficArchives []model.ResellerTrafficArchive `json:"trafficArchives"`
+	// Populated by the admin report handler only; self-service never exposes
+	// operational details of potentially unowned client records.
+	CreationIssues []ResellerCreationIssue `json:"creationIssues,omitempty"`
 }
 
 // ResellerSalePrice is a reseller-declared price, in the currency's minor
@@ -1290,6 +1294,9 @@ func (s *ResellerService) Stat(reseller *model.Reseller) (*ResellerStat, error) 
 	}
 	db := database.GetDB()
 	stat := &ResellerStat{Reseller: reseller, Currency: "USD"}
+	if err := db.Model(&model.ResellerCreationIntent{}).Where("reseller_id = ?", reseller.Id).Count(&stat.PendingCreations).Error; err != nil {
+		return nil, err
+	}
 	var settingSvc SettingService
 	if configured, err := settingSvc.GetCheckoutCurrency(); err == nil && strings.TrimSpace(configured) != "" {
 		if code, ok := moneycurrency.Normalize(configured); ok {

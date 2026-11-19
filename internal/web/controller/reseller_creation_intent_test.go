@@ -212,3 +212,36 @@ func TestResellerImportIntentTracksSuccessAndFailure(t *testing.T) {
 		})
 	}
 }
+
+func TestCreationIssueReportShowsStatusWithoutLeakingSecrets(t *testing.T) {
+	router := setupResellerInboundRouter(t)
+	db := database.GetDB()
+	var reseller model.Reseller
+	if err := db.Where("username = ?", "sara").First(&reseller).Error; err != nil {
+		t.Fatal(err)
+	}
+	intent := model.ResellerCreationIntent{Id: "issue-1", ResellerId: reseller.Id, Email: "issue@example.test", SubID: "sensitive-subscription-id", InboundIDs: "[1]", Details: `{"secret":"private-manifest"}`}
+	if err := db.Create(&intent).Error; err != nil {
+		t.Fatal(err)
+	}
+	// Exercise the actual admin report handler; access control is supplied by
+	// the API router's reseller guard in production.
+	NewResellerController(router.Group("/panel/api/resellers"))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, fmt.Sprintf("/panel/api/resellers/report/%d", reseller.Id), nil))
+	body := w.Body.String()
+	if !strings.Contains(body, `"pendingCreations":1`) || !strings.Contains(body, "issue@example.test") {
+		t.Fatalf("missing admin issue status: %s", body)
+	}
+	if strings.Contains(body, "sensitive-subscription-id") || strings.Contains(body, "private-manifest") {
+		t.Fatalf("admin report exposed intent secrets: %s", body)
+	}
+	// The self-report exposes the count, not the admin-only issue details.
+	NewResellerSelfController(router.Group("/panel/api/reseller"))
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/panel/api/reseller/report", nil))
+	body = w.Body.String()
+	if !strings.Contains(body, `"pendingCreations":1`) || strings.Contains(body, "creationIssues") || strings.Contains(body, "issue@example.test") {
+		t.Fatalf("self report exposed issue details or omitted count: %s", body)
+	}
+}

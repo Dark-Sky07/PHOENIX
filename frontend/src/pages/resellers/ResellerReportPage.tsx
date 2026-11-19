@@ -119,6 +119,9 @@ export default function ResellerReportPage() {
                 )}
               />
 
+              {stat && (stat.pendingCreations ?? 0) > 0 && (
+                <Alert type="warning" showIcon message={t('resellers.pendingCreationTitle', 'Client operations need reconciliation')} description={t('resellers.pendingCreationReseller', 'Some client operations are temporarily blocked. Contact your administrator; do not retry the interrupted operation.')} />
+              )}
               <StatStrip size={isMobile ? 'compact' : 'default'} items={reportStats} />
 
               <Row gutter={[isMobile ? 8 : 16, isMobile ? 8 : 12]}>
