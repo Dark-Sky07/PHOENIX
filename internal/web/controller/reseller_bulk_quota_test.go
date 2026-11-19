@@ -85,3 +85,33 @@ func TestConcurrentResellerClientCreationRespectsTrafficLimit(t *testing.T) {
 		t.Fatalf("unexpected quota after creation: %+v, %v", stat, err)
 	}
 }
+
+func TestResellerBulkCreateRejectsOverflowAtMaximumLimit(t *testing.T) {
+	setupResellerInboundRouter(t)
+	db := database.GetDB()
+	var reseller model.Reseller
+	if err := db.Where("username = ?", "sara").First(&reseller).Error; err != nil {
+		t.Fatal(err)
+	}
+	reseller.TrafficLimit = math.MaxInt64
+	inbound := model.Inbound{UserId: 1, Port: 19322, Protocol: model.VLESS, Settings: `{"clients":[]}`, Tag: "overflow-reseller"}
+	if err := db.Create(&inbound).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&model.ResellerInbound{ResellerId: reseller.Id, InboundId: inbound.Id}).Error; err != nil {
+		t.Fatal(err)
+	}
+	controller := &ClientController{}
+	payloads := []service.ClientCreatePayload{
+		{Client: model.Client{Email: "max-a@example.test", TotalGB: math.MaxInt64 / 2}, InboundIds: []int{inbound.Id}},
+		{Client: model.Client{Email: "max-b@example.test", TotalGB: math.MaxInt64 / 2}, InboundIds: []int{inbound.Id}},
+		{Client: model.Client{Email: "max-c@example.test", TotalGB: 2}, InboundIds: []int{inbound.Id}},
+	}
+	if err := controller.scopeResellerClientWrite(&reseller, payloads); err == nil {
+		t.Fatal("overflow batch was accepted")
+	}
+	var clients int64
+	if err := db.Model(&model.ClientRecord{}).Count(&clients).Error; err != nil || clients != 0 {
+		t.Fatalf("preflight mutated clients: %d %v", clients, err)
+	}
+}

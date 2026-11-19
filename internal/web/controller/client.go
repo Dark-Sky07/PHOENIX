@@ -1570,10 +1570,11 @@ func (a *ClientController) scopeResellerClientWrite(reseller *model.Reseller, pa
 			return err
 		}
 		if addBytes > math.MaxInt64-allocation {
-			addBytes = math.MaxInt64
-		} else {
-			addBytes += allocation
+			// Saturating would let an overflowing batch fit a reseller with a
+			// MaxInt64 limit; reject before any client or runtime mutation.
+			return errors.New("combined client allocation exceeds supported range")
 		}
+		addBytes += allocation
 	}
 	return a.resellerService.CheckClientQuota(reseller, len(payloads), addBytes)
 }
