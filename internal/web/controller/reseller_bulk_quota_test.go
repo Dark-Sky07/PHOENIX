@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 
 	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
@@ -107,8 +108,8 @@ func TestResellerBulkCreateRejectsOverflowAtMaximumLimit(t *testing.T) {
 		{Client: model.Client{Email: "max-b@example.test", TotalGB: math.MaxInt64 / 2}, InboundIds: []int{inbound.Id}},
 		{Client: model.Client{Email: "max-c@example.test", TotalGB: 2}, InboundIds: []int{inbound.Id}},
 	}
-	if err := controller.scopeResellerClientWrite(&reseller, payloads); err == nil {
-		t.Fatal("overflow batch was accepted")
+	if err := controller.scopeResellerClientWrite(&reseller, payloads); err == nil || !strings.Contains(err.Error(), "combined client allocation") {
+		t.Fatalf("expected overflow rejection, got %v", err)
 	}
 	var clients int64
 	if err := db.Model(&model.ClientRecord{}).Count(&clients).Error; err != nil || clients != 0 {
