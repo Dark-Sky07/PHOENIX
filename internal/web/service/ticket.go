@@ -249,6 +249,17 @@ func (s *PaymentWebhookService) ProcessWebhook(p PaymentWebhookPayload) (*model.
 	}
 
 	db := database.GetDB()
+	// Reseller payments commit the order, balance/ledger, and quota together.
+	// The persisted order is authoritative even if a callback supplies another type.
+	var probe model.PaymentOrder
+	probeErr := db.Where("order_id = ?", p.OrderId).First(&probe).Error
+	if probeErr != nil && !errors.Is(probeErr, gorm.ErrRecordNotFound) {
+		return nil, probeErr
+	}
+	if (probeErr == nil && (probe.TargetType == "reseller_deposit" || probe.TargetType == "reseller_quota")) ||
+		(errors.Is(probeErr, gorm.ErrRecordNotFound) && (p.TargetType == "reseller_deposit" || p.TargetType == "reseller_quota")) {
+		return s.processResellerPayment(p)
+	}
 	// Idempotency check: if OrderId was already processed, return the existing order.
 	var existing model.PaymentOrder
 	if err := db.Where("order_id = ?", p.OrderId).First(&existing).Error; err == nil {
