@@ -1,6 +1,7 @@
 package service
 
 import (
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -186,5 +187,70 @@ func waitTrafficWriterErr(t *testing.T, ch <-chan error) error {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for traffic writer result")
 		return nil
+	}
+}
+
+func TestTrafficWriterInlineWritesRemainSerialized(t *testing.T) {
+	resetTrafficWriterForTest(t)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	first := make(chan error, 1)
+	go func() { first <- submitTrafficWrite(func() error { close(started); <-release; return nil }) }()
+	waitTrafficWriterSignal(t, started, "inline write did not start")
+	secondStarted := make(chan struct{})
+	second := make(chan error, 1)
+	go func() { second <- submitTrafficWrite(func() error { close(secondStarted); return nil }) }()
+	select {
+	case <-secondStarted:
+		t.Fatal("inline writes ran concurrently")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	if err := waitTrafficWriterErr(t, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitTrafficWriterErr(t, second); err != nil {
+		t.Fatal(err)
+	}
+	waitTrafficWriterSignal(t, secondStarted, "second inline write did not run")
+}
+
+func TestTrafficWriterStoppingDoesNotOvertakeQueuedWrites(t *testing.T) {
+	resetTrafficWriterForTest(t)
+	StartTrafficWriter()
+	started, release := make(chan struct{}), make(chan struct{})
+	first, queued, afterStop := make(chan error, 1), make(chan error, 1), make(chan error, 1)
+	go func() { first <- submitTrafficWrite(func() error { close(started); <-release; return nil }) }()
+	waitTrafficWriterSignal(t, started, "first write did not start")
+	queuedRan := make(chan struct{})
+	go func() { queued <- submitTrafficWrite(func() error { close(queuedRan); return nil }) }()
+	waitTrafficWriterQueued(t)
+	stopped := make(chan struct{})
+	go func() { StopTrafficWriter(); close(stopped) }()
+	// Observe cancellation rather than racing the stopping goroutine.
+	twMu.Lock()
+	ctx := twCtx
+	twMu.Unlock()
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("stop did not cancel writer")
+	}
+	go func() {
+		afterStop <- submitTrafficWrite(func() error {
+			select {
+			case <-queuedRan:
+				return nil
+			default:
+				return fmt.Errorf("inline write overtook queued work")
+			}
+		})
+	}()
+	close(release)
+	waitTrafficWriterSignal(t, stopped, "writer did not stop")
+	for _, ch := range []<-chan error{first, queued, afterStop} {
+		if err := waitTrafficWriterErr(t, ch); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
