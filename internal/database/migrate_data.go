@@ -56,6 +56,7 @@ func migrationModels() []any {
 		&model.ResellerClient{},
 		&model.ResellerTransaction{},
 		&model.ResellerSale{},
+		&model.ResellerCreationIntent{},
 		&model.ResellerHistoricalSale{},
 		&model.ResellerTrafficArchive{},
 		&model.TuicTrafficReceipt{},

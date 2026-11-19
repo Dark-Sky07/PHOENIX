@@ -966,6 +966,16 @@ func (s *ResellerService) AssignClients(resellerId int, emails []string) error {
 // newly created reseller clients in the same transaction as their ownership
 // mappings. Manually assigned pre-existing clients are passed only in emails.
 func (s *ResellerService) AssignClientsWithSales(resellerId int, emails, saleEmails []string, declaredPrices ...map[string]*ResellerSalePrice) error {
+	return s.assignClientsWithSales(resellerId, emails, saleEmails, "", declaredPrices...)
+}
+
+// CompleteResellerClientCreation removes the durable intent in the same
+// transaction that creates the mapping and sale snapshot.
+func (s *ResellerService) CompleteResellerClientCreation(resellerId int, email, intentID string, price *ResellerSalePrice) error {
+	return s.assignClientsWithSales(resellerId, []string{email}, []string{email}, intentID, map[string]*ResellerSalePrice{email: price})
+}
+
+func (s *ResellerService) assignClientsWithSales(resellerId int, emails, saleEmails []string, intentID string, declaredPrices ...map[string]*ResellerSalePrice) error {
 	prices := map[string]*ResellerSalePrice{}
 	if len(declaredPrices) > 1 {
 		return errors.New("multiple sale price maps are not allowed")
@@ -1030,12 +1040,27 @@ func (s *ResellerService) AssignClientsWithSales(resellerId int, emails, saleEma
 			}
 			return err
 		}
+		var intent model.ResellerCreationIntent
+		if intentID != "" {
+			if len(keys) != 1 || len(saleKeys) != 1 {
+				return errors.New("invalid creation intent batch")
+			}
+			if err := tx.Where("id = ? AND reseller_id = ?", intentID, resellerId).First(&intent).Error; err != nil {
+				return err
+			}
+			if transferEmailKey(intent.Email) != keys[0] {
+				return errors.New("creation intent email changed")
+			}
+		}
 		var clients []model.ClientRecord
 		if err := tx.Where("LOWER(TRIM(email)) IN ?", keys).Find(&clients).Error; err != nil {
 			return err
 		}
 		canonical := make(map[string]string, len(clients))
 		for _, client := range clients {
+			if intentID != "" && (client.SubID != intent.SubID || client.TotalGB != intent.RequestedBytes) {
+				return errors.New("creation intent identity or allocation changed")
+			}
 			canonical[transferEmailKey(client.Email)] = client.Email
 		}
 		for _, key := range keys {
@@ -1103,6 +1128,15 @@ func (s *ResellerService) AssignClientsWithSales(resellerId int, emails, saleEma
 				}).Create(&sale).Error; err != nil {
 					return err
 				}
+			}
+		}
+		if intentID != "" {
+			result := tx.Where("id = ? AND reseller_id = ?", intentID, resellerId).Delete(&model.ResellerCreationIntent{})
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				return errors.New("creation intent missing during completion")
 			}
 		}
 		return nil
@@ -1690,6 +1724,9 @@ func (s *ResellerService) CheckTrafficQuota(reseller *model.Reseller, addBytes i
 	if reseller == nil {
 		return errors.New("reseller is required")
 	}
+	if err := CheckPendingResellerCreations(reseller.Id); err != nil {
+		return err
+	}
 	if addBytes < 0 {
 		return errors.New("traffic allocation cannot be negative")
 	}
@@ -1744,6 +1781,9 @@ func ValidateResellerAllocation(reseller *model.Reseller, allocation int64) erro
 func (s *ResellerService) CheckClientQuota(reseller *model.Reseller, adding int, addBytes int64) error {
 	if reseller == nil {
 		return errors.New("reseller is required")
+	}
+	if err := CheckPendingResellerCreations(reseller.Id); err != nil {
+		return err
 	}
 	if adding < 0 {
 		return errors.New("client count increment cannot be negative")

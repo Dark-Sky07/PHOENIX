@@ -27,6 +27,13 @@ func (t *renewalQuotaTracker) load(id int) (*renewalQuotaSnapshot, error) {
 	if found := t.accounts[id]; found != nil {
 		return found, nil
 	}
+	var pending int64
+	if err := t.tx.Model(&model.ResellerCreationIntent{}).Where("reseller_id = ?", id).Count(&pending).Error; err != nil {
+		return nil, err
+	}
+	if pending > 0 {
+		return nil, errors.New("reseller client creation needs manual reconciliation")
+	}
 	var reseller model.Reseller
 	if err := t.tx.First(&reseller, id).Error; err != nil {
 		return nil, err

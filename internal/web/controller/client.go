@@ -15,6 +15,7 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/web/websocket"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 func notifyClientsChanged() {
@@ -391,6 +392,18 @@ func (a *ClientController) create(c *gin.Context) {
 		}
 	}
 	generatedIdentity := newResellerClient && strings.TrimSpace(payload.Client.SubID) == ""
+	var intent *model.ResellerCreationIntent
+	if newResellerClient {
+		if generatedIdentity {
+			payload.Client.SubID = uuid.NewString()
+		}
+		var intentErr error
+		intent, intentErr = service.BeginResellerClientCreation(resellerSession(c).Id, &payload)
+		if intentErr != nil {
+			jsonMsg(c, "client creation could not be recorded", intentErr)
+			return
+		}
+	}
 	needRestart, err := a.clientService.Create(&a.inboundService, &payload)
 	if err != nil {
 		if generatedIdentity {
@@ -401,6 +414,15 @@ func (a *ClientController) create(c *gin.Context) {
 					a.xrayService.SetToNeedRestart()
 				}
 				jsonMsg(c, "client creation failed; rollback also failed", fmt.Errorf("%w (rollback: %v)", err, rollbackErr))
+				return
+			}
+		}
+		if generatedIdentity {
+			if discardErr := service.DiscardResellerClientCreation(intent); discardErr != nil {
+				if needRestart {
+					a.xrayService.SetToNeedRestart()
+				}
+				jsonMsg(c, "client creation failed; manual reconciliation required", fmt.Errorf("%w (intent: %v)", err, discardErr))
 				return
 			}
 		}
@@ -419,7 +441,7 @@ func (a *ClientController) create(c *gin.Context) {
 		// ownership, even when the target inbound is also reseller-owned.
 		var assignErr error
 		if newResellerClient {
-			assignErr = a.resellerService.AssignClientsWithSales(reseller.Id, []string{payload.Client.Email}, []string{payload.Client.Email}, map[string]*service.ResellerSalePrice{payload.Client.Email: payload.SalePrice})
+			assignErr = a.resellerService.CompleteResellerClientCreation(reseller.Id, payload.Client.Email, intent.Id, payload.SalePrice)
 		} else {
 			assignErr = a.resellerService.AssignClient(reseller.Id, strings.TrimSpace(payload.Client.Email))
 		}
@@ -430,6 +452,14 @@ func (a *ClientController) create(c *gin.Context) {
 			// client/attachment mutation so a mapping failure cannot leave an
 			// invisible orphan behind. Existing clients are never deleted.
 			if newResellerClient && generatedIdentity {
+				exists, lookupErr := service.ResellerCreationIntentExists(intent)
+				if lookupErr != nil || !exists {
+					if needRestart {
+						a.xrayService.SetToNeedRestart()
+					}
+					jsonMsg(c, "client ownership outcome uncertain; manual reconciliation required", err)
+					return
+				}
 				rollbackRestart, rollbackErr := a.clientService.RollbackNewClientCreate(&a.inboundService, payload.Client.Email, payload.Client.SubID)
 				needRestart = needRestart || rollbackRestart
 				if rollbackErr != nil {
@@ -437,6 +467,13 @@ func (a *ClientController) create(c *gin.Context) {
 						a.xrayService.SetToNeedRestart()
 					}
 					jsonMsg(c, "client ownership failed; rollback also failed", fmt.Errorf("%w (rollback: %v)", err, rollbackErr))
+					return
+				}
+				if discardErr := service.DiscardResellerClientCreation(intent); discardErr != nil {
+					if needRestart {
+						a.xrayService.SetToNeedRestart()
+					}
+					jsonMsg(c, "client ownership failed; manual reconciliation required", fmt.Errorf("%w (intent: %v)", err, discardErr))
 					return
 				}
 			} else if newResellerClient {
