@@ -104,7 +104,8 @@ func (s *InboundService) addTrafficLocked(id string, inboundTraffics []*xray.Tra
 		}
 	}
 	if identities != nil {
-		if err := verifyXrayTrafficIdentities(tx, clientTraffics, identities); err != nil {
+		clientTraffics, err = reconcileXrayTrafficIdentities(tx, clientTraffics, identities)
+		if err != nil {
 			return false, false, nil, err
 		}
 	}

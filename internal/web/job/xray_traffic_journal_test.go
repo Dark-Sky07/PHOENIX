@@ -7,6 +7,7 @@ import (
 
 	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
+	"github.com/Dark-Sky07/phoenix/internal/web/service"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
 	"github.com/google/uuid"
 )
@@ -165,5 +166,74 @@ func TestXrayJournalRejectsOwnershipChange(t *testing.T) {
 	}
 	if row.Down != 0 {
 		t.Fatal("old owner's traffic charged to new owner")
+	}
+}
+
+func TestXrayJournalLateTrafficSurvivesClientDeletion(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XUI_DB_FOLDER", dir)
+	if err := database.InitDB(filepath.Join(dir, "x-ui.db")); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.CloseDB() })
+	db := database.GetDB()
+	reseller := model.Reseller{Username: "journal-owner", Password: "hash", Enable: true, TrafficLimit: 2000}
+	client := model.ClientRecord{Email: "late-delete@example.test", Enable: true, TotalGB: 1000}
+	counter := xray.ClientTraffic{Email: client.Email, Enable: true, Up: 40, Down: 60}
+	for _, v := range []any{&reseller, &client, &counter} {
+		if err := db.Create(v).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Create(&model.ResellerClient{Email: client.Email, ResellerId: reseller.Id}).Error; err != nil {
+		t.Fatal(err)
+	}
+	j := NewXrayTrafficJob()
+	batch := &xrayTrafficBatch{id: uuid.NewString(), clients: []*xray.ClientTraffic{{Email: client.Email, Up: 123, Down: 456}}}
+	var err error
+	batch.identities, err = j.inboundService.CaptureXrayTrafficIdentities(batch.clients)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := storeXrayBatch(batch); err != nil {
+		t.Fatal(err)
+	}
+	// Use the real deletion path, which archives the already persisted bytes.
+	if _, err := (&service.ClientService{}).Delete(&service.InboundService{}, client.Id, false); err != nil {
+		t.Fatal(err)
+	}
+	replacement := model.ClientRecord{Email: client.Email, Enable: true}
+	replacementCounter := xray.ClientTraffic{Email: client.Email, Enable: true}
+	if err := db.Create(&replacement).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&replacementCounter).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("CREATE TRIGGER fail_late_archive BEFORE UPDATE OF prior_consumed_bytes ON reseller_traffic_archives BEGIN SELECT RAISE(ABORT, 'injected archive failure'); END").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := NewXrayTrafficJob().replayXrayJournal(); err == nil {
+		t.Fatal("archive failure must keep the batch for retry")
+	}
+	var receipts int64
+	if err := db.Model(&model.XrayTrafficReceipt{}).Count(&receipts).Error; err != nil || receipts != 0 {
+		t.Fatalf("failed archive committed receipt: %d %v", receipts, err)
+	}
+	if err := db.Exec("DROP TRIGGER fail_late_archive").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := NewXrayTrafficJob().replayXrayJournal(); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.First(&replacementCounter, replacementCounter.Id).Error; err != nil {
+		t.Fatal(err)
+	}
+	if replacementCounter.Up != 0 || replacementCounter.Down != 0 {
+		t.Fatalf("replacement billed old traffic: %+v", replacementCounter)
+	}
+	stat, err := (&service.ResellerService{}).Stat(&reseller)
+	if err != nil || stat.UsedTraffic != 679 || stat.AllocatedTraffic != 679 {
+		t.Fatalf("late traffic was not archived: %+v %v", stat, err)
 	}
 }
