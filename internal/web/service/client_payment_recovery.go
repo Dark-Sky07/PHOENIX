@@ -160,6 +160,11 @@ func (s *PaymentWebhookService) preparePaidClientRenewal(order *model.PaymentOrd
 		return nil, fmt.Errorf("client %q not found: %w", order.TargetRef, err)
 	}
 	updated := *rec.ToClient()
+	// Zero denotes unlimited traffic; adding a finite number to zero would
+	// silently replace unlimited access with a finite quota after payment.
+	if updated.TotalGB == 0 && order.AddGB > 0 {
+		return nil, errors.New("cannot add traffic to an unlimited client; administrator reconciliation required")
+	}
 	if order.AddGB < 0 || order.AddGB > math.MaxInt64/bytesPerGB || updated.TotalGB < 0 || (order.AddGB > 0 && updated.TotalGB > math.MaxInt64-order.AddGB*bytesPerGB) {
 		return nil, errors.New("client renewal quota exceeds supported range")
 	}

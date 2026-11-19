@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -225,18 +226,36 @@ func (s *CheckoutService) CreateOrder(email string, gb int64, months int) (*Chec
 	if err != nil {
 		return nil, err
 	}
+	if math.IsNaN(cfg.pricePerGB) || math.IsInf(cfg.pricePerGB, 0) || cfg.pricePerGB < 0 || math.IsNaN(cfg.pricePerMon) || math.IsInf(cfg.pricePerMon, 0) || cfg.pricePerMon < 0 {
+		return nil, common.NewError("checkout prices are invalid")
+	}
 	amount := RoundMoney(float64(gb)*cfg.pricePerGB+float64(months)*cfg.pricePerMon, cfg.currency)
-	if amount <= 0 {
+	if math.IsNaN(amount) || math.IsInf(amount, 0) || amount <= 0 {
 		return nil, common.NewError("checkout prices are not configured")
 	}
-	if _, err := s.clientService.GetRecordByEmail(nil, email); err != nil {
+	unlock, err := LockResellerAllocation()
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	rec, err := s.clientService.GetRecordByEmail(nil, email)
+	if err != nil {
 		return nil, ErrCheckoutInvalidRef
 	}
-
+	if rec.TotalGB == 0 && gb > 0 {
+		return nil, common.NewError("cannot add traffic to an unlimited client; contact your administrator")
+	}
+	if rec.TotalGB < 0 || (gb > 0 && rec.TotalGB > math.MaxInt64-gb*bytesPerGB) {
+		return nil, common.NewError("client traffic quota exceeds supported range")
+	}
 	db := database.GetDB()
+	if err := checkProcessingClientRenewal(db, rec.Email); err != nil {
+		return nil, err
+	}
+	email = transferEmailKey(rec.Email)
 	var pending int64
 	if err := db.Model(model.PaymentOrder{}).
-		Where("target_ref = ? AND target_type = ? AND status = ?", email, "client_renew", "pending").
+		Where("LOWER(TRIM(target_ref)) = ? AND target_type = ? AND status = ?", email, "client_renew", "pending").
 		Count(&pending).Error; err != nil {
 		return nil, err
 	}
@@ -287,7 +306,7 @@ func (s *CheckoutService) Status(email string, orderId string) (string, error) {
 	if err := database.GetDB().Where("order_id = ?", orderId).First(&order).Error; err != nil {
 		return "unknown", nil
 	}
-	if order.TargetRef != email {
+	if order.TargetType != "client_renew" || transferEmailKey(order.TargetRef) != transferEmailKey(email) {
 		return "unknown", nil
 	}
 	return order.Status, nil

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
 )
 
@@ -30,7 +31,7 @@ func seedCheckoutClient(t *testing.T) string {
 	t.Helper()
 	svc := &ClientService{}
 	clients := []model.Client{
-		{Email: "checkout-user@x", ID: "44444444-4444-4444-4444-444444444444", SubID: "schk", Enable: true},
+		{Email: "checkout-user@x", ID: "44444444-4444-4444-4444-444444444444", SubID: "schk", Enable: true, TotalGB: 1},
 	}
 	ib := mkInbound(t, 20011, model.VLESS, clientsSettings(t, clients))
 	if err := svc.SyncInbound(nil, ib.Id, clients); err != nil {
@@ -182,7 +183,7 @@ func TestCheckoutOrderAndWebhookCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rec.TotalGB != 20*bytesPerGB {
+	if rec.TotalGB != 20*bytesPerGB+1 {
 		t.Fatalf("expected quota 20GB in bytes, got %d", rec.TotalGB)
 	}
 	if !rec.Enable {
@@ -198,7 +199,7 @@ func TestCheckoutOrderAndWebhookCompletion(t *testing.T) {
 		t.Fatalf("expected idempotent completed return, got %+v (%v)", dup, err)
 	}
 	rec2, _ := clientSvc.GetRecordByEmail(nil, email)
-	if rec2.TotalGB != 20*bytesPerGB {
+	if rec2.TotalGB != 20*bytesPerGB+1 {
 		t.Fatalf("expected quota unchanged after duplicate webhook, got %d", rec2.TotalGB)
 	}
 
@@ -249,5 +250,91 @@ func TestCheckoutFreshWebhookStillNeedsTargetRef(t *testing.T) {
 	var webhookSvc PaymentWebhookService
 	if _, err := webhookSvc.ProcessWebhook(PaymentWebhookPayload{OrderId: "ORD-NEVER-SEEN"}); err == nil {
 		t.Fatal("expected unknown order without targetRef to be refused")
+	}
+}
+
+func TestCheckoutDoesNotSellTrafficToUnlimitedClientOrInterruptedRenewal(t *testing.T) {
+	setupBulkDB(t)
+	db := database.GetDB()
+	client := model.ClientRecord{Email: "Unlimited@Example.test", Enable: true, TotalGB: 0}
+	if err := db.Create(&client).Error; err != nil {
+		t.Fatal(err)
+	}
+	enableCheckout(t, 1, 2)
+	svc := &CheckoutService{}
+	if _, err := svc.CreateOrder(client.Email, 1, 0); err == nil {
+		t.Fatal("sold traffic which would turn unlimited into finite")
+	}
+	var n int64
+	if err := db.Model(&model.PaymentOrder{}).Count(&n).Error; err != nil || n != 0 {
+		t.Fatalf("rejected checkout created order: %d %v", n, err)
+	}
+	order := model.PaymentOrder{OrderId: "unlimited-existing", TargetType: "client_renew", TargetRef: client.Email, AddGB: 1, Amount: 1, Status: "pending"}
+	if err := db.Create(&order).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&PaymentWebhookService{}).ProcessWebhook(PaymentWebhookPayload{OrderId: order.OrderId, Amount: 1}); err == nil {
+		t.Fatal("existing order converted unlimited quota")
+	}
+	if err := db.First(&order, order.Id).Error; err != nil || order.Status != "pending" {
+		t.Fatalf("order changed: %+v %v", order, err)
+	}
+	processing := model.PaymentOrder{OrderId: "ambiguous-processing", TargetType: "client_renew", TargetRef: strings.ToLower(client.Email), Status: "processing"}
+	if err := db.Create(&processing).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.CreateOrder(client.Email, 0, 1); err == nil {
+		t.Fatal("sold renewal despite ambiguous prior payment")
+	}
+}
+
+func TestCheckoutPendingCapUsesNormalizedEmail(t *testing.T) {
+	setupBulkDB(t)
+	db := database.GetDB()
+	client := model.ClientRecord{Email: "Case@Example.test", Enable: true, TotalGB: 1}
+	if err := db.Create(&client).Error; err != nil {
+		t.Fatal(err)
+	}
+	enableCheckout(t, 1, 1)
+	svc := &CheckoutService{}
+	for i := 0; i < checkoutMaxPendingOrders; i++ {
+		if _, err := svc.CreateOrder("CASE@example.test", 1, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := svc.CreateOrder("case@example.test", 1, 0); err == nil {
+		t.Fatal("case variants bypassed pending order limit")
+	}
+	var order model.PaymentOrder
+	if err := db.Where("target_type = ?", "client_renew").First(&order).Error; err != nil {
+		t.Fatal(err)
+	}
+	if status, err := svc.Status(" CASE@example.test ", order.OrderId); err != nil || status != "pending" {
+		t.Fatalf("normalized order status: %q %v", status, err)
+	}
+}
+
+func TestConcurrentCheckoutPendingOrderLimit(t *testing.T) {
+	setupBulkDB(t)
+	email := seedCheckoutClient(t)
+	enableCheckout(t, 1, 1)
+	start := make(chan struct{})
+	results := make(chan error, checkoutMaxPendingOrders+5)
+	for i := 0; i < cap(results); i++ {
+		go func() { <-start; _, err := (&CheckoutService{}).CreateOrder(email, 1, 0); results <- err }()
+	}
+	close(start)
+	successes := 0
+	for i := 0; i < cap(results); i++ {
+		if <-results == nil {
+			successes++
+		}
+	}
+	var n int64
+	if err := database.GetDB().Model(&model.PaymentOrder{}).Where("target_type = ? AND status = ?", "client_renew", "pending").Count(&n).Error; err != nil {
+		t.Fatal(err)
+	}
+	if successes != checkoutMaxPendingOrders || n != checkoutMaxPendingOrders {
+		t.Fatalf("pending checkout cap bypassed: successes=%d rows=%d", successes, n)
 	}
 }
