@@ -2,6 +2,7 @@ package service
 
 import (
 	"errors"
+	"math"
 
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
@@ -123,7 +124,11 @@ func (t *renewalQuotaTracker) load(id int) (*renewalQuotaSnapshot, error) {
 	for id, c := range clients {
 		state.used = saturatingAddBytes(state.used, state.currentUsage[id])
 		state.currentQuota[id] = max(c.TotalGB, 0)
-		state.allocated = saturatingAddBytes(state.allocated, max(state.currentQuota[id], state.currentUsage[id]))
+		if state.limit > 0 && c.TotalGB <= 0 {
+			state.allocated = math.MaxInt64
+		} else {
+			state.allocated = saturatingAddBytes(state.allocated, max(state.currentQuota[id], state.currentUsage[id]))
+		}
 	}
 	t.accounts[id] = state
 	return state, nil

@@ -1359,7 +1359,14 @@ func (s *ResellerService) Stat(reseller *model.Reseller) (*ResellerStat, error) 
 				}
 				seenClients[key] = true
 				activeClients[record.Id] = record
-				stat.AllocatedTraffic = saturatingAddBytes(stat.AllocatedTraffic, record.TotalGB)
+				// A zero client limit is unlimited, not a free allocation. Legacy
+				// or administrator-assigned unlimited clients must exhaust a
+				// finite reseller's available allocation until reconciled.
+				if reseller.TrafficLimit > 0 && record.TotalGB <= 0 {
+					stat.AllocatedTraffic = math.MaxInt64
+				} else {
+					stat.AllocatedTraffic = saturatingAddBytes(stat.AllocatedTraffic, record.TotalGB)
+				}
 			}
 		}
 	}

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"math"
 	"testing"
 
@@ -333,5 +334,52 @@ func TestResellerQuotaRejectsDanglingClientMapping(t *testing.T) {
 	}
 	if err := svc.CheckTrafficQuota(&r, 1); err == nil {
 		t.Fatal("allocation accepted with dangling mapping")
+	}
+}
+
+func TestLimitedResellerWithUnlimitedClientCannotAllocateOrRenew(t *testing.T) {
+	setupBulkDB(t)
+	db := database.GetDB()
+	r := model.Reseller{Username: "legacy-unlimited-client", Password: "hash", Enable: true, TrafficLimit: 1000}
+	clients := []model.ClientRecord{{Email: "unlimited@example.test", Enable: true, TotalGB: 0}, {Email: "finite@example.test", Enable: true, TotalGB: 100}}
+	if err := db.Create(&r).Error; err != nil {
+		t.Fatal(err)
+	}
+	for i := range clients {
+		c := &clients[i]
+		if err := db.Create(c).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Create(&model.ResellerClient{ResellerId: r.Id, Email: c.Email}).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Create(&xray.ClientTraffic{Email: c.Email, Up: 10}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	svc := &ResellerService{}
+	stat, err := svc.Stat(&r)
+	if err != nil || !stat.OverQuota || stat.AllocatedTraffic != math.MaxInt64 {
+		t.Fatalf("unlimited client must exhaust finite allocation: %+v %v", stat, err)
+	}
+	if err := svc.CheckClientQuota(&r, 1, 1); err == nil {
+		t.Fatal("new allocation allowed with unlimited client")
+	}
+	err = db.Transaction(func(tx *gorm.DB) error {
+		tracker := renewalQuotaTracker{tx: tx, accounts: map[int]*renewalQuotaSnapshot{}}
+		allowed, err := tracker.reserve(clients[1].Email)
+		if err != nil {
+			return err
+		}
+		if allowed {
+			return errors.New("finite client renewal allowed with unlimited peer")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validatePaidClientRenewal(&clients[1], 100, true); err == nil {
+		t.Fatal("paid renewal allowed with unlimited peer")
 	}
 }
