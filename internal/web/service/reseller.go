@@ -1631,17 +1631,24 @@ func (s *ResellerService) AdjustBalance(resellerId int, amount float64, comment 
 		return nil, fmt.Errorf("balance can not go below zero (current: %s)", FormatNumber(reseller.Deposit))
 	}
 	newBalance := RoundMoney(reseller.Deposit+amount, currencyCode)
+	if math.IsNaN(newBalance) || math.IsInf(newBalance, 0) {
+		return nil, errors.New("balance exceeds supported range")
+	}
 	txType := "deposit"
 	if amount < 0 {
 		txType = "withdraw"
 	}
 	db := database.GetDB()
 	err = db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(model.Reseller{}).Where("id = ?", resellerId).Updates(map[string]any{
+		result := tx.Model(model.Reseller{}).Where("id = ? AND deposit = ?", resellerId, reseller.Deposit).Updates(map[string]any{
 			"deposit":    newBalance,
 			"updated_at": time.Now().UnixMilli(),
-		}).Error; err != nil {
-			return err
+		})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return errors.New("reseller balance changed concurrently; retry adjustment")
 		}
 		return tx.Create(&model.ResellerTransaction{
 			ResellerId: resellerId,
