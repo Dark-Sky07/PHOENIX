@@ -277,3 +277,61 @@ func TestXrayShutdownFlushRetriesPendingWithoutDoubleCounting(t *testing.T) {
 		t.Fatalf("unexpected traffic: %+v %v", traffic, err)
 	}
 }
+
+func TestXrayJournalRejectsUnchangedAmbiguousResellerIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		counters []string
+	}{
+		{name: "missing counter"},
+		{name: "case variant counters", counters: []string{"ambiguous@example.test", "AMBIGUOUS@example.test"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("XUI_DB_FOLDER", dir)
+			if err := database.InitDB(filepath.Join(dir, "x-ui.db")); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = database.CloseDB() })
+			db := database.GetDB()
+			client := model.ClientRecord{Email: "ambiguous@example.test", Enable: true}
+			owner := model.ResellerClient{Email: client.Email, ResellerId: 1}
+			for _, row := range []any{&client, &owner} {
+				if err := db.Create(row).Error; err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, email := range tc.counters {
+				if err := db.Create(&xray.ClientTraffic{Email: email, Enable: true}).Error; err != nil {
+					t.Fatal(err)
+				}
+			}
+			j := NewXrayTrafficJob()
+			batch := &xrayTrafficBatch{id: uuid.NewString(), clients: []*xray.ClientTraffic{{Email: client.Email, Up: 123}}}
+			var err error
+			batch.identities, err = j.inboundService.CaptureXrayTrafficIdentities(batch.clients)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := j.applyJournaledXrayBatch(batch); err == nil {
+				t.Fatal("ambiguous identity was accepted")
+			}
+			if _, err := os.Stat(filepath.Join(xrayJournalDir(), batch.id+".json")); err != nil {
+				t.Fatalf("journal lost: %v", err)
+			}
+			var rows []xray.ClientTraffic
+			if err := db.Find(&rows).Error; err != nil {
+				t.Fatal(err)
+			}
+			for _, row := range rows {
+				if row.Up != 0 {
+					t.Fatalf("ambiguous traffic charged: %+v", row)
+				}
+			}
+			var receipts int64
+			if err := db.Model(&model.XrayTrafficReceipt{}).Count(&receipts).Error; err != nil || receipts != 0 {
+				t.Fatalf("unexpected receipt: %d %v", receipts, err)
+			}
+		})
+	}
+}

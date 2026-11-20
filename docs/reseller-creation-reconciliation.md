@@ -89,3 +89,10 @@ records before retrying; do not assume the persisted quota proves the runtime's
 actual final usage. Renewal also avoids copying stale inbound fields over
 existing canonical client records. This does not fence active connections,
 external nodes, or bytes that have not yet been polled.
+
+A journaled Xray delta for a reseller requires one unambiguous client, traffic
+counter and owner both at capture and application time. Missing or duplicate
+identities stop replay and retain the journal for manual reconciliation even
+when the ambiguous identity did not change. An operator must investigate the
+counter and owner records before resuming collection; this does not recover
+traffic lost before a journal was written.

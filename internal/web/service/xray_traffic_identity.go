@@ -113,6 +113,14 @@ func reconcileXrayTrafficIdentities(tx *gorm.DB, traffic []*xray.ClientTraffic, 
 		if old.Email != current.Email {
 			return nil, fmt.Errorf("Xray traffic identity set changed; manual reconciliation required")
 		}
+		// Unchanged does not mean unambiguous: multiple case variants or a
+		// missing counter would otherwise double-charge or silently discard a
+		// reseller's usage. Keep the journal for manual reconciliation instead.
+		for _, identity := range []XrayTrafficIdentity{old, current} {
+			if len(identity.ResellerIDs) > 0 && (len(identity.ResellerIDs) != 1 || len(identity.ClientIDs) != 1 || len(identity.TrafficIDs) != 1) {
+				return nil, fmt.Errorf("ambiguous Xray reseller traffic identity for %q; manual reconciliation required", identity.Email)
+			}
+		}
 		if equalIDs(current.ClientIDs, old.ClientIDs) && equalIDs(current.TrafficIDs, old.TrafficIDs) && equalIDs(current.ResellerIDs, old.ResellerIDs) {
 			continue
 		}
