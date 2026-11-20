@@ -291,11 +291,6 @@ func (s *ClientService) bulkAdjust(inboundSvc *InboundService, emails []string, 
 	}
 
 	db := database.GetDB()
-	// Preflight the entire batch before touching runtimes or tombstones.
-	if err := rejectClientNodeIncidents(db, cleanEmails); err != nil {
-		return result, false, err
-	}
-
 	var records []model.ClientRecord
 	for _, batch := range chunkStrings(cleanEmails, sqlInChunk) {
 		var rows []model.ClientRecord
@@ -688,6 +683,10 @@ func (s *ClientService) BulkDelete(inboundSvc *InboundService, emails []string, 
 	}
 
 	db := database.GetDB()
+	// Preflight the entire batch before touching runtimes or tombstones.
+	if err := rejectClientNodeIncidents(db, cleanEmails); err != nil {
+		return result, false, err
+	}
 
 	var records []model.ClientRecord
 	for _, batch := range chunkStrings(cleanEmails, sqlInChunk) {
