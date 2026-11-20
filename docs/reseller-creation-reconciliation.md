@@ -268,3 +268,10 @@ its folder. A process that failed to start can conservatively trigger the same
 marker. This does not detect a crash of the panel itself, a core that disappears
 before the panel observes it, planned restarts with traffic after the last poll,
 or concurrent mutations outside the participating locks.
+
+The watchdog now records an observed unexpected managed-core exit on its first
+health check, before waiting for the second check used to trigger restart.
+A failed incident write postpones the restart attempt and is retried. A nil
+process at initial startup and an explicitly stopped process do not invent an
+exit. This still leaves a window between the core stopping and the first
+observation; concurrent external or non-participating writers are not fenced.

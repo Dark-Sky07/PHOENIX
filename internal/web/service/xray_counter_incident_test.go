@@ -144,3 +144,51 @@ func TestUnexpectedXrayExitFailsClosedIfDatabaseUnavailable(t *testing.T) {
 		t.Fatal("fallback missing")
 	}
 }
+
+func TestWatchdogFirstObservedXrayExitRecordsIncident(t *testing.T) {
+	reseller, _ := seedResellerRenewal(t)
+	db := database.GetDB()
+	oldProcess, oldStopped := p, isManuallyStopped.Load()
+	t.Cleanup(func() { p = oldProcess; isManuallyStopped.Store(oldStopped); xrayCoreExitPending.Store(false) })
+	p = xray.NewProcess(nil)
+	isManuallyStopped.Store(false)
+	observed, err := (&XrayService{}).ObserveUnexpectedXrayExit()
+	if err != nil || !observed {
+		t.Fatalf("observation=%v err=%v", observed, err)
+	}
+	var count int64
+	if err := db.Model(&model.ResellerNodeCounterIncident{}).Where("node_id = ? AND direction = ?", 0, "core-exited").Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("incident=%d err=%v", count, err)
+	}
+	if err := (&ResellerService{}).CheckTrafficQuota(&reseller, 1); err == nil {
+		t.Fatal("first observation did not block quota")
+	}
+	// The same stopped core must not create multiple records on later checks.
+	if observed, err := (&XrayService{}).ObserveUnexpectedXrayExit(); err != nil || !observed {
+		t.Fatalf("second observation=%v err=%v", observed, err)
+	}
+	if err := db.Model(&model.ResellerNodeCounterIncident{}).Where("node_id = ? AND direction = ?", 0, "core-exited").Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("duplicate incident=%d err=%v", count, err)
+	}
+}
+
+func TestWatchdogDoesNotInventExitForNilOrManuallyStoppedCore(t *testing.T) {
+	_, _ = seedResellerRenewal(t)
+	db := database.GetDB()
+	oldProcess, oldStopped := p, isManuallyStopped.Load()
+	t.Cleanup(func() { p = oldProcess; isManuallyStopped.Store(oldStopped); xrayCoreExitPending.Store(false) })
+	p = nil
+	isManuallyStopped.Store(false)
+	if observed, err := (&XrayService{}).ObserveUnexpectedXrayExit(); err != nil || !observed {
+		t.Fatalf("startup observation=%v err=%v", observed, err)
+	}
+	p = xray.NewProcess(nil)
+	isManuallyStopped.Store(true)
+	if observed, err := (&XrayService{}).ObserveUnexpectedXrayExit(); err != nil || observed {
+		t.Fatalf("manual stop observation=%v err=%v", observed, err)
+	}
+	var count int64
+	if err := db.Model(&model.ResellerNodeCounterIncident{}).Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("unexpected incident=%d err=%v", count, err)
+	}
+}

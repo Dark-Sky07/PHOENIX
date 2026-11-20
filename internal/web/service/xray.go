@@ -1281,6 +1281,25 @@ func (s *XrayService) IsNeedRestartAndSetFalse() bool {
 	return isNeedXrayRestart.CompareAndSwap(true, false)
 }
 
+// ObserveUnexpectedXrayExit lets the watchdog persist the uncertainty marker
+// on its first observation, rather than waiting for its restart threshold.
+// A nil process means the panel has not yet started a managed core; preserve
+// the watchdog's existing startup behavior without inventing an exit.
+func (s *XrayService) ObserveUnexpectedXrayExit() (bool, error) {
+	lock.Lock()
+	defer lock.Unlock()
+	if isManuallyStopped.Load() || (p != nil && p.IsRunning()) {
+		return false, nil
+	}
+	if p == nil {
+		return true, nil
+	}
+	if err := recordUnexpectedXrayExit(database.GetDB()); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
 // DidXrayCrash checks if Xray crashed by verifying it's not running and wasn't manually stopped.
 func (s *XrayService) DidXrayCrash() bool {
 	return !s.IsXrayRunning() && !isManuallyStopped.Load()

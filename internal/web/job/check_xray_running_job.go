@@ -23,6 +23,15 @@ func (j *CheckXrayRunningJob) Run() {
 	if !j.xrayService.DidXrayCrash() {
 		j.checkTime = 0
 	} else {
+		observed, err := j.xrayService.ObserveUnexpectedXrayExit()
+		if err != nil {
+			logger.Error("Record unexpected Xray exit failed:", err)
+			return
+		}
+		if !observed {
+			j.checkTime = 0
+			return
+		}
 		j.checkTime++
 		// only restart if it's down 2 times in a row
 		if j.checkTime > 1 {
