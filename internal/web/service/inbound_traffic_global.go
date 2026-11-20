@@ -25,21 +25,22 @@ import (
 func (s *InboundService) AcceptGlobalTraffic(masterGuid string, traffics []*xray.ClientTraffic) error {
 	masterGuid = strings.TrimSpace(masterGuid)
 	if masterGuid == "" {
-		return nil
+		return errors.New("global traffic master identity is required")
 	}
 	emails := make([]string, 0, len(traffics))
 	byEmail := make(map[string]*xray.ClientTraffic, len(traffics))
 	for _, t := range traffics {
 		if t == nil || strings.TrimSpace(t.Email) == "" {
-			continue
+			return errors.New("global traffic client identity is required")
 		}
 		if t.Up < 0 || t.Down < 0 {
 			return errors.New("negative global traffic counters")
 		}
 		key := strings.ToLower(strings.TrimSpace(t.Email))
-		if _, dup := byEmail[key]; !dup {
-			emails = append(emails, key)
+		if _, dup := byEmail[key]; dup {
+			return errors.New("duplicate global traffic identity")
 		}
+		emails = append(emails, key)
 		byEmail[key] = t
 	}
 	if len(emails) == 0 {
@@ -60,6 +61,14 @@ func (s *InboundService) AcceptGlobalTraffic(masterGuid string, traffics []*xray
 		}
 		if len(known) == 0 {
 			return nil
+		}
+		seenKnown := make(map[string]bool, len(known))
+		for _, email := range known {
+			key := transferEmailKey(email)
+			if seenKnown[key] {
+				return errors.New("ambiguous local client traffic requires reconciliation")
+			}
+			seenKnown[key] = true
 		}
 
 		now := time.Now().UnixMilli()
@@ -89,6 +98,9 @@ func (s *InboundService) AcceptGlobalTraffic(masterGuid string, traffics []*xray
 					return err
 				}
 				for _, old := range oldRows {
+					if old.Up < 0 || old.Down < 0 {
+						return errors.New("negative stored global traffic requires reconciliation")
+					}
 					previous[old.Email] = old
 				}
 			}

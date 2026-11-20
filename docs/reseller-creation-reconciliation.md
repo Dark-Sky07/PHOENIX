@@ -114,3 +114,10 @@ usage. Reseller quota calculations, renewal and archival now fail closed when
 such records are encountered; client traffic writes also refuse to overwrite a
 negative local counter. Investigate and restore the correct usage from reliable
 records before resuming. These checks do not reconstruct missing traffic.
+
+Global traffic pushes reject missing identities, duplicate normalized emails,
+ambiguous local counter identities and negative stored source counters rather
+than overwriting them with a possibly lower or guessed value. A legitimate
+source must send one nonnegative snapshot per client; the affected records
+need manual reconciliation if the local database is already ambiguous. This
+does not establish ordering or authenticity of external snapshots.
