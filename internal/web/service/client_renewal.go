@@ -1,6 +1,8 @@
 package service
 
 import (
+	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -51,14 +53,18 @@ func nextRenewalExpiry(oldExpiry, now int64, sched renewalSchedule) int64 {
 	case RenewalModeWeekly:
 		return nextWeeklyRenewal(oldExpiry, now, sched.day)
 	default:
-		if sched.rollingDays <= 0 {
+		if sched.rollingDays <= 0 || int64(sched.rollingDays) > math.MaxInt64/msPerDay {
 			return 0
 		}
+		step := int64(sched.rollingDays) * msPerDay
 		newExpiry := oldExpiry
 		// Bounded: rollingDays >= 1 and now-oldExpiry is finite, so this loop
 		// terminates. The explicit cap is a final safety net for corrupt input.
 		for steps := 0; newExpiry < now && steps < 100000; steps++ {
-			newExpiry += int64(sched.rollingDays) * msPerDay
+			if newExpiry > math.MaxInt64-step {
+				return 0
+			}
+			newExpiry += step
 		}
 		if newExpiry < now {
 			return 0
@@ -71,10 +77,13 @@ func nextRenewalExpiry(oldExpiry, now int64, sched renewalSchedule) int64 {
 // (renewal_mode > 0) for the supplied traffic rows, keyed by normalized email.
 // Rows without an opt-in are absent from the map, which keeps the legacy
 // rolling schedule (traffic-row reset) as the default.
-func loadCalendarRenewalSchedules(tx *gorm.DB, traffics []*xray.ClientTraffic) map[string]renewalSchedule {
+func loadCalendarRenewalSchedules(tx *gorm.DB, traffics []*xray.ClientTraffic) (map[string]renewalSchedule, error) {
 	out := make(map[string]renewalSchedule)
-	if tx == nil || len(traffics) == 0 {
-		return out
+	if tx == nil {
+		return nil, fmt.Errorf("renewal schedule lookup requires a transaction")
+	}
+	if len(traffics) == 0 {
+		return out, nil
 	}
 	seen := make(map[string]struct{}, len(traffics))
 	keys := make([]string, 0, len(traffics))
@@ -97,7 +106,7 @@ func loadCalendarRenewalSchedules(tx *gorm.DB, traffics []*xray.ClientTraffic) m
 		var rows []model.ClientRecord
 		if err := tx.Where("LOWER(TRIM(email)) IN ? AND renewal_mode > 0", keys[start:end]).
 			Find(&rows).Error; err != nil {
-			continue
+			return nil, fmt.Errorf("load calendar renewal schedules: %w", err)
 		}
 		for i := range rows {
 			key := strings.ToLower(strings.TrimSpace(rows[i].Email))
@@ -110,7 +119,7 @@ func loadCalendarRenewalSchedules(tx *gorm.DB, traffics []*xray.ClientTraffic) m
 			}
 		}
 	}
-	return out
+	return out, nil
 }
 
 // nextMonthlyRenewal steps whole calendar months from oldExpiry until the

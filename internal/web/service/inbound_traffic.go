@@ -526,7 +526,10 @@ func (s *InboundService) autoRenewClients(tx *gorm.DB) (bool, int64, error) {
 		return false, 0, nil
 	}
 
-	renewalSchedules := loadCalendarRenewalSchedules(tx, traffics)
+	renewalSchedules, err := loadCalendarRenewalSchedules(tx, traffics)
+	if err != nil {
+		return false, 0, err
+	}
 
 	var inbound_ids []int
 	var inbounds []*model.Inbound
