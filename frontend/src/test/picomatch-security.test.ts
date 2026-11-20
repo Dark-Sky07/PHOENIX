@@ -16,7 +16,7 @@ describe('patched picomatch ReDoS regression', () => {
     const script = `
       const picomatch = (await import('picomatch')).default;
       const hostile = 'a'.repeat(28) + '/';
-      for (const pattern of ['+(*)', '+(*a)', '*(*a)', '+(*a*)', '+(*a|b)', '+(@(*))']) {
+      for (const pattern of ['+(*)', '+(*a)', '*(*a)', '+(*a*)', '+(*a|b)', '+(@(*))', '+({a,a})', '+(a|[[:alpha:]])', '@(a|a)+']) {
         picomatch(pattern)(hostile);
       }
     `;

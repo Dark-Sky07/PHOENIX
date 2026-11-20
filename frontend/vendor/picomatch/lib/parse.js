@@ -281,7 +281,7 @@ const getStarExtglobSequenceChars = pattern => {
  * brackets or quotes are literal.
  */
 
-const scanBranchStars = branch => {
+const scanBranchStars = (branch, regex) => {
   let bracket = 0;
   let paren = 0;
   let quote = 0;
@@ -289,10 +289,14 @@ const scanBranchStars = branch => {
   let star = false;
   let leading = false;
   let trailing = false;
+  let quantifier = false;
+  let closed = false;
 
   for (let i = 0; i < branch.length; i++) {
     const ch = branch[i];
+    const afterClose = closed;
     trailing = false;
+    closed = false;
 
     if (escaped === true) {
       escaped = false;
@@ -320,6 +324,7 @@ const scanBranchStars = branch => {
 
     if (ch === ']' && bracket > 0) {
       bracket--;
+      closed = bracket === 0;
       continue;
     }
 
@@ -334,10 +339,20 @@ const scanBranchStars = branch => {
 
     if (ch === ')' && paren > 0) {
       paren--;
+      closed = true;
       continue;
     }
 
     const opens = branch[i + 1] === '(';
+
+    // With `regex: true`, a `*` after `]` or `)` reaches the regex as a
+    // quantifier on that bracket or group. It nests in the repeat like a
+    // wildcard, but it repeats only that atom, so it cannot absorb a copy.
+    if (ch === '*' && !opens && regex && afterClose) {
+      star = true;
+      quantifier = true;
+      continue;
+    }
 
     if (opens && ch === '!') {
       star = true;
@@ -356,7 +371,7 @@ const scanBranchStars = branch => {
     }
   }
 
-  return { star, leading, trailing };
+  return { star, leading, trailing, quantifier };
 };
 
 /**
@@ -454,18 +469,19 @@ const wrappedBody = (branch, ops) => {
 
 const flattenBranches = branches => branches.flatMap(branch => {
   const body = wrappedBody(branch, '@');
-  return body === undefined ? [branch] : flattenBranches(splitTopLevel(body).map(part => part.trim()));
+  return body === undefined ? [branch] : flattenBranches(splitTopLevel(body));
 });
 
 const ANY_CHAR = 'any';
 
 /**
- * The characters a bracket expression matches, or any character when it is
- * negated, holds a class or escape, or spans more than 256 characters.
+ * The characters a bracket expression's body matches, or any character when
+ * it is negated or spans more than 256 characters. Undefined for a reversed
+ * range, which picomatch does not compile to a character class.
  */
 
 const bracketChars = (inner, fold) => {
-  if (/^[!^]/.test(inner) || /[[\\]/.test(inner)) {
+  if (/^[!^]/.test(inner)) {
     return ANY_CHAR;
   }
 
@@ -475,6 +491,7 @@ const bracketChars = (inner, fold) => {
     if (inner[j + 1] === '-' && j + 2 < inner.length) {
       const from = inner.charCodeAt(j);
       const to = inner.charCodeAt(j + 2);
+      if (to < from) return;
       if (to - from > 256) return ANY_CHAR;
       for (let code = from; code <= to; code++) set.add(fold(String.fromCharCode(code)));
       j += 2;
@@ -484,6 +501,55 @@ const bracketChars = (inner, fold) => {
   }
 
   return set;
+};
+
+/**
+ * What the bracket expression starting at `start` can match, and the index of
+ * its `]`. picomatch compiles a body without regex characters, such as
+ * `[ab]`, to the literal text `[ab]` or the class, so both are options.
+ * A POSIX class such as `[[:alpha:]]` matches some one character. A `[`
+ * without a `]` in the branch is literal. Undefined when the bracket is not
+ * modelled: an escape, a `/`, a `]` first, a nested `[`, an unknown POSIX
+ * name, an astral character under the `u` flag, or `nobracket`.
+ */
+
+const bracketOptions = (branch, start, model) => {
+  if (model.nobracket) {
+    return;
+  }
+
+  let inner = '';
+  let posix = false;
+
+  for (let j = start + 1; j < branch.length; j++) {
+    const ch = branch[j];
+
+    if (ch === ']' && inner !== '') {
+      const chars = posix ? ANY_CHAR : bracketChars(inner, model.fold);
+      if (chars === undefined || chars.size === 0) return;
+      if (utils.hasRegexChars(inner) || model.literalBrackets === false) return { end: j, options: [[chars]] };
+      if (posix) return;
+      const literal = [...`[${inner}]`].map(c => new Set([model.fold(c)]));
+      return { end: j, options: [[chars], literal] };
+    }
+
+    if (ch === '[' && branch[j + 1] === ':' && model.posix) {
+      const close = branch.indexOf(':]', j + 2);
+      if (close < 0 || !POSIX_REGEX_SOURCE[branch.slice(j + 2, close)]) return;
+      inner += POSIX_REGEX_SOURCE[branch.slice(j + 2, close)];
+      posix = true;
+      j = close + 1;
+      continue;
+    }
+
+    if (/[[\]\\/]/.test(ch) || (model.unicode && /[\ud800-\udfff]/.test(ch))) {
+      return;
+    }
+
+    inner += ch;
+  }
+
+  return { end: start, options: [[new Set(['['])]] };
 };
 
 const overlaps = (a, b) => a === ANY_CHAR || b === ANY_CHAR || [...a].some(ch => b.has(ch));
@@ -523,62 +589,75 @@ const isAmbiguous = codes => {
   return false;
 };
 
-/** Most texts kept per branch; any subset is enough to prove an ambiguity. */
+/** Most texts modelled per branch; a branch with more is not modelled. */
 const MAX_CODES = 64;
 
 /**
- * Some of the texts a branch can match, as character sets per position,
- * lowercased under `nocase`. A nested `@(x)` contributes each alternative,
- * `?(x)` also nothing, `+(x)` one or two copies and `*(x)` none, one or two:
- * `a*(b)` gives `a`, `ab` and `abb`. When `nested` is false, because
- * maxExtglobRecursion allows nested repeats, `+(x)` and `*(x)` count once.
- * Undefined for a branch with a `*` wildcard, a negation, a brace, a quote or
- * a `/`, which other checks cover.
+ * The texts a branch can match, as character sets per position, case-folded
+ * under `nocase`. A nested `@(x)` or bare `(x)` group contributes each
+ * alternative, `?(x)` also nothing, `+(x)` one or two copies and `*(x)` none,
+ * one or two: `a*(b)` gives `a`, `ab` and `abb`. When `model.nested` is
+ * false, because maxExtglobRecursion allows nested repeats, `+(x)` and `*(x)`
+ * count once. Only characters picomatch is known to compile to themselves
+ * are modelled.
+ * Undefined when the branch is not modelled: a `*` wildcard or a negation
+ * (which scanBranch covers), a brace, a quote, a bare `+` or `@` (`a+` is a
+ * regex quantifier inside an extglob), an escaped letter or digit (`\d`
+ * reaches the regex as a class), a bracket bracketOptions does not model, an
+ * astral character under the `u` flag, any other syntax, or more than
+ * MAX_CODES texts. The caller treats an unmodelled branch as risky, so
+ * nothing the model misses is let through.
  */
 
-const branchCodes = (branch, fold, nested) => {
+const branchCodes = (branch, model) => {
   let codes = [[]];
 
   for (let i = 0; i < branch.length; i++) {
     const ch = branch[i];
-    const end = groupEnd(branch.slice(i), '*?+@');
+    const bare = ch === '(' ? 1 : 0;
+    const end = bare ? groupEnd(`@${branch.slice(i)}`, '@') : groupEnd(branch.slice(i), '*?+@');
     let options;
 
     if (end !== undefined) {
-      const alts = splitTopLevel(branch.slice(i + 2, i + end))
-        .map(part => branchCodes(part.trim(), fold, nested))
-        .filter(Boolean)
-        .flat();
-      const twice = nested ? alts.flatMap(first => alts.map(second => [...first, ...second])) : [];
+      const parts = splitTopLevel(branch.slice(i + 2 - bare, i + end - bare)).map(part => branchCodes(part, model));
+      if (parts.some(part => part === undefined)) return;
+      const alts = parts.flat();
+      // Bound the work before pairing alternatives, not only the result.
+      if (alts.length > MAX_CODES) return;
+      const twice = model.nested ? alts.flatMap(first => alts.map(second => [...first, ...second])) : [];
       options = {
+        '(': alts,
         '@': alts,
         '?': [[], ...alts],
         '+': [...alts, ...twice],
         '*': [[], ...alts, ...twice]
       }[ch];
-      i += end;
-    } else if (ch === '\\' && i + 1 < branch.length) {
-      options = [[new Set([fold(branch[++i])])]];
+      i += end - bare;
+    } else if (ch === '\\') {
+      // `\*` is a literal `*`, but `\d`, `\w` or `\x61` reach the regex as escapes.
+      if (model.unescape || !/^[^a-zA-Z0-9\\]$/.test(branch[i + 1] || '')) return;
+      options = [[new Set([model.fold(branch[++i])])]];
     } else if (ch === '?') {
       options = [[ANY_CHAR]];
+    } else if (ch === '/') {
+      options = [[new Set(['/', '\\'])]];
     } else if (ch === '[') {
-      const close = branch.indexOf(']', i + 2);
-      if (close < 0) return;
-      options = [[bracketChars(branch.slice(i + 1, close), fold)]];
-      i = close;
-    } else if (/[*+@!(){}|"/\]]/.test(ch)) {
-      return;
+      const bracket = bracketOptions(branch, i, model);
+      if (!bracket) return;
+      options = bracket.options;
+      i = bracket.end;
+    } else if (/[a-zA-Z0-9_.,:;=~#%&'<>$^ -]/.test(ch) || (ch > '\x7f' && !(model.unicode && /[\ud800-\udfff]/.test(ch)))) {
+      options = [[new Set([model.fold(ch)])]];
     } else {
-      options = [[new Set([fold(ch)])]];
+      return;
     }
 
-    if (options.length === 0) return;
+    if (options.length === 0 || codes.length * options.length > MAX_CODES) return;
 
-    // Past the cap only the first option is kept, so long branches stay linear.
-    if (options.length === 1 || codes.length >= MAX_CODES) {
+    if (options.length === 1) {
       for (const code of codes) code.push(...options[0]);
     } else {
-      codes = codes.flatMap(code => options.map(option => [...code, ...option])).slice(0, MAX_CODES);
+      codes = codes.flatMap(code => options.map(option => [...code, ...option]));
     }
   }
 
@@ -646,7 +725,7 @@ const starRunOverlaps = (branch, wrapped) => {
  * only on where the copy starts, and its star absorbs every later copy.
  */
 
-const scanBranch = branch => {
+const scanBranch = (branch, regex) => {
   let core = branch;
   let exact = true;
   let body = wrappedBody(core, '@?');
@@ -662,24 +741,138 @@ const scanBranch = branch => {
     return { star: true, leading: false, trailing: true, segment: exact };
   }
 
-  const scan = scanBranchStars(core);
+  const scan = scanBranchStars(core, regex);
   return {
     ...scan,
     star: scan.star || starRunOverlaps(core, core !== branch),
-    segment: exact && isSegmentSequence(core)
+    segment: exact && !scan.quantifier && isSegmentSequence(core)
   };
 };
 
-const buildAbsorbedRepeat = (type, outputs, absorb) => {
-  const starred = outputs.filter((_, i) => absorb.starred[i]).join('|');
-  const rest = outputs.filter((_, i) => !absorb.starred[i]).join('|');
+/**
+ * The regex source of each flattened branch, from the regex source of each
+ * written branch: an `@(...)` branch's group is opened and split the same way
+ * flattenBranches splits its body. Undefined when the two do not line up.
+ */
 
-  if (!rest) {
-    return type === 'plus' ? `(?:${starred})` : `(?:${starred})?`;
+const flattenOutputs = (written, outputs) => {
+  if (written.length !== outputs.length) {
+    return;
   }
 
-  const one = type === 'plus' ? `(?:${starred}|${rest})` : `(?:${starred})?`;
-  return absorb.leading ? `${one}(?:${rest})*` : `(?:${rest})*${one}`;
+  const flat = [];
+
+  for (let i = 0; i < written.length; i++) {
+    const body = wrappedBody(written[i], '@');
+
+    if (body === undefined) {
+      flat.push(outputs[i]);
+      continue;
+    }
+
+    const output = outputs[i];
+    if (groupEnd(`@${output}`, '@') !== output.length) {
+      return;
+    }
+
+    const inner = flattenOutputs(splitTopLevel(body), splitTopLevel(output.slice(output.startsWith('(?:') ? 3 : 1, -1)));
+    if (!inner) {
+      return;
+    }
+
+    flat.push(...inner);
+  }
+
+  return flat;
+};
+
+/**
+ * The regex source with every capturing group made non-capturing, or
+ * undefined when it holds a named group or a backreference, whose meaning
+ * depends on the group numbering.
+ */
+
+const uncapture = source => {
+  let output = '';
+  let bracket = false;
+
+  for (let i = 0; i < source.length; i++) {
+    const ch = source[i];
+
+    if (ch === '\\') {
+      if (/[1-9k]/.test(source[i + 1] || '')) {
+        return;
+      }
+
+      output += ch + (source[i + 1] || '');
+      i++;
+      continue;
+    }
+
+    if (bracket) {
+      bracket = ch !== ']';
+    } else if (ch === '[') {
+      bracket = true;
+    } else if (ch === '(' && source[i + 1] !== '?') {
+      output += '(?:';
+      continue;
+    } else if (ch === '(' && source[i + 2] === '<' && !/[=!]/.test(source[i + 3] || '')) {
+      return;
+    }
+
+    output += ch;
+  }
+
+  return output;
+};
+
+/**
+ * Builds the regex source for an absorbed repeat. `outputs` holds the regex
+ * source of each written branch and `written` the branches themselves. The
+ * copy the repeat matches last is written out with its own groups, in branch
+ * order, so a match captures what the original repeat captures; earlier
+ * copies are matched without capturing. A leading form ends with star-free
+ * copies, so when a branch captures it matches either one copy, with its
+ * groups, or a run that ends in a star-free copy, which then must not
+ * capture.
+ */
+
+const buildAbsorbedRepeat = (type, outputs, written, absorb) => {
+  const flat = flattenOutputs(written, outputs);
+  if (!flat || flat.length !== absorb.starred.length) {
+    return;
+  }
+
+  const last = `(?:${outputs.join('|')})${type === 'plus' ? '' : '?'}`;
+  const starred = flat.filter((_, i) => absorb.starred[i]).join('|');
+  const rest = flat.filter((_, i) => !absorb.starred[i]).join('|');
+
+  if (!rest) {
+    return last;
+  }
+
+  if (absorb.leading) {
+    if (outputs.every(output => uncapture(output) === output)) {
+      const one = type === 'plus' ? `(?:${starred}|${rest})` : `(?:${starred})?`;
+      return `${one}(?:${rest})*`;
+    }
+
+    const first = uncapture(starred);
+    if (first === undefined || uncapture(rest) !== rest) {
+      return;
+    }
+
+    return `(?:(?:${first}|${rest})(?:${rest})*(?:${rest})|${last})`;
+  }
+
+  const repeat = uncapture(rest);
+  if (repeat === undefined) {
+    return;
+  }
+
+  // Without groups to fill, a star's last copy need not be a star-free one.
+  const plain = outputs.every(output => uncapture(output) === output);
+  return `(?:${repeat})*${type === 'star' && plain ? `(?:${starred})?` : last}`;
 };
 
 const repeatedExtglobRecursion = pattern => {
@@ -694,6 +887,64 @@ const repeatedExtglobRecursion = pattern => {
   }
 
   return depth;
+};
+
+/**
+ * True when a brace group followed by `+` could backtrack catastrophically:
+ * its elements, read as a repeat's branches, are risky. A range compiles to
+ * one character class unless `expandRange` is customised. Nested braces,
+ * groups, brackets, quotes, escapes and pipes are not modelled, so risky.
+ */
+
+const braceRisky = (body, brace, options) => {
+  if (/[{}()[\]"\\|]/.test(body)) {
+    return true;
+  }
+
+  if (brace.dots === true) {
+    return brace.comma === true || typeof options.expandRange === 'function';
+  }
+
+  return analyzeRepeatedExtglob(body.split(',').join('|'), options).risky;
+};
+
+/**
+ * True when a `+` right after `prev` would reach the regex as a quantifier on
+ * a glob group that can backtrack catastrophically, so it must stay literal
+ * (as bash reads it). That is a brace group whose elements are risky as a
+ * repeat (`{a,a}+`; `{ab,c}+` stays a Kleene plus), a closed
+ * `!(...)`, `?(...)`, `+(...)` or `*(...)` (`!(a)+`, whose output ends in a
+ * star), and an `@(...)` whose body is risky as a repeat (`@(a|a)+` behaves
+ * like `+(a|a)`). `@(js|ts)+` stays a quantifier. A star or globstar is a
+ * group too once `capture` wraps it (`*+` inside an extglob would reach the
+ * regex as `([^/]*?)+`), so a `+` after one stays literal. With `regex: true`
+ * the same holds for a `*` after a closed glob group: it is read as a glob
+ * star instead of a regex quantifier. A plain regex group such as `(a|a)+` is
+ * regex syntax passed through, so it is left alone.
+ */
+
+const quantifiesGlobGroup = (prev, options) => {
+  if (!prev) {
+    return false;
+  }
+
+  if (prev.type === 'star' || prev.type === 'globstar') {
+    return true;
+  }
+
+  if (prev.type === 'brace') {
+    return prev.risky === true;
+  }
+
+  if (prev.type !== 'paren' || prev.value !== ')') {
+    return false;
+  }
+
+  if (prev.extglob === true) {
+    return true;
+  }
+
+  return prev.at === true && analyzeRepeatedExtglob(prev.body, options).risky;
 };
 
 const analyzeRepeatedExtglob = (body, options) => {
@@ -718,7 +969,8 @@ const analyzeRepeatedExtglob = (body, options) => {
     }
   }
 
-  const branches = flattenBranches(written);
+  // The model reads the branches as written: a space is a character to match.
+  const branches = flattenBranches(splitTopLevel(body));
 
   // A repeated extglob is "risky" (prone to catastrophic backtracking) when a
   // branch is itself a `*(...)` sequence, since that nests an unbounded quantifier
@@ -730,7 +982,9 @@ const analyzeRepeatedExtglob = (body, options) => {
   let sawStarSequence = false;
   let combinable = true;
 
-  for (const branch of branches) {
+  // The character class replaces the branches. With `capture`, it is built
+  // from the written ones, so a branch inside `@(...)` keeps its group.
+  for (const branch of options.capture ? written : branches) {
     const chars = getStarExtglobSequenceChars(branch);
     if (chars) {
       sawStarSequence = true;
@@ -746,7 +1000,7 @@ const analyzeRepeatedExtglob = (body, options) => {
 
     combinable = false;
 
-    if (repeatedExtglobRecursion(branch) > max) {
+    if (flattenBranches([branch]).some(part => repeatedExtglobRecursion(part) > max)) {
       return { risky: true };
     }
   }
@@ -761,17 +1015,34 @@ const analyzeRepeatedExtglob = (body, options) => {
   // nests an unbounded quantifier inside the repeat.
   // Branches that can split the same text into copies in two ways make every
   // copy ambiguous.
-  const fold = options.nocase ? ch => ch.toLowerCase() : ch => ch;
-  const codes = branches.flatMap(branch => {
-    const key = sets => sets.map(set => (set === ANY_CHAR ? '?' : [...set].join(''))).join('|');
-    const own = (branchCodes(branch, fold, max === 0) || []).filter(sets => sets.length > 0);
-    return own.filter((sets, i) => own.findIndex(other => key(other) === key(sets)) === i);
-  });
+  // A branch the model cannot read, and that no star check covers, is risky:
+  // the check fails closed rather than trusting what it did not model.
+  // Case folds through upper case, which joins at least every pair of
+  // characters the `i` flag does (`σ` and `ς`, `ſ` and `s`).
+  const flags = typeof options.flags === 'string' ? options.flags : '';
+  const fold = options.nocase || flags.includes('i') ? ch => ch.toUpperCase().toLowerCase() : ch => ch;
+  const model = {
+    fold,
+    nested: max === 0,
+    unicode: /[uv]/.test(flags),
+    posix: options.posix !== false,
+    literalBrackets: options.literalBrackets,
+    nobracket: options.nobracket === true,
+    unescape: options.unescape === true
+  };
+  const scans = branches.map(branch => scanBranch(branch, options.regex === true));
+  const modelled = branches.map(branch => branchCodes(branch, model));
+  if (modelled.some((own, i) => own === undefined && !scans[i].star)) {
+    return { risky: true };
+  }
+
+  // Two texts of one branch that are the same, as with `(a|a)`, are two ways
+  // to match it, so they are kept.
+  const codes = modelled.flatMap(own => (own || []).filter(sets => sets.length > 0));
   if (codes.length > 1 && isAmbiguous(codes)) {
     return { risky: true };
   }
 
-  const scans = branches.map(scanBranch);
   if (scans.some(scan => scan.star)) {
     const absorb = absorbRepeat(scans);
     return absorb ? { risky: true, absorb } : { risky: true };
@@ -827,7 +1098,7 @@ const parse = (input, options) => {
   } = PLATFORM_CHARS;
 
   const globstar = opts => {
-    return `(${capture}(?:(?!${START_ANCHOR}${opts.dot ? DOTS_SLASH : DOT_LITERAL}).)*?)`;
+    return `(${capture}(?:(?!${START_ANCHOR}${opts.dot ? DOTS_SLASH : DOT_LITERAL})[\\s\\S])*?)`;
   };
 
   const nodot = opts.dot ? '' : NO_DOT;
@@ -866,6 +1137,7 @@ const parse = (input, options) => {
 
   const extglobs = [];
   const braces = [];
+  const groups = [];
   const stack = [];
   let prev = bos;
   let value;
@@ -973,16 +1245,18 @@ const parse = (input, options) => {
   const extglobClose = token => {
     const literal = input.slice(token.startIndex, state.index + 1);
     const body = input.slice(token.startIndex + 2, state.index);
-    const analysis = analyzeRepeatedExtglob(body, opts);
+    const repeats = token.type === 'plus' || token.type === 'star';
+    const analysis = repeats ? analyzeRepeatedExtglob(body, opts) : { risky: false };
 
     if (analysis.absorb) {
-      const open = tokens[token.tokensIndex];
-      const prefix = token.output.length + open.output.length + tokens[token.tokensIndex + 1].output.length;
-      const outputs = splitTopLevel(state.output.slice(prefix));
+      // The tokens, not state.output, hold the current output: a later star
+      // can turn a globstar back into a star without rewriting state.output.
+      const source = tokens
+        .slice(token.tokensIndex + 2)
+        .map(tok => (tok.output != null ? tok.output : tok.value))
+        .join('');
 
-      analysis.safeOutput = outputs.length === analysis.absorb.starred.length
-        ? buildAbsorbedRepeat(token.type, outputs, analysis.absorb)
-        : undefined;
+      analysis.safeOutput = buildAbsorbedRepeat(token.type, splitTopLevel(source), splitTopLevel(body), analysis.absorb);
     }
 
     if ((token.type === 'plus' || token.type === 'star') && analysis.risky) {
@@ -993,7 +1267,7 @@ const parse = (input, options) => {
 
       open.type = 'text';
       open.value = literal;
-      open.output = safeOutput || utils.escapeRegex(literal);
+      open.output = safeOutput || utils.escapeRegex(literal.replace(/\\/g, '\\\\'));
 
       for (let i = token.tokensIndex + 1; i < tokens.length; i++) {
         tokens[i].value = '';
@@ -1004,7 +1278,7 @@ const parse = (input, options) => {
       state.output = token.output + open.output;
       state.backtrack = true;
 
-      push({ type: 'paren', extglob: true, value, output: '' });
+      push({ type: 'paren', extglob: true, kind: token.type, body, value, output: '' });
       decrement('parens');
       return;
     }
@@ -1039,7 +1313,7 @@ const parse = (input, options) => {
       }
     }
 
-    push({ type: 'paren', extglob: true, value, output });
+    push({ type: 'paren', extglob: true, kind: token.type, body, value, output });
     decrement('parens');
   };
 
@@ -1192,8 +1466,12 @@ const parse = (input, options) => {
         value = `\\${value}`;
       }
 
-      if (opts.posix === true && value === '!' && prev.value === '[') {
-        value = '^';
+      if (value === '!' && prev.value === '[' && opts.literalBrackets !== true) {
+        const isLoneNegation = peek() === ']' && !remaining().slice(1).includes(']');
+        if (!isLoneNegation) {
+          // POSIX bracket negation: [!abc] is equivalent to [^abc]
+          value = '^';
+        }
       }
 
       prev.value += value;
@@ -1230,6 +1508,7 @@ const parse = (input, options) => {
      */
 
     if (value === '(') {
+      groups.push({ at: prev && prev.type === 'at', start: state.index });
       increment('parens');
       push({ type: 'paren', value });
       continue;
@@ -1246,7 +1525,10 @@ const parse = (input, options) => {
         continue;
       }
 
-      push({ type: 'paren', value, output: state.parens ? ')' : '\\)' });
+      const group = groups.pop();
+      const at = Boolean(group && group.at);
+      const body = at ? input.slice(group.start + 1, state.index) : undefined;
+      push({ type: 'paren', value, output: state.parens ? ')' : '\\)', at, body });
       decrement('parens');
       continue;
     }
@@ -1330,7 +1612,8 @@ const parse = (input, options) => {
         value,
         output: '(',
         outputIndex: state.output.length,
-        tokensIndex: state.tokens.length
+        tokensIndex: state.tokens.length,
+        start: state.index
       };
 
       braces.push(open);
@@ -1377,7 +1660,9 @@ const parse = (input, options) => {
         }
       }
 
-      push({ type: 'brace', value, output });
+      const group = brace.comma === true || brace.dots === true;
+      const risky = group && braceRisky(input.slice(brace.start + 1, state.index), brace, opts);
+      push({ type: 'brace', value, output, risky });
       decrement('braces');
       braces.pop();
       continue;
@@ -1518,7 +1803,7 @@ const parse = (input, options) => {
         continue;
       }
 
-      if ((prev && prev.value === '(') || opts.regex === false) {
+      if ((prev && prev.value === '(') || opts.regex === false || quantifiesGlobGroup(prev, opts)) {
         push({ type: 'plus', value, output: PLUS_LITERAL });
         continue;
       }
@@ -1707,7 +1992,7 @@ const parse = (input, options) => {
       continue;
     }
 
-    if (prev && (prev.type === 'bracket' || prev.type === 'paren') && opts.regex === true) {
+    if (prev && (prev.type === 'bracket' || prev.type === 'paren') && opts.regex === true && !quantifiesGlobGroup(prev, opts)) {
       token.output = value;
       push(token);
       continue;
@@ -1815,7 +2100,7 @@ parse.fastpaths = (input, options) => {
 
   const globstar = opts => {
     if (opts.noglobstar === true) return star;
-    return `(${capture}(?:(?!${START_ANCHOR}${opts.dot ? DOTS_SLASH : DOT_LITERAL}).)*?)`;
+    return `(${capture}(?:(?!${START_ANCHOR}${opts.dot ? DOTS_SLASH : DOT_LITERAL})[\\s\\S])*?)`;
   };
 
   const create = str => {
@@ -1847,6 +2132,11 @@ parse.fastpaths = (input, options) => {
       default: {
         const match = /^(.*?)\.(\w+)$/.exec(str);
         if (!match) return;
+
+        // A bare `**` here is adjacent to a literal extension in the same path
+        // segment (e.g. `**.js`), so it must act as a single star rather than a
+        // globstar. Bail out of the fast path and let the full parser handle it.
+        if (match[1] === '**') return;
 
         const source = create(match[1]);
         if (!source) return;
