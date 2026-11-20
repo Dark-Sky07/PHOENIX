@@ -200,6 +200,7 @@ describe('smoke: redesigned pages', () => {
     const { default: IndexPage } = await import('@/pages/index/IndexPage');
     const { container } = wrap(<IndexPage />);
     expect(container.querySelector('.dash-hero')).toBeTruthy();
+    expect(container.querySelector('.reseller-traffic-warning')).toBeTruthy();
     expect(container.querySelectorAll('.resource-tile').length).toBe(4);
     expect(container.querySelectorAll('.service-row').length).toBeGreaterThanOrEqual(3);
     expect(screen.getAllByText('Xray').length).toBeGreaterThan(0);

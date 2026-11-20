@@ -140,6 +140,8 @@
     },
     "index": {
       "title": "Overview",
+      "resellerTrafficWarningTitle": "Reseller traffic requires verification before removal",
+      "resellerTrafficWarningDescription": "Reseller client deletion, detachment and quota reduction are blocked. Administrators must verify final usage across runtimes and nodes before making these changes; unpolled traffic can be missing from stored totals.",
       "cpu": "CPU",
       "logicalProcessors": "Logical Processors",
       "frequency": "Frequency",

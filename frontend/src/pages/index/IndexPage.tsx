@@ -1,6 +1,7 @@
 import { lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
+  Alert,
   Button,
   Card,
   ConfigProvider,
@@ -330,6 +331,14 @@ export default function IndexPage() {
                       </Tooltip>
                     </div>
                   </header>
+
+                  <Alert
+                    className="reseller-traffic-warning"
+                    type="warning"
+                    showIcon
+                    message={t('pages.index.resellerTrafficWarningTitle')}
+                    description={t('pages.index.resellerTrafficWarningDescription')}
+                  />
 
                   <section className="dash-resources phoenix-rise phoenix-rise-1" aria-label={t('pages.index.resources', 'Resources')}>
                     <ResourceTile
