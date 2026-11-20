@@ -128,4 +128,6 @@ its configured or traffic quota relative to the canonical record. The database
 transaction is not committed; investigate the node and final traffic before
 reconciling. This preserves known allocations but can pause sync for the entire
 node, and is not proof of final usage: unpolled bytes, direct node changes,
-newly introduced associations and non-participating writers remain risks.
+non-participating writers and malformed or omitted identities remain risks.
+The sync also refuses newly introduced node associations for mapped reseller
+clients, including traffic-only reports, until manually reconciled.
