@@ -42,6 +42,9 @@ func persistPendingNodeCounterIncident(db *gorm.DB, nodeID int) error {
 		return nil
 	}
 	incident := model.ResellerNodeCounterIncident{NodeId: decrease.nodeID, Email: decrease.email, PreviousUp: decrease.previousUp, PreviousDown: decrease.previousDown, ObservedUp: decrease.observedUp, ObservedDown: decrease.observedDown}
+	// Make the local barrier durable before the database write when possible.
+	// If either storage succeeds, retain that independent evidence for review.
+	diskErr := storeCounterIncidentFallback(incident)
 	var storeErr error
 	if db == nil {
 		storeErr = errors.New("database unavailable")
@@ -49,7 +52,7 @@ func persistPendingNodeCounterIncident(db *gorm.DB, nodeID int) error {
 		storeErr = db.Clauses(clause.OnConflict{DoNothing: true}).Create(&incident).Error
 	}
 	if storeErr != nil {
-		if diskErr := storeCounterIncidentFallback(incident); diskErr != nil {
+		if diskErr != nil {
 			return fmt.Errorf("%w; database incident write failed: %v; fallback failed: %v", decrease, storeErr, diskErr)
 		}
 		return fmt.Errorf("%w; database incident write failed: %v; fallback retained for manual review", decrease, storeErr)
@@ -59,6 +62,9 @@ func persistPendingNodeCounterIncident(db *gorm.DB, nodeID int) error {
 		delete(pendingNodeCounterIncidents.byNode, nodeID)
 	}
 	pendingNodeCounterIncidents.Unlock()
+	if diskErr != nil {
+		return fmt.Errorf("%w; fallback failed: %v; database incident retained", decrease, diskErr)
+	}
 	return decrease
 }
 

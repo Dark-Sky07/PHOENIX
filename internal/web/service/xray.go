@@ -1285,9 +1285,9 @@ func (t *xrayTrafficState) persistPendingCounterDecrease(db *gorm.DB) error {
 	if decrease == nil {
 		return nil
 	}
+	diskErr := storeCounterIncidentFallback(localXrayIncidentEvidence(decrease))
 	if err := recordLocalXrayCounterIncident(db, decrease); err != nil {
-		incident := localXrayIncidentEvidence(decrease)
-		if diskErr := storeCounterIncidentFallback(incident); diskErr != nil {
+		if diskErr != nil {
 			return fmt.Errorf("%w; database incident write failed: %v; fallback failed: %v", decrease, err, diskErr)
 		}
 		return fmt.Errorf("%w; database incident write failed: %v; fallback retained for manual review", decrease, err)
@@ -1295,6 +1295,9 @@ func (t *xrayTrafficState) persistPendingCounterDecrease(db *gorm.DB) error {
 	t.pendingCounterDecrease = nil
 	if t == &trafficState {
 		xrayCounterIncidentPending.Store(false)
+	}
+	if diskErr != nil {
+		return fmt.Errorf("%w; fallback failed: %v; database incident retained", decrease, diskErr)
 	}
 	return decrease
 }

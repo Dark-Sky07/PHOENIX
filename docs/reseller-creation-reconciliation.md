@@ -238,3 +238,11 @@ a local Xray record is not evidence. This is a local-filesystem safeguard, not
 cross-host fencing; a crash before file durability, simultaneous DB and disk
 failure, and Windows directory durability remain limitations. Database folder
 permissions and backups must protect the recorded emails and counter values.
+
+For newly detected incidents the panel now attempts the fsynced fallback before
+writing the database marker, rather than waiting for a DB error. Both copies,
+when present, stay blocked until reviewed and manually reconciled. A detected
+incident can therefore stop all participating local/node collection even when
+the DB write succeeds. If fallback storage fails but the DB marker succeeds,
+the DB barrier remains; neither storage can cover a crash before the first
+successful durable write or fence a separate host with an unshared folder.
