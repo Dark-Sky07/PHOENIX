@@ -251,3 +251,8 @@ An isolated-process regression test now checks that a durable fallback written
 by one process remains a barrier in a freshly launched process sharing the same
 database folder, without depending on a database incident. This does not cover
 separate machines with different folders or simulate every filesystem failure.
+
+PostgreSQL CI additionally verifies that a persisted counter incident written
+by one process blocks a second process using a different database folder. This
+only applies after the database incident is committed; it does not fence another
+host during a failed or interrupted write or recover missing traffic.
