@@ -145,3 +145,10 @@ for manual reconciliation. Node sync preserves the canonical reseller client
 record rather than overwriting its credentials or renewal settings, and rolls
 back on link synchronization errors. These checks cannot undo a change already
 applied directly on a node or establish its final traffic.
+
+When a node reports an already-attached reseller client but has no recorded
+per-node baseline, the sync now stops instead of assuming that the node's
+current counters were already counted. An administrator must investigate and
+restore a baseline only from trustworthy records; neither zero nor the current
+node reading is automatically asserted to be correct. New deployments and
+migrations may therefore need reconciliation before their first node sync.

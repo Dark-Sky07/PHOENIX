@@ -67,6 +67,20 @@ func validateNodeResellerSnapshot(tx *gorm.DB, nodeID int, snap *runtime.Traffic
 			localStats[key] = row
 		}
 	}
+	baselines := make(map[string]bool, len(keys))
+	for _, batch := range chunkStrings(keys, sqlInChunk) {
+		var rows []model.NodeClientTraffic
+		if err := tx.Where("node_id = ? AND LOWER(TRIM(email)) IN ?", nodeID, batch).Find(&rows).Error; err != nil {
+			return err
+		}
+		for _, row := range rows {
+			key := nodeEmailKey(row.Email)
+			if baselines[key] || row.Up < 0 || row.Down < 0 {
+				return fmt.Errorf("ambiguous or invalid reseller node baseline for %q; manual reconciliation required", key)
+			}
+			baselines[key] = true
+		}
+	}
 	byInbound := make(map[int]*model.Inbound)
 	stats := make(map[string][]xray.ClientTraffic)
 	for _, remote := range snap.Inbounds {
@@ -154,6 +168,13 @@ func validateNodeResellerSnapshot(tx *gorm.DB, nodeID int, snap *runtime.Traffic
 		local, exists := localStats[key]
 		if !exists {
 			return fmt.Errorf("reseller client %q has no local traffic counter; manual reconciliation required", link.Email)
+		}
+		// An existing accumulator can already include some or all of a
+		// node's current reading. Starting a baseline here would silently
+		// discard any unaccounted difference; adding the full value might
+		// double count. Require evidence-backed manual reconciliation.
+		if len(stats[key]) > 0 && !baselines[key] {
+			return fmt.Errorf("reseller client %q has no node traffic baseline; manual reconciliation required", link.Email)
 		}
 		for _, traffic := range stats[key] {
 			if traffic.Total != link.TotalGB || traffic.ExpiryTime != local.ExpiryTime || traffic.Reset != local.Reset {

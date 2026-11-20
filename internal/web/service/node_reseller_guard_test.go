@@ -31,6 +31,9 @@ func TestNodeSnapshotCannotRemoveOrChangeResellerAllocation(t *testing.T) {
 			if err := db.Where("email = ?", client.Email).First(&existing).Error; err != nil {
 				t.Fatal(err)
 			}
+			if err := db.Create(&model.NodeClientTraffic{NodeId: nodeID, Email: client.Email, Up: existing.Up, Down: existing.Down}).Error; err != nil {
+				t.Fatal(err)
+			}
 			remote := &model.Inbound{Tag: ib.Tag, Protocol: ib.Protocol, Settings: ib.Settings, ClientStats: []xray.ClientTraffic{{Email: client.Email, Total: 500, Up: 120, Down: 180, Enable: true, ExpiryTime: existing.ExpiryTime, Reset: existing.Reset}}}
 			snap := &runtime.TrafficSnapshot{Inbounds: []*model.Inbound{remote}}
 			switch test {
@@ -182,6 +185,9 @@ func TestNodeSyncDoesNotOverwriteCanonicalResellerIdentity(t *testing.T) {
 	if err := db.Where("email = ?", client.Email).First(&local).Error; err != nil {
 		t.Fatal(err)
 	}
+	if err := db.Create(&model.NodeClientTraffic{NodeId: nodeID, Email: client.Email, Up: local.Up, Down: local.Down}).Error; err != nil {
+		t.Fatal(err)
+	}
 	remote := &model.Inbound{Tag: ib.Tag, Protocol: ib.Protocol, Settings: ib.Settings, ClientStats: []xray.ClientTraffic{local}}
 	if _, err := (&InboundService{}).setRemoteTrafficLocked(nodeID, &runtime.TrafficSnapshot{Inbounds: []*model.Inbound{remote}}, false); err != nil {
 		t.Fatal(err)
@@ -214,6 +220,9 @@ func TestNodeSyncLinkFailureRollsBackTrafficAndBaseline(t *testing.T) {
 	if err := db.Where("email = ?", client.Email).First(&local).Error; err != nil {
 		t.Fatal(err)
 	}
+	if err := db.Create(&model.NodeClientTraffic{NodeId: nodeID, Email: client.Email, Up: local.Up, Down: local.Down}).Error; err != nil {
+		t.Fatal(err)
+	}
 	if err := db.Exec("CREATE TRIGGER reject_node_link BEFORE INSERT ON client_inbounds BEGIN SELECT RAISE(ABORT, 'injected sync failure'); END").Error; err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +237,59 @@ func TestNodeSyncLinkFailureRollsBackTrafficAndBaseline(t *testing.T) {
 	if err := db.Model(&model.NodeClientTraffic{}).Where("node_id = ?", nodeID).Count(&baselines).Error; err != nil {
 		t.Fatal(err)
 	}
-	if links != 1 || baselines != 0 {
+	if links != 1 || baselines != 1 {
 		t.Fatalf("partial sync committed: links=%d baselines=%d", links, baselines)
+	}
+}
+
+func TestNodeResellerMissingBaselineDoesNotDiscardFirstInterval(t *testing.T) {
+	_, client := seedResellerRenewal(t)
+	db := database.GetDB()
+	var link model.ClientInbound
+	if err := db.Where("client_id = ?", client.Id).First(&link).Error; err != nil {
+		t.Fatal(err)
+	}
+	const nodeID = 77
+	if err := db.Model(&model.Inbound{}).Where("id = ?", link.InboundId).Update("node_id", nodeID).Error; err != nil {
+		t.Fatal(err)
+	}
+	var ib model.Inbound
+	var local xray.ClientTraffic
+	if err := db.First(&ib, link.InboundId).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Where("email = ?", client.Email).First(&local).Error; err != nil {
+		t.Fatal(err)
+	}
+	remoteTraffic := local
+	remoteTraffic.Up, remoteTraffic.Down = 150, 200
+	snapshot := &runtime.TrafficSnapshot{Inbounds: []*model.Inbound{{Tag: ib.Tag, Protocol: ib.Protocol, Settings: ib.Settings, ClientStats: []xray.ClientTraffic{remoteTraffic}}}}
+	svc := &InboundService{}
+	if _, err := svc.setRemoteTrafficLocked(nodeID, snapshot, false); err == nil {
+		t.Fatal("missing baseline accepted")
+	}
+	var row xray.ClientTraffic
+	if err := db.Where("email = ?", client.Email).First(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.Up != 120 || row.Down != 180 {
+		t.Fatalf("ambiguous interval changed traffic: %+v", row)
+	}
+	var count int64
+	if err := db.Model(&model.NodeClientTraffic{}).Where("node_id = ?", nodeID).Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("ambiguous baseline stored: %d %v", count, err)
+	}
+	// Simulate an administrator restoring a known baseline from evidence.
+	if err := db.Create(&model.NodeClientTraffic{NodeId: nodeID, Email: client.Email, Up: 120, Down: 180}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.setRemoteTrafficLocked(nodeID, snapshot, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Where("email = ?", client.Email).First(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.Up != 150 || row.Down != 200 {
+		t.Fatalf("known interval not accounted: %+v", row)
 	}
 }
