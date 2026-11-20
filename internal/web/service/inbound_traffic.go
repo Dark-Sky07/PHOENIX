@@ -993,7 +993,7 @@ func (s *InboundService) delDepletedClientsLocked(id int) (err error) {
 	// deferred until after Commit: a daemon must never be told that a client was
 	// deleted when the corresponding settings/link transaction later rolls back.
 	now := time.Now().UnixMilli()
-	depletedClause := "reset = 0 AND ((total > 0 AND up + down >= total) OR (expiry_time > 0 AND expiry_time <= ?))"
+	depletedClause := "reset = 0 AND " + depletedClientsCond
 	var depletedRows []xray.ClientTraffic
 	if err = tx.Model(xray.ClientTraffic{}).
 		Where(depletedClause, now).

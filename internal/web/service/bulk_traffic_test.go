@@ -2,6 +2,7 @@ package service
 
 import (
 	"fmt"
+	"math"
 	"testing"
 	"time"
 
@@ -241,6 +242,48 @@ func TestInboundDepletedCleanupPreservesResellerUsage(t *testing.T) {
 			stat, err := (&ResellerService{}).Stat(&reseller)
 			if err != nil || stat.UsedTraffic != 100 || stat.AllocatedTraffic != 100 {
 				t.Fatalf("usage changed after deletion: %+v %v", stat, err)
+			}
+		})
+	}
+}
+
+func TestDepletedCleanupUsesGlobalCountersAndAvoidsOverflow(t *testing.T) {
+	for _, mode := range []string{"client", "inbound"} {
+		t.Run(mode, func(t *testing.T) {
+			setupBulkDB(t)
+			db := database.GetDB()
+			clients := []model.Client{
+				{Email: "global-cleanup@example.test", ID: "11111111-1111-1111-1111-111111111111", SubID: "global-cleanup", Enable: true, TotalGB: 100},
+				{Email: "overflow-cleanup@example.test", ID: "22222222-2222-2222-2222-222222222222", SubID: "overflow-cleanup", Enable: true, TotalGB: math.MaxInt64},
+				{Email: "safe-cleanup@example.test", ID: "33333333-3333-3333-3333-333333333333", SubID: "safe-cleanup", Enable: true, TotalGB: 100},
+			}
+			inbound := mkInbound(t, 21006, model.VLESS, clientsSettings(t, clients))
+			clientSvc := &ClientService{}
+			inboundSvc := &InboundService{}
+			if err := clientSvc.SyncInbound(nil, inbound.Id, clients); err != nil {
+				t.Fatal(err)
+			}
+			mkTraffic(t, inbound.Id, clients[0].Email, 60, 10, 100, 0, true)
+			mkTraffic(t, inbound.Id, clients[1].Email, math.MaxInt64-5, 10, math.MaxInt64, 0, true)
+			mkTraffic(t, inbound.Id, clients[2].Email, 60, 39, 100, 0, true)
+			if err := db.Create(&model.ClientGlobalTraffic{MasterGuid: "master", Email: clients[0].Email, Up: 20, Down: 40}).Error; err != nil {
+				t.Fatal(err)
+			}
+			if mode == "client" {
+				count, _, err := clientSvc.DelDepleted(inboundSvc)
+				if err != nil || count != 2 {
+					t.Fatalf("client cleanup = %d %v", count, err)
+				}
+			} else if err := inboundSvc.DelDepletedClients(inbound.Id); err != nil {
+				t.Fatal(err)
+			}
+			fresh, err := inboundSvc.GetInbound(inbound.Id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			remaining, err := inboundSvc.GetClients(fresh)
+			if err != nil || len(remaining) != 1 || remaining[0].Email != clients[2].Email {
+				t.Fatalf("remaining = %+v %v", remaining, err)
 			}
 		})
 	}
