@@ -60,6 +60,9 @@ func rejectResellerNodeIncidents(tx *gorm.DB, resellerID int, emails []string) e
 	if err := pendingCounterIncidentError(); err != nil {
 		return err
 	}
+	if err := rejectUnexpectedXrayExit(tx); err != nil {
+		return err
+	}
 	if emails != nil && len(emails) == 0 {
 		return nil
 	}
@@ -86,6 +89,9 @@ func rejectClientNodeIncidents(tx *gorm.DB, emails []string) error {
 	if err := pendingCounterIncidentError(); err != nil {
 		return err
 	}
+	if err := rejectUnexpectedXrayExit(tx); err != nil {
+		return err
+	}
 	keys := make([]string, 0, len(emails))
 	for _, email := range emails {
 		if key := transferEmailKey(email); key != "" {
@@ -108,6 +114,9 @@ func rejectClientNodeIncidents(tx *gorm.DB, emails []string) error {
 // three identity sources first, including older settings-only associations.
 func rejectInboundNodeIncidents(tx *gorm.DB, inbound *model.Inbound) error {
 	if err := pendingCounterIncidentError(); err != nil {
+		return err
+	}
+	if err := rejectUnexpectedXrayExit(tx); err != nil {
 		return err
 	}
 	var incidents int64
@@ -149,4 +158,20 @@ func rejectInboundNodeIncidents(tx *gorm.DB, inbound *model.Inbound) error {
 		}
 	}
 	return rejectClientNodeIncidents(tx, emails)
+}
+
+// A core exit has no reliable per-client attribution. Block participating
+// decisions globally until an administrator reconciles the entire epoch.
+func rejectUnexpectedXrayExit(tx *gorm.DB) error {
+	if tx == nil {
+		return fmt.Errorf("database unavailable while checking Xray exit incident")
+	}
+	var count int64
+	if err := tx.Model(&model.ResellerNodeCounterIncident{}).Where("node_id = ? AND direction = ?", 0, "core-exited").Count(&count).Error; err != nil {
+		return err
+	}
+	if count > 0 {
+		return fmt.Errorf("unexpected Xray exit requires manual traffic reconciliation")
+	}
+	return nil
 }

@@ -6,7 +6,7 @@ package model
 type ResellerNodeCounterIncident struct {
 	Id           int    `gorm:"primaryKey;autoIncrement"`
 	NodeId       int    `gorm:"uniqueIndex:idx_reseller_node_counter_incident,priority:1;not null"`
-	Direction    string // Empty for node snapshots; local Xray records one direction.
+	Direction    string // Empty for node snapshots, uplink/downlink for local resets, core-exited for unknown traffic.
 	Email        string `gorm:"uniqueIndex:idx_reseller_node_counter_incident,priority:2;not null"`
 	PreviousUp   int64
 	PreviousDown int64

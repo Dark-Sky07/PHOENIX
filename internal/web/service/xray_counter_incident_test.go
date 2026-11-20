@@ -93,3 +93,54 @@ func TestPendingLocalXrayIncidentBlocksParticipatingMutations(t *testing.T) {
 		t.Fatal("inbound removal bypassed pending in-memory incident")
 	}
 }
+
+func TestUnexpectedXrayExitBlocksAllResellersWithoutGuessingUsage(t *testing.T) {
+	reseller, client := seedResellerRenewal(t)
+	db := database.GetDB()
+	t.Cleanup(func() { xrayCoreExitPending.Store(false) })
+	if err := recordUnexpectedXrayExit(db); err != nil {
+		t.Fatal(err)
+	}
+	var incident model.ResellerNodeCounterIncident
+	if err := db.Where("node_id = ? AND direction = ?", 0, "core-exited").First(&incident).Error; err != nil {
+		t.Fatal(err)
+	}
+	if incident.Email != "" || incident.PreviousUp != 0 || incident.PreviousDown != 0 || incident.ObservedUp != 0 || incident.ObservedDown != 0 {
+		t.Fatalf("exit invented client traffic: %+v", incident)
+	}
+	if err := (&ResellerService{}).CheckTrafficQuota(&reseller, 1); err == nil {
+		t.Fatal("quota accepted after unverified core exit")
+	}
+	if _, err := (&ClientService{}).Delete(&InboundService{}, client.Id, false); err == nil {
+		t.Fatal("client removed after unverified core exit")
+	}
+	var link model.ClientInbound
+	if err := db.Where("client_id = ?", client.Id).First(&link).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&InboundService{}).DelInbound(link.InboundId); err == nil {
+		t.Fatal("inbound removed after unverified core exit")
+	}
+	if err := checkLocalXrayCounterIncidents(db); err == nil {
+		t.Fatal("collector resumed before reconciliation")
+	}
+	// A second host without the fallback folder must still see the DB marker.
+	t.Setenv("XUI_DB_FOLDER", t.TempDir())
+	if err := rejectUnexpectedXrayExit(db); err == nil {
+		t.Fatal("DB-only exit marker did not block another host")
+	}
+}
+
+func TestUnexpectedXrayExitFailsClosedIfDatabaseUnavailable(t *testing.T) {
+	_, _ = seedResellerRenewal(t)
+	t.Cleanup(func() { xrayCoreExitPending.Store(false) })
+	if err := recordUnexpectedXrayExit(nil); err == nil {
+		t.Fatal("unrecorded exit allowed restart")
+	}
+	if !xrayCoreExitPending.Load() {
+		t.Fatal("failed DB write did not keep local barrier")
+	}
+	if err := diskCounterIncidentError(); err == nil {
+		t.Fatal("fallback missing")
+	}
+}

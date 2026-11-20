@@ -31,6 +31,7 @@ var (
 	isNeedXrayRestart          atomic.Bool // Indicates that restart was requested for Xray
 	isManuallyStopped          atomic.Bool // Indicates that Xray was stopped manually from the panel
 	xrayCounterIncidentPending atomic.Bool // Local in-memory barrier until persistence succeeds.
+	xrayCoreExitPending        atomic.Bool // An unexpected core exit is not yet durable in the database.
 	result                     string
 	// One baseline per panel process, shared by every XrayService instance.
 	// The state is protected by lock, which also protects process changes.
@@ -1100,6 +1101,14 @@ func (s *XrayService) RestartXray(isForce bool) error {
 	// Evaluate the relay crash-loop guard before the config is regenerated so
 	// a suspension decided here already shapes this very config.
 	crashed := p != nil && !p.IsRunning() && !isManuallyStopped.Load()
+	if crashed {
+		// The dead core can no longer provide its final counters. Keep a
+		// durable uncertainty marker rather than assuming its last poll was
+		// complete. No traffic quantity is inferred from the exit.
+		if err := recordUnexpectedXrayExit(database.GetDB()); err != nil {
+			return err
+		}
+	}
 	noteDaemonRelayCrash(isForce, crashed)
 	isManuallyStopped.Store(false)
 
@@ -1344,6 +1353,27 @@ func checkLocalXrayCounterIncidents(db *gorm.DB) error {
 	}
 	if count > 0 {
 		return errors.New("local Xray counter incident requires manual reconciliation")
+	}
+	return nil
+}
+
+// An unexpected managed-core exit may have lost traffic since the last poll.
+// The marker is global because the affected users and missing bytes are not
+// knowable from the process exit. NodeId 0 denotes local Xray, empty Email is
+// deliberately not a client identity, and Direction identifies this incident.
+func recordUnexpectedXrayExit(db *gorm.DB) error {
+	xrayCoreExitPending.Store(true)
+	incident := model.ResellerNodeCounterIncident{NodeId: 0, Email: "", Direction: "core-exited"}
+	diskErr := storeCounterIncidentFallback(incident)
+	if db == nil {
+		return errors.New("cannot persist unexpected Xray exit: database unavailable")
+	}
+	if err := db.Clauses(clause.OnConflict{DoNothing: true}).Create(&incident).Error; err != nil {
+		return fmt.Errorf("cannot persist unexpected Xray exit: %w; fallback error: %v", err, diskErr)
+	}
+	xrayCoreExitPending.Store(false)
+	if diskErr != nil {
+		logger.Warning("unexpected Xray exit: local fallback failed; database incident retained:", diskErr)
 	}
 	return nil
 }

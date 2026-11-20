@@ -256,3 +256,15 @@ PostgreSQL CI additionally verifies that a persisted counter incident written
 by one process blocks a second process using a different database folder. This
 only applies after the database incident is committed; it does not fence another
 host during a failed or interrupted write or recover missing traffic.
+
+Before restarting a managed Xray process observed unexpectedly stopped, the
+panel records a global `core-exited` incident (node ID zero, empty email). This
+is an uncertainty marker, not a traffic measurement; no affected clients or
+missing byte count are inferred. The marker and fallback block participating
+quota/removal checks and local traffic collection until an administrator has
+investigated the whole affected runtime epoch. A failed DB write prevents that
+restart attempt and leaves a local barrier for retry; the fallback is local to
+its folder. A process that failed to start can conservatively trigger the same
+marker. This does not detect a crash of the panel itself, a core that disappears
+before the panel observes it, planned restarts with traffic after the last poll,
+or concurrent mutations outside the participating locks.
