@@ -251,20 +251,20 @@ func (j *NodeTrafficSyncJob) syncOne(mgr *runtime.Manager, n *model.Node, doIpSy
 		j.structural.set()
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), nodeTrafficSyncRequestTimeout)
-	defer cancel()
-
-	snap, err := rt.FetchTrafficSnapshot(ctx)
+	changed, err := withNodeTrafficAllocationLock(func() (bool, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), nodeTrafficSyncRequestTimeout)
+		defer cancel()
+		snap, err := rt.FetchTrafficSnapshot(ctx)
+		if err != nil {
+			j.inboundService.ClearNodeOnlineClients(n.Id)
+			return false, err
+		}
+		service.FilterNodeSnapshot(n, snap)
+		_, _, dirty, _, _ := j.nodeService.NodeSyncState(n.Id)
+		return j.inboundService.SetRemoteTraffic(n.Id, snap, dirty)
+	})
 	if err != nil {
-		logger.Warning("node traffic sync: fetch from", n.Name, "failed:", err)
-		j.inboundService.ClearNodeOnlineClients(n.Id)
-		return
-	}
-	service.FilterNodeSnapshot(n, snap)
-	_, _, dirty, _, _ := j.nodeService.NodeSyncState(n.Id)
-	changed, err := j.inboundService.SetRemoteTraffic(n.Id, snap, dirty)
-	if err != nil {
-		logger.Warning("node traffic sync: merge for", n.Name, "failed:", err)
+		logger.Warning("node traffic sync: fetch or merge for", n.Name, "failed:", err)
 		return
 	}
 	if changed {
@@ -275,6 +275,8 @@ func (j *NodeTrafficSyncJob) syncOne(mgr *runtime.Manager, n *model.Node, doIpSy
 		return
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), nodeTrafficSyncRequestTimeout)
+	defer cancel()
 	nodeIps, err := rt.FetchAllClientIps(ctx)
 	if err == nil && len(nodeIps) > 0 {
 		if err := j.inboundService.MergeInboundClientIps(nodeIps); err != nil {
@@ -294,4 +296,16 @@ func (j *NodeTrafficSyncJob) syncOne(mgr *runtime.Manager, n *model.Node, doIpSy
 			logger.Warning("node traffic sync: push client ips to", n.Name, "failed:", err)
 		}
 	}
+}
+
+// Serialize snapshot capture and persistence with participating reseller
+// ownership and quota mutations. A failed poll still needs reconciliation; the
+// lock cannot fence the remote node or recover unreported traffic.
+func withNodeTrafficAllocationLock(sync func() (bool, error)) (bool, error) {
+	unlock, err := service.LockResellerAllocation()
+	if err != nil {
+		return false, err
+	}
+	defer unlock()
+	return sync()
 }

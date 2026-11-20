@@ -158,3 +158,10 @@ client also blocks reseller quota decisions and renewal reservations, including
 unlimited-reseller allocation, rather than displaying the known counters as a
 complete account. Restoring a baseline permits these checks again; this is not
 a health check and does not guarantee that a node's latest traffic arrived.
+
+Node traffic collection now holds the participating allocation lock from before
+requesting a snapshot through its database merge, so a participating ownership
+or allocation mutation cannot race a successful in-flight snapshot. This
+serializes node snapshot requests and can delay allocation while a node is slow.
+It does not fence the remote node, make a failed poll durable, cover external
+writers or guarantee final traffic. A failed snapshot can still require review.
