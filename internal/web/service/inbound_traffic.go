@@ -584,8 +584,23 @@ func (s *InboundService) autoRenewClients(tx *gorm.DB) (bool, int64, error) {
 	quotaTracker := renewalQuotaTracker{tx: tx, accounts: make(map[int]*renewalQuotaSnapshot)}
 	for inbound_index := range inbounds {
 		settings := map[string]any{}
-		if err := json.Unmarshal([]byte(inbounds[inbound_index].Settings), &settings); err != nil {
+		rawSettings := []byte(inbounds[inbound_index].Settings)
+		if !json.Valid(rawSettings) {
+			return false, 0, fmt.Errorf("parse renewal inbound %d: invalid JSON", inbounds[inbound_index].Id)
+		}
+		decoder := json.NewDecoder(strings.NewReader(string(rawSettings)))
+		decoder.UseNumber() // preserve integer byte quotas above 2^53
+		if err := decoder.Decode(&settings); err != nil {
 			return false, 0, fmt.Errorf("parse renewal inbound %d: %w", inbounds[inbound_index].Id, err)
+		}
+		// Decode only the client array as typed records. GetClients historically
+		// ignores decoding errors and can return partial records, which must not
+		// be synced into quota and identity data.
+		var typedSettings struct {
+			Clients []model.Client `json:"clients"`
+		}
+		if err := json.Unmarshal(rawSettings, &typedSettings); err != nil {
+			return false, 0, fmt.Errorf("parse renewal inbound %d clients: %w", inbounds[inbound_index].Id, err)
 		}
 		clients, ok := settings["clients"].([]any)
 		if !ok {
@@ -602,6 +617,22 @@ func (s *InboundService) autoRenewClients(tx *gorm.DB) (bool, int64, error) {
 			}
 			for traffic_index, traffic := range traffics {
 				if transferEmailKey(traffic.Email) == transferEmailKey(email) {
+					// Reseller reservation uses canonical quota. Never renew a
+					// divergent inbound that could enforce a larger runtime limit.
+					var owners int64
+					key := transferEmailKey(email)
+					if err := tx.Model(&model.ResellerClient{}).Where("LOWER(TRIM(email)) = ?", key).Count(&owners).Error; err != nil {
+						return false, 0, err
+					}
+					if owners > 0 {
+						var canonical []model.ClientRecord
+						if err := tx.Where("LOWER(TRIM(email)) = ?", key).Find(&canonical).Error; err != nil {
+							return false, 0, err
+						}
+						if len(canonical) != 1 || canonical[0].TotalGB != typedSettings.Clients[client_index].TotalGB {
+							return false, 0, fmt.Errorf("reseller renewal quota mismatch for %q; manual reconciliation required", email)
+						}
+					}
 					sched := renewalSchedule{mode: RenewalModeRolling, rollingDays: traffic.Reset}
 					if rs, ok := renewalSchedules[transferEmailKey(traffic.Email)]; ok {
 						sched.mode, sched.day = rs.mode, rs.day
@@ -614,7 +645,6 @@ func (s *InboundService) autoRenewClients(tx *gorm.DB) (bool, int64, error) {
 						// past expiry.
 						break
 					}
-					key := transferEmailKey(traffic.Email)
 					if _, denied := deniedEmails[key]; denied {
 						break
 					}
@@ -671,12 +701,29 @@ func (s *InboundService) autoRenewClients(tx *gorm.DB) (bool, int64, error) {
 		if ib == nil {
 			continue
 		}
-		cs, gcErr := s.GetClients(ib)
-		if gcErr != nil {
-			return false, 0, fmt.Errorf("read renewal inbound %d clients: %w", ib.Id, gcErr)
+		var parsed struct {
+			Clients []model.Client `json:"clients"`
 		}
-		if syncErr := s.clientService.SyncInbound(tx, ib.Id, cs); syncErr != nil {
+		if err := json.Unmarshal([]byte(ib.Settings), &parsed); err != nil {
+			return false, 0, fmt.Errorf("read renewal inbound %d clients: %w", ib.Id, err)
+		}
+		// Rebuild links without copying stale inbound quotas or credentials over
+		// canonical clients after the reseller quota reservation was calculated.
+		if syncErr := s.clientService.SyncInboundPreservingExisting(tx, ib.Id, parsed.Clients); syncErr != nil {
 			return false, 0, fmt.Errorf("sync renewal inbound %d clients: %w", ib.Id, syncErr)
+		}
+	}
+	for _, traffic := range traffics {
+		if _, renewed := renewedEmails[transferEmailKey(traffic.Email)]; !renewed {
+			continue
+		}
+		result := tx.Model(&model.ClientRecord{}).Where("LOWER(TRIM(email)) = ?", transferEmailKey(traffic.Email)).
+			Updates(map[string]any{"expiry_time": traffic.ExpiryTime, "enable": traffic.Enable})
+		if result.Error != nil {
+			return false, 0, result.Error
+		}
+		if result.RowsAffected != 1 {
+			return false, 0, fmt.Errorf("renewal client %q is missing or ambiguous", traffic.Email)
 		}
 	}
 	err = tx.Save(traffics).Error

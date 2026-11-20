@@ -81,3 +81,11 @@ flush first and refuse the action if that attempt fails. Other restart paths,
 including automatic recovery, updates and externally managed runtimes, are not
 covered. A successful flush is still not proof of quiescence: connections may
 transfer bytes until the core stops.
+
+Automatic renewal refuses a reseller client when an attached inbound's
+configured traffic quota differs from the canonical client quota, or its client
+data cannot be decoded. Inspect and reconcile the affected inbound and client
+records before retrying; do not assume the persisted quota proves the runtime's
+actual final usage. Renewal also avoids copying stale inbound fields over
+existing canonical client records. This does not fence active connections,
+external nodes, or bytes that have not yet been polled.

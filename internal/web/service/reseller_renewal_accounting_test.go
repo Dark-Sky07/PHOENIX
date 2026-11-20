@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -210,5 +211,80 @@ func TestAutoRenewalReenablesEveryInboundForSharedClient(t *testing.T) {
 	}
 	if !row.Enable || row.Up != 0 || row.Down != 0 {
 		t.Fatalf("traffic not renewed: %+v", row)
+	}
+}
+
+func TestRenewalRejectsStaleResellerInboundQuota(t *testing.T) {
+	_, client := seedResellerRenewal(t)
+	db := database.GetDB()
+	var link model.ClientInbound
+	if err := db.Where("client_id = ?", client.Id).First(&link).Error; err != nil {
+		t.Fatal(err)
+	}
+	settings := `{"clients":[{"email":"renew@example.test","id":"renew-id","totalGB":9007199254740993,"enable":true,"reset":1}]}`
+	if err := db.Model(&model.Inbound{}).Where("id = ?", link.InboundId).Update("settings", settings).Error; err != nil {
+		t.Fatal(err)
+	}
+	err := db.Transaction(func(tx *gorm.DB) error { _, _, err := (&InboundService{}).autoRenewClients(tx); return err })
+	if err == nil {
+		t.Fatal("mismatched runtime quota must block renewal")
+	}
+	var updated model.ClientRecord
+	if err := db.First(&updated, client.Id).Error; err != nil {
+		t.Fatal(err)
+	}
+	var row xray.ClientTraffic
+	if err := db.Where("email = ?", client.Email).First(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	if updated.TotalGB != 500 || row.Up != 120 || row.Down != 180 {
+		t.Fatalf("partial renewal: client=%+v traffic=%+v", updated, row)
+	}
+}
+
+func TestRenewalPreservesLargeNumbersInSettings(t *testing.T) {
+	_, client := seedResellerRenewal(t)
+	db := database.GetDB()
+	var link model.ClientInbound
+	if err := db.Where("client_id = ?", client.Id).First(&link).Error; err != nil {
+		t.Fatal(err)
+	}
+	settings := `{"marker":9007199254740993,"clients":[{"email":"renew@example.test","id":"renew-id","totalGB":500,"enable":true,"reset":1}]}`
+	if err := db.Model(&model.Inbound{}).Where("id = ?", link.InboundId).Update("settings", settings).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transaction(func(tx *gorm.DB) error { _, _, err := (&InboundService{}).autoRenewClients(tx); return err }); err != nil {
+		t.Fatal(err)
+	}
+	var inbound model.Inbound
+	if err := db.First(&inbound, link.InboundId).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(inbound.Settings, `9007199254740993`) {
+		t.Fatalf("large integer rounded: %s", inbound.Settings)
+	}
+}
+
+func TestRenewalRejectsMalformedTypedClientWithoutReset(t *testing.T) {
+	_, client := seedResellerRenewal(t)
+	db := database.GetDB()
+	var link model.ClientInbound
+	if err := db.Where("client_id = ?", client.Id).First(&link).Error; err != nil {
+		t.Fatal(err)
+	}
+	settings := `{"clients":[{"email":"renew@example.test","totalGB":"invalid"}]}`
+	if err := db.Model(&model.Inbound{}).Where("id = ?", link.InboundId).Update("settings", settings).Error; err != nil {
+		t.Fatal(err)
+	}
+	err := db.Transaction(func(tx *gorm.DB) error { _, _, err := (&InboundService{}).autoRenewClients(tx); return err })
+	if err == nil {
+		t.Fatal("expected invalid typed client error")
+	}
+	var row xray.ClientTraffic
+	if err := db.Where("email = ?", client.Email).First(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.Up != 120 || row.Down != 180 {
+		t.Fatalf("traffic reset: %+v", row)
 	}
 }
