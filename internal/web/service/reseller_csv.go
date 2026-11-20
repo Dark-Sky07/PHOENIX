@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	moneycurrency "github.com/Dark-Sky07/phoenix/internal/util/currency"
 )
@@ -13,9 +14,24 @@ import (
 // readable when the file is opened by double click.
 var csvBOM = []byte{0xEF, 0xBB, 0xBF}
 
-// csvEscape quotes a field following RFC 4180 (comma, quote, CR or LF force
-// quoting; embedded quotes are doubled).
+// csvEscape neutralizes spreadsheet formulas in untrusted text before RFC
+// 4180 quoting. CSV quotes alone do not prevent Excel or other spreadsheet
+// applications from interpreting a cell as a formula. The apostrophe is an
+// intentional text prefix and becomes part of the CSV value for other tools.
 func csvEscape(field string) string {
+	for _, r := range field {
+		if r == '\t' || r == '\r' || r == '\n' || unicode.IsControl(r) || r == '\uFEFF' {
+			field = "'" + field
+			break
+		}
+		if unicode.IsSpace(r) {
+			continue
+		}
+		if strings.ContainsRune("=+-@", r) {
+			field = "'" + field
+		}
+		break
+	}
 	if strings.ContainsAny(field, ",\"\r\n") {
 		return `"` + strings.ReplaceAll(field, `"`, `""`) + `"`
 	}
