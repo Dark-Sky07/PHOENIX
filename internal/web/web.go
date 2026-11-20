@@ -286,6 +286,11 @@ func (s *Server) initRouter() (*gin.Engine, error) {
 	return engine, nil
 }
 
+func scheduleXrayTrafficJob(c *cron.Cron) error {
+	_, err := c.AddJob("@every 5s", job.SharedXrayTrafficJob())
+	return err
+}
+
 // startTask schedules background jobs (Xray checks, traffic jobs, cron
 // jobs) which the panel relies on for periodic maintenance and monitoring.
 func (s *Server) startTask(restartXray bool) {
@@ -313,10 +318,12 @@ func (s *Server) startTask(restartXray bool) {
 		}
 	})
 
-	go func() {
-		time.Sleep(time.Second * 5)
-		s.cron.AddJob("@every 5s", job.SharedXrayTrafficJob())
-	}()
+	// Register synchronously: @every 5s already delays the first tick, and
+	// a detached registration goroutine can attach to a replacement cron
+	// after a rapid panel restart.
+	if err := scheduleXrayTrafficJob(s.cron); err != nil {
+		logger.Warning("schedule Xray traffic collection failed:", err)
+	}
 
 	// Reconcile mtproto (mtg) sidecars and scrape their traffic
 	mtJob := job.NewMtprotoJob()

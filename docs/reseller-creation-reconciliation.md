@@ -75,3 +75,9 @@ attempts one final poll before stopping the core. Failures are logged and
 returned by the stop operation; a pending batch remains available for an
 in-process retry. Traffic can continue between the last poll and core shutdown,
 and a crash can bypass this step, so it is not proof of final usage.
+
+The dashboard's explicit Xray stop and restart controls now attempt the same
+flush first and refuse the action if that attempt fails. Other restart paths,
+including automatic recovery, updates and externally managed runtimes, are not
+covered. A successful flush is still not proof of quiescence: connections may
+transfer bytes until the core stops.

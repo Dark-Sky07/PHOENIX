@@ -238,9 +238,19 @@ func (a *ServerController) updateGeofile(c *gin.Context) {
 	jsonMsg(c, I18nWeb(c, "pages.index.geofileUpdatePopover"), err)
 }
 
+// flushBeforeXrayAction refuses a dashboard stop/restart if its final
+// best-effort poll cannot be persisted. It does not fence runtime traffic
+// arriving after the poll or other service-level restart paths.
+func flushBeforeXrayAction(flush, action func() error) error {
+	if err := flush(); err != nil {
+		return fmt.Errorf("Xray traffic could not be flushed before this action: %w", err)
+	}
+	return action()
+}
+
 // stopXrayService stops the Xray service.
 func (a *ServerController) stopXrayService(c *gin.Context) {
-	err := a.serverService.StopXrayService()
+	err := flushBeforeXrayAction(job.SharedXrayTrafficJob().FlushBeforeStop, a.serverService.StopXrayService)
 	if err != nil {
 		jsonMsg(c, I18nWeb(c, "pages.xray.stopError"), err)
 		websocket.BroadcastXrayState("error", err.Error())
@@ -257,7 +267,7 @@ func (a *ServerController) stopXrayService(c *gin.Context) {
 
 // restartXrayService restarts the Xray service.
 func (a *ServerController) restartXrayService(c *gin.Context) {
-	err := a.serverService.RestartXrayService()
+	err := flushBeforeXrayAction(job.SharedXrayTrafficJob().FlushBeforeStop, a.serverService.RestartXrayService)
 	if err != nil {
 		jsonMsg(c, I18nWeb(c, "pages.xray.restartError"), err)
 		websocket.BroadcastXrayState("error", err.Error())
