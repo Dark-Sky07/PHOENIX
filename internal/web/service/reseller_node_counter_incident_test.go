@@ -1,6 +1,7 @@
 package service
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/Dark-Sky07/phoenix/internal/database"
@@ -125,5 +126,80 @@ func TestResellerIncidentPreventsUnassignmentAndDeletion(t *testing.T) {
 	}
 	if err := svc.UnassignClient(reseller.Id, client.Email); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestNodeIncidentBlocksClientRemovalBeforeMutation(t *testing.T) {
+	for _, operation := range []string{"single", "email", "scoped", "bulk", "scoped bulk", "detach", "depleted"} {
+		t.Run(operation, func(t *testing.T) {
+			reseller, client := seedResellerRenewal(t)
+			db := database.GetDB()
+			var link model.ClientInbound
+			if err := db.Where("client_id = ?", client.Id).First(&link).Error; err != nil {
+				t.Fatal(err)
+			}
+			incident := model.ResellerNodeCounterIncident{NodeId: 77, Email: client.Email, PreviousUp: 120, ObservedUp: 1}
+			if err := db.Create(&incident).Error; err != nil {
+				t.Fatal(err)
+			}
+			clients := &ClientService{}
+			inbound := &InboundService{}
+			switch operation {
+			case "single":
+				if _, err := clients.Delete(inbound, client.Id, false); err == nil {
+					t.Fatal("deletion allowed")
+				}
+			case "email":
+				if _, err := clients.DeleteByEmail(inbound, client.Email, false); err == nil {
+					t.Fatal("email deletion allowed")
+				}
+			case "scoped":
+				if _, err := clients.DeleteByEmailForInbounds(inbound, client.Email, false, []int{link.InboundId}); err == nil {
+					t.Fatal("scoped deletion allowed")
+				}
+			case "bulk":
+				if _, _, err := clients.BulkDelete(inbound, []string{client.Email}, false); err == nil {
+					t.Fatal("bulk deletion allowed")
+				}
+			case "scoped bulk":
+				res, _, err := clients.BulkDeleteForInbounds(inbound, []string{client.Email}, false, []int{link.InboundId})
+				if err != nil || res.Deleted != 0 || len(res.Skipped) != 1 {
+					t.Fatalf("scoped bulk = %+v err=%v", res, err)
+				}
+			case "detach":
+				if _, err := clients.Detach(inbound, client.Id, []int{link.InboundId}); err == nil {
+					t.Fatal("detach allowed")
+				}
+			case "depleted":
+				if err := db.Model(&xray.ClientTraffic{}).Where("email = ?", client.Email).Update("reset", 0).Error; err != nil {
+					t.Fatal(err)
+				}
+				if _, _, err := clients.DelDepleted(inbound); err == nil {
+					t.Fatal("cleanup allowed")
+				}
+			}
+			for _, query := range []struct {
+				table any
+				where string
+				args  []any
+			}{
+				{&model.ClientRecord{}, "id = ?", []any{client.Id}},
+				{&model.ClientInbound{}, "client_id = ? AND inbound_id = ?", []any{client.Id, link.InboundId}},
+				{&model.ResellerClient{}, "reseller_id = ? AND email = ?", []any{reseller.Id, client.Email}},
+				{&xray.ClientTraffic{}, "email = ?", []any{client.Email}},
+			} {
+				var n int64
+				if err := db.Model(query.table).Where(query.where, query.args...).Count(&n).Error; err != nil || n != 1 {
+					t.Fatalf("record changed: %s count=%d err=%v", query.where, n, err)
+				}
+			}
+			var ib model.Inbound
+			if err := db.First(&ib, link.InboundId).Error; err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(ib.Settings, client.Email) {
+				t.Fatal("inbound mutated before guard")
+			}
+		})
 	}
 }

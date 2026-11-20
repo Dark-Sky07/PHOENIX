@@ -71,3 +71,25 @@ func rejectResellerNodeIncidents(tx *gorm.DB, resellerID int, emails []string) e
 	}
 	return nil
 }
+
+// rejectClientNodeIncidents is used before destructive runtime calls and again
+// in the accounting transaction. A marker stays significant even if ownership
+// has already drifted or the canonical client record is missing.
+func rejectClientNodeIncidents(tx *gorm.DB, emails []string) error {
+	keys := make([]string, 0, len(emails))
+	for _, email := range emails {
+		if key := transferEmailKey(email); key != "" {
+			keys = append(keys, key)
+		}
+	}
+	for _, batch := range chunkStrings(keys, sqlInChunk) {
+		var count int64
+		if err := tx.Table("reseller_node_counter_incidents").Where("LOWER(TRIM(email)) IN ?", batch).Count(&count).Error; err != nil {
+			return err
+		}
+		if count > 0 {
+			return fmt.Errorf("node counter incident requires manual reconciliation before client removal")
+		}
+	}
+	return nil
+}

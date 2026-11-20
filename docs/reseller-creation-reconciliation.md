@@ -189,3 +189,10 @@ unassignment batches. After evidence-based reconciliation an administrator can
 remove the marker and retry. Other administrative client-deletion paths and
 direct database writes are not automatically fenced by this check; do not use
 them to bypass unresolved accounting.
+
+Known counter incidents now also block client deletion, scoped deletion,
+detachment and depleted-client cleanup before their normal runtime changes;
+whole admin bulk batches fail closed if they contain an affected identity.
+The archive transaction rechecks the marker. Non-participating processes,
+direct database operations, and a newly detected incident racing a service
+caller that does not hold the allocation lock are not fenced by preflight.

@@ -43,6 +43,9 @@ func archiveResellerClientUsageTx(tx *gorm.DB, client *model.ClientRecord, resel
 	if len(mappings) == 0 {
 		return nil
 	}
+	if err := rejectClientNodeIncidents(tx, []string{client.Email}); err != nil {
+		return err
+	}
 	var corruptArchives int64
 	if err := tx.Model(&model.ResellerTrafficArchive{}).
 		Where("client_record_id = ? AND (consumed_bytes < 0 OR prior_consumed_bytes < 0)", client.Id).
