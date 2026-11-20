@@ -203,3 +203,68 @@ func TestNodeIncidentBlocksClientRemovalBeforeMutation(t *testing.T) {
 		})
 	}
 }
+
+func TestNodeIncidentBlocksInboundDeletionBeforeRuntime(t *testing.T) {
+	for _, kind := range []string{"linked", "settings only", "traffic only", "node incident", "bulk"} {
+		t.Run(kind, func(t *testing.T) {
+			_, client := seedResellerRenewal(t)
+			db := database.GetDB()
+			var link model.ClientInbound
+			if err := db.Where("client_id = ?", client.Id).First(&link).Error; err != nil {
+				t.Fatal(err)
+			}
+			var inbound model.Inbound
+			if err := db.First(&inbound, link.InboundId).Error; err != nil {
+				t.Fatal(err)
+			}
+			incident := model.ResellerNodeCounterIncident{NodeId: 77, Email: client.Email, PreviousUp: 120, ObservedUp: 1}
+			if err := db.Create(&incident).Error; err != nil {
+				t.Fatal(err)
+			}
+			switch kind {
+			case "settings only":
+				if err := db.Delete(&link).Error; err != nil {
+					t.Fatal(err)
+				}
+				if err := db.Model(&xray.ClientTraffic{}).Where("email = ?", client.Email).Update("inbound_id", 0).Error; err != nil {
+					t.Fatal(err)
+				}
+			case "traffic only":
+				if err := db.Delete(&link).Error; err != nil {
+					t.Fatal(err)
+				}
+				if err := db.Model(&inbound).Update("settings", `{"clients":[]}`).Error; err != nil {
+					t.Fatal(err)
+				}
+			case "node incident":
+				if err := db.Delete(&link).Error; err != nil {
+					t.Fatal(err)
+				}
+				if err := db.Model(&xray.ClientTraffic{}).Where("email = ?", client.Email).Update("inbound_id", 0).Error; err != nil {
+					t.Fatal(err)
+				}
+				if err := db.Model(&inbound).Updates(map[string]any{"settings": `{"clients":[]}`, "node_id": 77}).Error; err != nil {
+					t.Fatal(err)
+				}
+			}
+			svc := &InboundService{}
+			if kind == "bulk" {
+				result, _, err := svc.DelInbounds([]int{inbound.Id})
+				if err != nil || result.Deleted != 0 || len(result.Skipped) != 1 {
+					t.Fatalf("bulk=%+v err=%v", result, err)
+				}
+			} else if _, err := svc.DelInbound(inbound.Id); err == nil {
+				t.Fatal("inbound deletion accepted")
+			}
+			var count int64
+			if err := db.Model(&model.Inbound{}).Where("id = ?", inbound.Id).Count(&count).Error; err != nil || count != 1 {
+				t.Fatalf("inbound deleted: %d %v", count, err)
+			}
+			if kind == "linked" || kind == "bulk" {
+				if err := db.Model(&model.ClientInbound{}).Where("client_id = ? AND inbound_id = ?", link.ClientId, link.InboundId).Count(&count).Error; err != nil || count != 1 {
+					t.Fatalf("link deleted: %d %v", count, err)
+				}
+			}
+		})
+	}
+}

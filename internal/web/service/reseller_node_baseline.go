@@ -1,7 +1,11 @@
 package service
 
 import (
+	"encoding/json"
 	"fmt"
+	"strings"
+
+	"github.com/Dark-Sky07/phoenix/internal/database/model"
 
 	"gorm.io/gorm"
 )
@@ -92,4 +96,48 @@ func rejectClientNodeIncidents(tx *gorm.DB, emails []string) error {
 		}
 	}
 	return nil
+}
+
+// Inbound removal affects runtime and links before its DB cleanup. Check all
+// three identity sources first, including older settings-only associations.
+func rejectInboundNodeIncidents(tx *gorm.DB, inbound *model.Inbound) error {
+	var incidents int64
+	if err := tx.Table("reseller_node_counter_incidents").Count(&incidents).Error; err != nil {
+		return err
+	}
+	if incidents == 0 {
+		return nil
+	}
+	if inbound.NodeID != nil {
+		var nodeIncidents int64
+		if err := tx.Table("reseller_node_counter_incidents").Where("node_id = ?", *inbound.NodeID).Count(&nodeIncidents).Error; err != nil {
+			return err
+		}
+		if nodeIncidents > 0 {
+			return fmt.Errorf("node counter incident requires manual reconciliation before inbound removal")
+		}
+	}
+	var emails []string
+	if err := tx.Table("clients c").Joins("JOIN client_inbounds ci ON ci.client_id = c.id").Where("ci.inbound_id = ?", inbound.Id).Pluck("c.email", &emails).Error; err != nil {
+		return err
+	}
+	var trafficEmails []string
+	if err := tx.Table("client_traffics").Where("inbound_id = ?", inbound.Id).Pluck("email", &trafficEmails).Error; err != nil {
+		return err
+	}
+	emails = append(emails, trafficEmails...)
+	if strings.TrimSpace(inbound.Settings) != "" {
+		var settings struct {
+			Clients []struct {
+				Email string `json:"email"`
+			} `json:"clients"`
+		}
+		if err := json.Unmarshal([]byte(inbound.Settings), &settings); err != nil {
+			return fmt.Errorf("invalid inbound settings; cannot rule out a node counter incident: %w", err)
+		}
+		for _, client := range settings.Clients {
+			emails = append(emails, client.Email)
+		}
+	}
+	return rejectClientNodeIncidents(tx, emails)
 }

@@ -196,3 +196,9 @@ whole admin bulk batches fail closed if they contain an affected identity.
 The archive transaction rechecks the marker. Non-participating processes,
 direct database operations, and a newly detected incident racing a service
 caller that does not hold the allocation lock are not fenced by preflight.
+
+Deleting an inbound is also preflighted against unresolved counter incidents
+using its linked clients, traffic records, legacy settings identities, and (for
+a remote inbound) incidents on that node. Affected inbounds are skipped by
+bulk deletion. This preflight does not fence external mutations or a newly
+created incident racing a caller that does not hold the allocation lock.

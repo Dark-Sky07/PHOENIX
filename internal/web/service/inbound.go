@@ -1237,6 +1237,13 @@ func (s *InboundService) DelInbound(id int) (bool, error) {
 	markDirty := false
 	var ib model.Inbound
 	loadErr := db.Model(model.Inbound{}).Where("id = ?", id).First(&ib).Error
+	if loadErr == nil {
+		if err := rejectInboundNodeIncidents(db, &ib); err != nil {
+			return false, err
+		}
+	} else if !database.IsNotFound(loadErr) {
+		return false, loadErr
+	}
 	if loadErr == nil && ib.Protocol == model.L2TP {
 		l2tpInboundMu.Lock()
 		defer l2tpInboundMu.Unlock()
