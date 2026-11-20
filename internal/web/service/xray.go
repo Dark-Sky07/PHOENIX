@@ -45,6 +45,12 @@ var pendingXrayExitObservations = struct {
 	processes map[*xray.Process]struct{}
 }{processes: make(map[*xray.Process]struct{})}
 
+func rememberXrayExitObservation(process *xray.Process) {
+	pendingXrayExitObservations.Lock()
+	pendingXrayExitObservations.processes[process] = struct{}{}
+	pendingXrayExitObservations.Unlock()
+}
+
 func hasPendingXrayExitObservation() bool {
 	pendingXrayExitObservations.Lock()
 	defer pendingXrayExitObservations.Unlock()
@@ -1144,13 +1150,14 @@ func (s *XrayService) RestartXray(isForce bool) error {
 	}
 
 	p = xray.NewProcess(xrayConfig)
+	started := p
+	started.SetOnUnexpectedExit(func() { rememberXrayExitObservation(started) })
 	result = ""
 	s.xrayAPI.StatsLastValues = nil
 	err = p.Start()
 	if err != nil {
 		return err
 	}
-	started := p
 	go watchManagedXrayExit(started, started.Done())
 
 	return nil
@@ -1162,17 +1169,17 @@ func (s *XrayService) RestartXray(isForce bool) error {
 // the watchdog and restart path retry persistence.
 func watchManagedXrayExit(started *xray.Process, done <-chan struct{}) {
 	<-done
-	if started.WasStoppedIntentionally() {
-		return
-	}
-	pendingXrayExitObservations.Lock()
-	pendingXrayExitObservations.processes[started] = struct{}{}
-	pendingXrayExitObservations.Unlock()
 	defer func() {
 		pendingXrayExitObservations.Lock()
 		delete(pendingXrayExitObservations.processes, started)
 		pendingXrayExitObservations.Unlock()
 	}()
+	if started.WasStoppedIntentionally() {
+		return
+	}
+	// The process wait callback normally registered this before Done closed;
+	// this also covers callers that do not install a callback.
+	rememberXrayExitObservation(started)
 	lock.Lock()
 	defer lock.Unlock()
 	if p != started || started.WasStoppedIntentionally() {

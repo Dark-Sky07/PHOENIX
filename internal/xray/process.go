@@ -185,6 +185,8 @@ type process struct {
 	startTime  time.Time
 
 	intentionalStop atomic.Bool
+	// Installed before Start; called from the wait goroutine before Done closes.
+	onUnexpectedExit func()
 }
 
 // OnlineAPISupport describes whether the running Xray core implements the
@@ -231,6 +233,10 @@ func newTestProcess(config *Config, configPath string) *process {
 	p.configPath = configPath
 	return p
 }
+
+// SetOnUnexpectedExit installs a lightweight, nonblocking callback. It must be
+// called before Start, and must not wait on the process or its owner locks.
+func (p *Process) SetOnUnexpectedExit(callback func()) { p.onUnexpectedExit = callback }
 
 // Done closes when the started process has been reaped. It is nil before
 // Start; callers must capture it after a successful start.
@@ -558,6 +564,9 @@ func (p *process) waitForCommand(cmd *exec.Cmd) {
 	defer close(p.done)
 
 	err := cmd.Wait()
+	if !p.intentionalStop.Load() && p.onUnexpectedExit != nil {
+		p.onUnexpectedExit()
+	}
 	if err == nil || p.intentionalStop.Load() {
 		return
 	}

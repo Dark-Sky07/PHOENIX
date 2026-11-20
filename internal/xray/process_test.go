@@ -77,6 +77,10 @@ func initProcessTestLogger(t *testing.T) {
 }
 
 func startProcessHelper(t *testing.T, mode string) *process {
+	return startProcessHelperWithHook(t, mode, nil)
+}
+
+func startProcessHelperWithHook(t *testing.T, mode string, hook func()) *process {
 	t.Helper()
 
 	readyPath := filepath.Join(t.TempDir(), "ready")
@@ -87,6 +91,7 @@ func startProcessHelper(t *testing.T, mode string) *process {
 	)
 
 	p := newProcess(nil)
+	p.onUnexpectedExit = hook
 	if err := p.startCommand(cmd); err != nil {
 		t.Fatalf("start helper process: %v", err)
 	}
@@ -158,5 +163,38 @@ func markProcessHelperReady(t *testing.T) {
 	}
 	if err := os.WriteFile(readyPath, []byte("ready"), 0644); err != nil {
 		t.Fatalf("write helper ready file: %v", err)
+	}
+}
+
+func TestUnexpectedExitHookRunsBeforeDone(t *testing.T) {
+	initProcessTestLogger(t)
+	called := make(chan struct{}, 1)
+	p := startProcessHelperWithHook(t, "default-term", func() { called <- struct{}{} })
+	if err := p.cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-p.done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("child did not exit")
+	}
+	select {
+	case <-called:
+	default:
+		t.Fatal("unexpected-exit hook did not run before done")
+	}
+}
+
+func TestIntentionalStopSkipsUnexpectedExitHook(t *testing.T) {
+	initProcessTestLogger(t)
+	called := make(chan struct{}, 1)
+	p := startProcessHelperWithHook(t, "default-term", func() { called <- struct{}{} })
+	if err := p.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-called:
+		t.Fatal("intentional stop called unexpected-exit hook")
+	default:
 	}
 }

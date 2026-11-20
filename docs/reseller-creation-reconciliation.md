@@ -289,3 +289,10 @@ removal checks cannot proceed merely because that lock is busy. A later manual
 stop flag alone does not erase an already-unexpected exit. The scheduler gap
 before the watcher runs, panel crashes, other hosts and a stop request racing
 the child exit are still not fully fenced.
+
+The managed child wait path now registers the local exit barrier before its
+completion signal closes, so it does not depend on scheduling a second watcher
+before participating quota checks see the observation. The callback is skipped
+for known intentional stops, and the watcher persists the incident afterward.
+There remains a gap before the operating system reaps the child, a stop/exit
+race, and no fencing of other hosts before the incident is durably recorded.
