@@ -1286,7 +1286,11 @@ func (t *xrayTrafficState) persistPendingCounterDecrease(db *gorm.DB) error {
 		return nil
 	}
 	if err := recordLocalXrayCounterIncident(db, decrease); err != nil {
-		return fmt.Errorf("%w; could not persist local Xray incident: %v", decrease, err)
+		incident := localXrayIncidentEvidence(decrease)
+		if diskErr := storeCounterIncidentFallback(incident); diskErr != nil {
+			return fmt.Errorf("%w; database incident write failed: %v; fallback failed: %v", decrease, err, diskErr)
+		}
+		return fmt.Errorf("%w; database incident write failed: %v; fallback retained for manual review", decrease, err)
 	}
 	t.pendingCounterDecrease = nil
 	if t == &trafficState {
@@ -1301,7 +1305,7 @@ func recordLocalXrayCounterIncident(db *gorm.DB, decrease *xray.UserTrafficCount
 	if db == nil || decrease == nil || transferEmailKey(decrease.Email) == "" || decrease.Previous < 0 || decrease.Observed < 0 || decrease.Observed >= decrease.Previous {
 		return errors.New("invalid local Xray counter incident")
 	}
-	incident := model.ResellerNodeCounterIncident{NodeId: 0, Email: transferEmailKey(decrease.Email), Direction: decrease.Direction}
+	incident := localXrayIncidentEvidence(decrease)
 	switch decrease.Direction {
 	case "uplink":
 		incident.PreviousUp, incident.ObservedUp = decrease.Previous, decrease.Observed
@@ -1313,7 +1317,21 @@ func recordLocalXrayCounterIncident(db *gorm.DB, decrease *xray.UserTrafficCount
 	return db.Clauses(clause.OnConflict{DoNothing: true}).Create(&incident).Error
 }
 
+func localXrayIncidentEvidence(decrease *xray.UserTrafficCounterDecrease) model.ResellerNodeCounterIncident {
+	incident := model.ResellerNodeCounterIncident{NodeId: 0, Email: transferEmailKey(decrease.Email), Direction: decrease.Direction}
+	if decrease.Direction == "uplink" {
+		incident.PreviousUp, incident.ObservedUp = decrease.Previous, decrease.Observed
+	}
+	if decrease.Direction == "downlink" {
+		incident.PreviousDown, incident.ObservedDown = decrease.Previous, decrease.Observed
+	}
+	return incident
+}
+
 func checkLocalXrayCounterIncidents(db *gorm.DB) error {
+	if err := diskCounterIncidentError(); err != nil {
+		return err
+	}
 	if db == nil {
 		return errors.New("database unavailable while checking Xray counter incidents")
 	}

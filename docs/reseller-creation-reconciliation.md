@@ -225,3 +225,16 @@ for that node. Participating quota and removal checks in the same process are
 blocked while it is pending. If the node remains offline this retry may wait
 until it syncs again; a panel crash loses the pending observation, and other
 processes are not fenced until the incident is durable.
+
+If the database write for a detected node or local Xray counter incident fails,
+the panel also attempts to fsync a fallback evidence file under
+`counter-incident-fallback` inside the configured database folder. The presence
+of any file there blocks participating quota/removal checks and subsequent
+traffic collection until manual review, even after a panel process restart.
+Files are not automatically cleared when the DB recovers: back up the folder,
+inspect the evidence and DB, reconcile final usage, and only then remove the
+fallback and any corresponding database marker. The other counter direction in
+a local Xray record is not evidence. This is a local-filesystem safeguard, not
+cross-host fencing; a crash before file durability, simultaneous DB and disk
+failure, and Windows directory durability remain limitations. Database folder
+permissions and backups must protect the recorded emails and counter values.

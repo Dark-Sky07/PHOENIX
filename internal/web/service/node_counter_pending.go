@@ -41,12 +41,18 @@ func persistPendingNodeCounterIncident(db *gorm.DB, nodeID int) error {
 	if decrease == nil {
 		return nil
 	}
-	if db == nil {
-		return fmt.Errorf("%w; database unavailable while persisting node counter incident", decrease)
-	}
 	incident := model.ResellerNodeCounterIncident{NodeId: decrease.nodeID, Email: decrease.email, PreviousUp: decrease.previousUp, PreviousDown: decrease.previousDown, ObservedUp: decrease.observedUp, ObservedDown: decrease.observedDown}
-	if err := db.Clauses(clause.OnConflict{DoNothing: true}).Create(&incident).Error; err != nil {
-		return fmt.Errorf("%w; could not persist counter incident: %v", decrease, err)
+	var storeErr error
+	if db == nil {
+		storeErr = errors.New("database unavailable")
+	} else {
+		storeErr = db.Clauses(clause.OnConflict{DoNothing: true}).Create(&incident).Error
+	}
+	if storeErr != nil {
+		if diskErr := storeCounterIncidentFallback(incident); diskErr != nil {
+			return fmt.Errorf("%w; database incident write failed: %v; fallback failed: %v", decrease, storeErr, diskErr)
+		}
+		return fmt.Errorf("%w; database incident write failed: %v; fallback retained for manual review", decrease, storeErr)
 	}
 	pendingNodeCounterIncidents.Lock()
 	if pendingNodeCounterIncidents.byNode[nodeID] == decrease {
@@ -60,5 +66,5 @@ func pendingCounterIncidentError() error {
 	if xrayCounterIncidentPending.Load() || hasPendingNodeCounterIncidents() {
 		return errors.New("counter incident persistence pending; manual reconciliation required")
 	}
-	return nil
+	return diskCounterIncidentError()
 }

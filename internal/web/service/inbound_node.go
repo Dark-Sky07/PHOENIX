@@ -193,6 +193,9 @@ func (s *InboundService) SetRemoteTraffic(nodeID int, snap *runtime.TrafficSnaps
 		if err := persistPendingNodeCounterIncident(database.GetDB(), nodeID); err != nil {
 			return err
 		}
+		if err := diskCounterIncidentError(); err != nil {
+			return err
+		}
 		var inner error
 		structuralChange, inner = s.setRemoteTrafficLocked(nodeID, snap, dirty)
 		var decrease *resellerNodeCounterDecrease
