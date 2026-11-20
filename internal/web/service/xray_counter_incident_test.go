@@ -192,3 +192,43 @@ func TestWatchdogDoesNotInventExitForNilOrManuallyStoppedCore(t *testing.T) {
 		t.Fatalf("unexpected incident=%d err=%v", count, err)
 	}
 }
+
+func TestManagedXrayExitWatcherRecordsUncertaintyImmediately(t *testing.T) {
+	reseller, _ := seedResellerRenewal(t)
+	db := database.GetDB()
+	oldProcess, oldStopped := p, isManuallyStopped.Load()
+	t.Cleanup(func() { p = oldProcess; isManuallyStopped.Store(oldStopped); xrayCoreExitPending.Store(false) })
+	started := xray.NewProcess(nil)
+	p = started
+	isManuallyStopped.Store(false)
+	done := make(chan struct{})
+	close(done)
+	watchManagedXrayExit(started, done)
+	var count int64
+	if err := db.Model(&model.ResellerNodeCounterIncident{}).Where("node_id = ? AND direction = ?", 0, "core-exited").Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("incident=%d err=%v", count, err)
+	}
+	if err := (&ResellerService{}).CheckTrafficQuota(&reseller, 1); err == nil {
+		t.Fatal("observed exit did not block quota")
+	}
+}
+
+func TestManagedXrayExitWatcherIgnoresManualStopAndReplacedCore(t *testing.T) {
+	_, _ = seedResellerRenewal(t)
+	db := database.GetDB()
+	oldProcess, oldStopped := p, isManuallyStopped.Load()
+	t.Cleanup(func() { p = oldProcess; isManuallyStopped.Store(oldStopped); xrayCoreExitPending.Store(false) })
+	started := xray.NewProcess(nil)
+	done := make(chan struct{})
+	close(done)
+	p = started
+	isManuallyStopped.Store(true)
+	watchManagedXrayExit(started, done)
+	isManuallyStopped.Store(false)
+	p = xray.NewProcess(nil)
+	watchManagedXrayExit(started, done)
+	var count int64
+	if err := db.Model(&model.ResellerNodeCounterIncident{}).Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("unexpected incident=%d err=%v", count, err)
+	}
+}

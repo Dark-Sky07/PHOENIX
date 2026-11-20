@@ -232,6 +232,13 @@ func newTestProcess(config *Config, configPath string) *process {
 	return p
 }
 
+// Done closes when the started process has been reaped. It is nil before
+// Start; callers must capture it after a successful start.
+func (p *Process) Done() <-chan struct{} { return p.done }
+
+// WasStoppedIntentionally distinguishes panel-requested Stop from an exit.
+func (p *Process) WasStoppedIntentionally() bool { return p.intentionalStop.Load() }
+
 // IsRunning returns true if the Xray process is currently running.
 func (p *process) IsRunning() bool {
 	if p.cmd == nil || p.cmd.Process == nil {

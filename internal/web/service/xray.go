@@ -1137,8 +1137,26 @@ func (s *XrayService) RestartXray(isForce bool) error {
 	if err != nil {
 		return err
 	}
+	started := p
+	go watchManagedXrayExit(started, started.Done())
 
 	return nil
+}
+
+// watchManagedXrayExit notices a reaped managed core without waiting for the
+// periodic watchdog. Stop/replacement is serialized with this check and must
+// not be misclassified. A marker write failure leaves the in-memory barrier;
+// the watchdog and restart path retry persistence.
+func watchManagedXrayExit(started *xray.Process, done <-chan struct{}) {
+	<-done
+	lock.Lock()
+	defer lock.Unlock()
+	if p != started || isManuallyStopped.Load() || started.WasStoppedIntentionally() {
+		return
+	}
+	if err := recordUnexpectedXrayExit(database.GetDB()); err != nil {
+		logger.Error("Record unexpected Xray exit failed:", err)
+	}
 }
 
 // tryHotApply attempts to reconcile the running Xray instance with newCfg

@@ -275,3 +275,10 @@ A failed incident write postpones the restart attempt and is retried. A nil
 process at initial startup and an explicitly stopped process do not invent an
 exit. This still leaves a window between the core stopping and the first
 observation; concurrent external or non-participating writers are not fenced.
+
+The managed Xray process now has an exit watcher that attempts to record the
+same uncertainty incident immediately after the child is reaped, rather than
+waiting for the periodic health check. Intentional stops and replaced cores are
+not treated as crashes. If persistence fails, the existing in-memory barrier and
+watchdog retry remain in effect. This reduces but cannot eliminate the gap
+between exit and observation, and does not detect a crash of the panel itself.
