@@ -192,6 +192,13 @@ func (s *InboundService) SetRemoteTraffic(nodeID int, snap *runtime.TrafficSnaps
 	err := submitTrafficWrite(func() error {
 		var inner error
 		structuralChange, inner = s.setRemoteTrafficLocked(nodeID, snap, dirty)
+		var decrease *resellerNodeCounterDecrease
+		if errors.As(inner, &decrease) {
+			incident := model.ResellerNodeCounterIncident{NodeId: decrease.nodeID, Email: decrease.email, PreviousUp: decrease.previousUp, PreviousDown: decrease.previousDown, ObservedUp: decrease.observedUp, ObservedDown: decrease.observedDown}
+			if err := database.GetDB().Clauses(clause.OnConflict{DoNothing: true}).Create(&incident).Error; err != nil {
+				return fmt.Errorf("%w; could not persist counter incident: %v", inner, err)
+			}
+		}
 		return inner
 	})
 	return structuralChange, err

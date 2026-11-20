@@ -131,7 +131,7 @@ func TestResellerNodeBaselinePostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	if err := db.AutoMigrate(&model.ClientRecord{}, &model.ResellerClient{}, &model.Inbound{}, &model.ClientInbound{}, &model.NodeClientTraffic{}); err != nil {
+	if err := db.AutoMigrate(&model.ClientRecord{}, &model.ResellerClient{}, &model.Inbound{}, &model.ClientInbound{}, &model.NodeClientTraffic{}, &model.ResellerNodeCounterIncident{}); err != nil {
 		t.Fatal(err)
 	}
 	tx := db.Begin()

@@ -165,3 +165,14 @@ or allocation mutation cannot race a successful in-flight snapshot. This
 serializes node snapshot requests and can delay allocation while a node is slow.
 It does not fence the remote node, make a failed poll durable, cover external
 writers or guarantee final traffic. A failed snapshot can still require review.
+
+A node counter that decreases for an attached reseller client may have reset
+between polls, losing traffic. The panel rejects that snapshot and records a
+`reseller_node_counter_incidents` marker with the previous and observed values.
+The marker blocks further sync for the affected node and quota/renewal checks
+for the affected reseller even if the counter later rises. Back up the database,
+stop traffic, investigate all runtimes and logs, and reconcile actual usage and
+baseline from evidence before an administrator removes the marker. Do not
+interpret the difference or the new counter as the missing usage. If writing the
+marker itself fails, the error is logged but no durable barrier is guaranteed;
+crashes before detection and resets that exceed the old reading are not detected.

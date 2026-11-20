@@ -11,6 +11,16 @@ import (
 	"gorm.io/gorm"
 )
 
+type resellerNodeCounterDecrease struct {
+	nodeID                                             int
+	email                                              string
+	previousUp, previousDown, observedUp, observedDown int64
+}
+
+func (e *resellerNodeCounterDecrease) Error() string {
+	return fmt.Sprintf("reseller client %q node %d counter decreased; manual reconciliation required", e.email, e.nodeID)
+}
+
 // A node snapshot is not proof that final traffic was observed. Do not let a
 // snapshot detach a reseller client or replace its quota while its allocation
 // could still cover unpolled traffic. It also blocks newly reported reseller
@@ -67,7 +77,7 @@ func validateNodeResellerSnapshot(tx *gorm.DB, nodeID int, snap *runtime.Traffic
 			localStats[key] = row
 		}
 	}
-	baselines := make(map[string]bool, len(keys))
+	baselines := make(map[string]model.NodeClientTraffic, len(keys))
 	for _, batch := range chunkStrings(keys, sqlInChunk) {
 		var rows []model.NodeClientTraffic
 		if err := tx.Where("node_id = ? AND LOWER(TRIM(email)) IN ?", nodeID, batch).Find(&rows).Error; err != nil {
@@ -75,10 +85,19 @@ func validateNodeResellerSnapshot(tx *gorm.DB, nodeID int, snap *runtime.Traffic
 		}
 		for _, row := range rows {
 			key := nodeEmailKey(row.Email)
-			if baselines[key] || row.Up < 0 || row.Down < 0 {
+			if _, exists := baselines[key]; exists || row.Up < 0 || row.Down < 0 {
 				return fmt.Errorf("ambiguous or invalid reseller node baseline for %q; manual reconciliation required", key)
 			}
-			baselines[key] = true
+			baselines[key] = row
+		}
+	}
+	for _, batch := range chunkStrings(keys, sqlInChunk) {
+		var count int64
+		if err := tx.Model(&model.ResellerNodeCounterIncident{}).Where("node_id = ? AND LOWER(TRIM(email)) IN ?", nodeID, batch).Count(&count).Error; err != nil {
+			return err
+		}
+		if count > 0 {
+			return fmt.Errorf("node %d reseller counter incident requires manual reconciliation", nodeID)
 		}
 	}
 	byInbound := make(map[int]*model.Inbound)
@@ -173,10 +192,14 @@ func validateNodeResellerSnapshot(tx *gorm.DB, nodeID int, snap *runtime.Traffic
 		// node's current reading. Starting a baseline here would silently
 		// discard any unaccounted difference; adding the full value might
 		// double count. Require evidence-backed manual reconciliation.
-		if len(stats[key]) > 0 && !baselines[key] {
+		base, baselineExists := baselines[key]
+		if len(stats[key]) > 0 && !baselineExists {
 			return fmt.Errorf("reseller client %q has no node traffic baseline; manual reconciliation required", link.Email)
 		}
 		for _, traffic := range stats[key] {
+			if baselineExists && (traffic.Up < base.Up || traffic.Down < base.Down) {
+				return &resellerNodeCounterDecrease{nodeID: nodeID, email: key, previousUp: base.Up, previousDown: base.Down, observedUp: traffic.Up, observedDown: traffic.Down}
+			}
 			if traffic.Total != link.TotalGB || traffic.ExpiryTime != local.ExpiryTime || traffic.Reset != local.Reset {
 				return fmt.Errorf("reseller client %q node traffic limits changed; manual reconciliation required", link.Email)
 			}
