@@ -570,6 +570,13 @@ func (s *InboundService) autoRenewClients(tx *gorm.DB) (bool, int64, error) {
 		inbounds = append(inbounds, page...)
 	}
 	renewedEmails := make(map[string]struct{})
+	// Traffic rows are shared across inbounds. Preserve the original disabled
+	// state so every inbound is re-enabled, even after the first one updates
+	// the shared row.
+	wasDisabled := make(map[string]bool, len(traffics))
+	for _, traffic := range traffics {
+		wasDisabled[transferEmailKey(traffic.Email)] = !traffic.Enable
+	}
 	deniedEmails := make(map[string]struct{})
 	quotaTracker := renewalQuotaTracker{tx: tx, accounts: make(map[int]*renewalQuotaSnapshot)}
 	for inbound_index := range inbounds {
@@ -627,7 +634,7 @@ func (s *InboundService) autoRenewClients(tx *gorm.DB) (bool, int64, error) {
 					traffics[traffic_index].ExpiryTime = newExpiryTime
 					traffics[traffic_index].Down = 0
 					traffics[traffic_index].Up = 0
-					if !traffic.Enable {
+					if wasDisabled[key] {
 						traffics[traffic_index].Enable = true
 						c["enable"] = true
 						clientsToAdd = append(clientsToAdd,

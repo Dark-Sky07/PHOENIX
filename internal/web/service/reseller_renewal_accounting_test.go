@@ -151,3 +151,64 @@ func TestRenewalMalformedInboundReturnsError(t *testing.T) {
 		t.Fatalf("traffic changed: %+v", row)
 	}
 }
+
+func TestAutoRenewalReenablesEveryInboundForSharedClient(t *testing.T) {
+	_, client := seedResellerRenewal(t)
+	db := database.GetDB()
+	var link model.ClientInbound
+	if err := db.Where("client_id = ?", client.Id).First(&link).Error; err != nil {
+		t.Fatal(err)
+	}
+	var first model.Inbound
+	if err := db.First(&first, link.InboundId).Error; err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(map[string]any{"clients": []model.Client{{Email: client.Email, ID: client.UUID, TotalGB: 500, Enable: false, Reset: 1}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&first).Update("settings", string(payload)).Error; err != nil {
+		t.Fatal(err)
+	}
+	second := model.Inbound{UserId: 1, Port: 19006, Protocol: model.VLESS, Settings: string(payload), Tag: "renew-second"}
+	if err := db.Create(&second).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&model.ClientInbound{ClientId: client.Id, InboundId: second.Id}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&xray.ClientTraffic{}).Where("email = ?", client.Email).Update("enable", false).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		_, count, err := (&InboundService{}).autoRenewClients(tx)
+		if err == nil && count != 1 {
+			return errors.New("expected one renewal")
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []int{first.Id, second.Id} {
+		var inbound model.Inbound
+		if err := db.First(&inbound, id).Error; err != nil {
+			t.Fatal(err)
+		}
+		var settings struct {
+			Clients []model.Client `json:"clients"`
+		}
+		if err := json.Unmarshal([]byte(inbound.Settings), &settings); err != nil {
+			t.Fatal(err)
+		}
+		if len(settings.Clients) != 1 || !settings.Clients[0].Enable || settings.Clients[0].ExpiryTime <= time.Now().UnixMilli() {
+			t.Fatalf("inbound %d not reenabled: %+v", id, settings.Clients)
+		}
+	}
+	var row xray.ClientTraffic
+	if err := db.Where("email = ?", client.Email).First(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !row.Enable || row.Up != 0 || row.Down != 0 {
+		t.Fatalf("traffic not renewed: %+v", row)
+	}
+}
