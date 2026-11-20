@@ -1663,15 +1663,25 @@ func (a *ClientController) delDepletedForReseller(reseller *model.Reseller) (int
 	if err != nil {
 		return 0, false, err
 	}
+	// Use the same fail-closed, normalized local/global usage as quota checks.
+	// List's display overlay may omit global-only users and is not an
+	// authoritative source for this destructive operation.
+	emails := make([]string, 0, len(owned))
+	for email := range owned {
+		emails = append(emails, email)
+	}
+	usage, err := a.resellerService.ClientUsage(emails)
+	if err != nil {
+		return 0, false, err
+	}
 	depleted := make([]string, 0)
 	for _, row := range rows {
-		if _, ok := owned[strings.ToLower(strings.TrimSpace(row.Email))]; !ok {
+		key := strings.ToLower(strings.TrimSpace(row.Email))
+		if _, ok := owned[key]; !ok || row.TotalGB <= 0 {
 			continue
 		}
-		if row.TotalGB <= 0 || row.Traffic == nil {
-			continue
-		}
-		if row.Traffic.Up+row.Traffic.Down >= row.TotalGB {
+		traffic := usage[key]
+		if traffic != nil && (traffic.Up >= row.TotalGB || traffic.Down >= row.TotalGB-traffic.Up) {
 			depleted = append(depleted, row.Email)
 		}
 	}
