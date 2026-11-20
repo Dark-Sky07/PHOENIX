@@ -1310,6 +1310,9 @@ func (s *ResellerService) Stat(reseller *model.Reseller) (*ResellerStat, error) 
 		return nil, errors.New("reseller is required")
 	}
 	db := database.GetDB()
+	if err := validateResellerNodeBaselines(db, reseller.Id); err != nil {
+		return nil, err
+	}
 	stat := &ResellerStat{Reseller: reseller, Currency: "USD"}
 	if err := db.Model(&model.ResellerCreationIntent{}).Where("reseller_id = ?", reseller.Id).Count(&stat.PendingCreations).Error; err != nil {
 		return nil, err
@@ -1795,6 +1798,9 @@ func (s *ResellerService) CheckTrafficQuota(reseller *model.Reseller, addBytes i
 	}
 	if addBytes < 0 {
 		return errors.New("traffic allocation cannot be negative")
+	}
+	if err := validateResellerNodeBaselines(database.GetDB(), reseller.Id); err != nil {
+		return err
 	}
 	if reseller.TrafficLimit <= 0 {
 		return nil

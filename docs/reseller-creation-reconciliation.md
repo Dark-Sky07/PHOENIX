@@ -152,3 +152,9 @@ current counters were already counted. An administrator must investigate and
 restore a baseline only from trustworthy records; neither zero nor the current
 node reading is automatically asserted to be correct. New deployments and
 migrations may therefore need reconciliation before their first node sync.
+
+A missing, negative or ambiguous per-node baseline for an attached reseller
+client also blocks reseller quota decisions and renewal reservations, including
+unlimited-reseller allocation, rather than displaying the known counters as a
+complete account. Restoring a baseline permits these checks again; this is not
+a health check and does not guarantee that a node's latest traffic arrived.

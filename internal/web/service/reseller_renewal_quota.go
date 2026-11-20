@@ -28,6 +28,9 @@ func (t *renewalQuotaTracker) load(id int) (*renewalQuotaSnapshot, error) {
 	if found := t.accounts[id]; found != nil {
 		return found, nil
 	}
+	if err := validateResellerNodeBaselines(t.tx, id); err != nil {
+		return nil, err
+	}
 	if err := checkResellerProcessingClientRenewals(t.tx, id); err != nil {
 		return nil, err
 	}
