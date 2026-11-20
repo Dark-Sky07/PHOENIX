@@ -42,6 +42,12 @@ export const DaemonInfoSchema = z.object({
 }).partial();
 
 export const StatusSchema = z.object({
+  counterIncidents: z.object({
+    available: z.boolean(),
+    databaseCount: z.number(),
+    fallbackPresent: z.boolean(),
+    pendingInProcess: z.boolean(),
+  }).optional(),
   cpu: z.number().optional(),
   cpuCores: z.number().optional(),
   logicalPro: z.number().optional(),

@@ -303,3 +303,9 @@ rechecks for a core that died while configuration was built and refuses to
 start a replacement when stopping the old core fails. This closes specific
 late-stop and ignored-stop-error paths, but a signal/exit race and traffic after
 an ordinary final poll remain unresolved.
+
+The administrator dashboard now displays an incident summary when database
+markers, local fallback files or in-process observations exist, and warns when
+the summary cannot be checked. It exposes only counts/flags, not client
+identities or traffic values. A clear summary is not proof of complete traffic;
+it cannot see incidents not yet detected or fallback files on another host.

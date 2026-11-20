@@ -70,12 +70,13 @@ type DaemonStatus struct {
 // Status represents comprehensive system and application status information.
 // It includes CPU, memory, disk, network statistics, and managed process status.
 type Status struct {
-	T           time.Time `json:"-"`
-	Cpu         float64   `json:"cpu"`
-	CpuCores    int       `json:"cpuCores"`
-	LogicalPro  int       `json:"logicalPro"`
-	CpuSpeedMhz float64   `json:"cpuSpeedMhz"`
-	Mem         struct {
+	CounterIncidents CounterIncidentStatus `json:"counterIncidents"`
+	T                time.Time             `json:"-"`
+	Cpu              float64               `json:"cpu"`
+	CpuCores         int                   `json:"cpuCores"`
+	LogicalPro       int                   `json:"logicalPro"`
+	CpuSpeedMhz      float64               `json:"cpuSpeedMhz"`
+	Mem              struct {
 		Current uint64 `json:"current"`
 		Total   uint64 `json:"total"`
 	} `json:"mem"`
@@ -383,7 +384,8 @@ func daemonStatus(running bool, errMsg string, inboundCount, onlineClients int, 
 func (s *ServerService) GetStatus(lastStatus *Status) *Status {
 	now := time.Now()
 	status := &Status{
-		T: now,
+		T:                now,
+		CounterIncidents: readCounterIncidentStatus(database.GetDB()),
 	}
 
 	// CPU stats

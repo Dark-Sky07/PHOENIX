@@ -65,7 +65,15 @@ export interface DaemonInfo {
   color: string;
 }
 
+export interface CounterIncidentStatus {
+  available: boolean;
+  databaseCount: number;
+  fallbackPresent: boolean;
+  pendingInProcess: boolean;
+}
+
 interface StatusInput {
+  counterIncidents?: CounterIncidentStatus;
   cpu?: number;
   cpuCores?: number;
   logicalPro?: number;
@@ -88,6 +96,7 @@ interface StatusInput {
 }
 
 export class Status {
+  counterIncidents?: CounterIncidentStatus;
   cpu: CurTotal = new CurTotal(0, 0);
   cpuCores = 0;
   logicalPro = 0;
@@ -110,6 +119,7 @@ export class Status {
 
   constructor(data?: StatusInput | null) {
     if (data == null) return;
+    this.counterIncidents = data.counterIncidents;
 
     this.cpu = new CurTotal(data.cpu ?? 0, 100);
     this.cpuCores = data.cpuCores ?? 0;
