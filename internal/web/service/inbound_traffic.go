@@ -574,12 +574,24 @@ func (s *InboundService) autoRenewClients(tx *gorm.DB) (bool, int64, error) {
 	quotaTracker := renewalQuotaTracker{tx: tx, accounts: make(map[int]*renewalQuotaSnapshot)}
 	for inbound_index := range inbounds {
 		settings := map[string]any{}
-		json.Unmarshal([]byte(inbounds[inbound_index].Settings), &settings)
-		clients := settings["clients"].([]any)
+		if err := json.Unmarshal([]byte(inbounds[inbound_index].Settings), &settings); err != nil {
+			return false, 0, fmt.Errorf("parse renewal inbound %d: %w", inbounds[inbound_index].Id, err)
+		}
+		clients, ok := settings["clients"].([]any)
+		if !ok {
+			return false, 0, fmt.Errorf("renewal inbound %d has invalid clients", inbounds[inbound_index].Id)
+		}
 		for client_index := range clients {
-			c := clients[client_index].(map[string]any)
+			c, ok := clients[client_index].(map[string]any)
+			if !ok {
+				return false, 0, fmt.Errorf("renewal inbound %d has invalid client", inbounds[inbound_index].Id)
+			}
+			email, ok := c["email"].(string)
+			if !ok || transferEmailKey(email) == "" {
+				return false, 0, fmt.Errorf("renewal inbound %d has client without email", inbounds[inbound_index].Id)
+			}
 			for traffic_index, traffic := range traffics {
-				if transferEmailKey(traffic.Email) == transferEmailKey(c["email"].(string)) {
+				if transferEmailKey(traffic.Email) == transferEmailKey(email) {
 					sched := renewalSchedule{mode: RenewalModeRolling, rollingDays: traffic.Reset}
 					if rs, ok := renewalSchedules[transferEmailKey(traffic.Email)]; ok {
 						sched.mode, sched.day = rs.mode, rs.day
@@ -651,11 +663,10 @@ func (s *InboundService) autoRenewClients(tx *gorm.DB) (bool, int64, error) {
 		}
 		cs, gcErr := s.GetClients(ib)
 		if gcErr != nil {
-			logger.Warning("autoRenewClients sync clients: GetClients failed", gcErr)
-			continue
+			return false, 0, fmt.Errorf("read renewal inbound %d clients: %w", ib.Id, gcErr)
 		}
 		if syncErr := s.clientService.SyncInbound(tx, ib.Id, cs); syncErr != nil {
-			logger.Warning("autoRenewClients sync clients: SyncInbound failed", syncErr)
+			return false, 0, fmt.Errorf("sync renewal inbound %d clients: %w", ib.Id, syncErr)
 		}
 	}
 	err = tx.Save(traffics).Error

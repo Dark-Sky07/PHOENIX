@@ -99,3 +99,55 @@ func TestRenewalArchiveFailureRollsBackTransaction(t *testing.T) {
 		t.Fatalf("failed renewal changed traffic: %+v", row)
 	}
 }
+
+func TestRenewalSyncFailureRollsBackArchiveAndAssociations(t *testing.T) {
+	_, client := seedResellerRenewal(t)
+	db := database.GetDB()
+	if err := db.Exec("CREATE TRIGGER reject_renewal_link BEFORE INSERT ON client_inbounds BEGIN SELECT RAISE(ABORT, 'injected sync failure'); END").Error; err != nil {
+		t.Fatal(err)
+	}
+	err := db.Transaction(func(tx *gorm.DB) error { _, _, err := (&InboundService{}).autoRenewClients(tx); return err })
+	if err == nil {
+		t.Fatal("expected sync failure")
+	}
+	var row xray.ClientTraffic
+	if err := db.Where("email = ?", client.Email).First(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.Up != 120 || row.Down != 180 || row.ExpiryTime > time.Now().UnixMilli() {
+		t.Fatalf("traffic changed: %+v", row)
+	}
+	var links, archives int64
+	if err := db.Model(&model.ClientInbound{}).Where("client_id = ?", client.Id).Count(&links).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&model.ResellerTrafficArchive{}).Count(&archives).Error; err != nil {
+		t.Fatal(err)
+	}
+	if links != 1 || archives != 0 {
+		t.Fatalf("partial renewal committed: links=%d archives=%d", links, archives)
+	}
+}
+
+func TestRenewalMalformedInboundReturnsError(t *testing.T) {
+	_, client := seedResellerRenewal(t)
+	db := database.GetDB()
+	var link model.ClientInbound
+	if err := db.Where("client_id = ?", client.Id).First(&link).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&model.Inbound{}).Where("id = ?", link.InboundId).Update("settings", `{"clients":[null]}`).Error; err != nil {
+		t.Fatal(err)
+	}
+	err := db.Transaction(func(tx *gorm.DB) error { _, _, err := (&InboundService{}).autoRenewClients(tx); return err })
+	if err == nil {
+		t.Fatal("expected malformed client error")
+	}
+	var row xray.ClientTraffic
+	if err := db.Where("email = ?", client.Email).First(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.Up != 120 || row.Down != 180 {
+		t.Fatalf("traffic changed: %+v", row)
+	}
+}
