@@ -99,6 +99,13 @@ func (s *ResellerDepositCheckoutService) CreateOrder(token string, amount float6
 	if math.IsNaN(amount) || math.IsInf(amount, 0) || amount <= 0 || amount > resellerDepositMaxAmount {
 		return nil, common.NewError("amount must be greater than 0 and no more than ", resellerDepositMaxAmount)
 	}
+	// Serialize the pending-order count and insertion with other participating
+	// checkouts, payments and reseller mutations, including across processes.
+	unlock, err := LockResellerAllocation()
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	reseller, err := s.resolveReseller(token, secret, now)
 	if err != nil {
 		return nil, err
