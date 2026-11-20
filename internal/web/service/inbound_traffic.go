@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -171,11 +172,20 @@ func (s *InboundService) addInboundTraffic(tx *gorm.DB, traffics []*xray.Traffic
 	var err error
 
 	for _, traffic := range traffics {
+		if traffic == nil {
+			return errors.New("nil inbound traffic delta")
+		}
 		if traffic.IsInbound {
+			if traffic.Up < 0 || traffic.Down < 0 {
+				return errors.New("negative inbound traffic delta")
+			}
+			// Saturate corrupted or overflowing counters instead of allowing
+			// SQLite float rounding or PostgreSQL bigint overflow to defeat
+			// inbound limits and block the entire accounting batch.
 			err = tx.Model(&model.Inbound{}).Where("tag = ? AND node_id IS NULL", traffic.Tag).
 				Updates(map[string]any{
-					"up":   gorm.Expr("up + ?", traffic.Up),
-					"down": gorm.Expr("down + ?", traffic.Down),
+					"up":   gorm.Expr("CASE WHEN up < 0 OR up > ? THEN ? ELSE up + ? END", int64(math.MaxInt64)-traffic.Up, int64(math.MaxInt64), traffic.Up),
+					"down": gorm.Expr("CASE WHEN down < 0 OR down > ? THEN ? ELSE down + ? END", int64(math.MaxInt64)-traffic.Down, int64(math.MaxInt64), traffic.Down),
 				}).Error
 			if err != nil {
 				return err

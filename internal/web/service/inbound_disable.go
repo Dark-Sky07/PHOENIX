@@ -14,6 +14,10 @@ import (
 	"gorm.io/gorm"
 )
 
+// Avoid overflowing up+down when deciding whether an inbound is depleted.
+// Negative stored counters are treated as corrupt and fail closed.
+const depletedInboundsCond = `((total > 0 AND (CASE WHEN up < 0 OR down < 0 OR up >= total THEN 1 WHEN down >= total - up THEN 1 ELSE 0 END) = 1) OR (expiry_time > 0 AND expiry_time <= ?))`
+
 func (s *InboundService) disableInvalidInbounds(tx *gorm.DB) (bool, int64, error) {
 	now := time.Now().Unix() * 1000
 	needRestart := false
@@ -22,7 +26,7 @@ func (s *InboundService) disableInvalidInbounds(tx *gorm.DB) (bool, int64, error
 		var tags []string
 		err := tx.Table("inbounds").
 			Select("inbounds.tag").
-			Where("((total > 0 and up + down >= total) or (expiry_time > 0 and expiry_time <= ?)) and enable = ? and node_id IS NULL AND protocol NOT IN (?, ?, ?, ?)", now, true, model.OpenVPN, model.L2TP, model.SSTP, model.PPTP).
+			Where(depletedInboundsCond+" AND enable = ? AND node_id IS NULL AND protocol NOT IN (?, ?, ?, ?)", now, true, model.OpenVPN, model.L2TP, model.SSTP, model.PPTP).
 			Scan(&tags).Error
 		if err != nil {
 			return false, 0, err
@@ -46,7 +50,7 @@ func (s *InboundService) disableInvalidInbounds(tx *gorm.DB) (bool, int64, error
 	}
 
 	result := tx.Model(model.Inbound{}).
-		Where("((total > 0 and up + down >= total) or (expiry_time > 0 and expiry_time <= ?)) and enable = ? and node_id IS NULL", now, true).
+		Where(depletedInboundsCond+" AND enable = ? AND node_id IS NULL", now, true).
 		Update("enable", false)
 	err := result.Error
 	count := result.RowsAffected

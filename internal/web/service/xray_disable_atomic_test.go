@@ -2,6 +2,8 @@ package service
 
 import (
 	"encoding/json"
+	"fmt"
+	"math"
 	"strings"
 	"testing"
 
@@ -132,5 +134,79 @@ func TestDisableInboundsRequestsRestartWhenXrayAPICannotInitialize(t *testing.T)
 	restart, count, err := (&InboundService{}).disableInvalidInbounds(db)
 	if err != nil || !restart || count != 1 {
 		t.Fatalf("restart=%v count=%d err=%v", restart, count, err)
+	}
+}
+
+func TestInboundTrafficSaturatesAndDisablesWithoutOverflow(t *testing.T) {
+	setupBulkDB(t)
+	db := database.GetDB()
+	ib := mkInbound(t, 29225, model.VLESS, `{"clients":[]}`)
+	if err := db.Model(&model.Inbound{}).Where("id = ?", ib.Id).Updates(map[string]any{"enable": true, "total": int64(math.MaxInt64), "up": int64(math.MaxInt64 - 5), "down": int64(10)}).Error; err != nil {
+		t.Fatal(err)
+	}
+	err := db.Transaction(func(tx *gorm.DB) error {
+		if err := (&InboundService{}).addInboundTraffic(tx, []*xray.Traffic{{Tag: ib.Tag, IsInbound: true, Up: 20}}); err != nil {
+			return err
+		}
+		_, count, err := (&InboundService{}).disableInvalidInbounds(tx)
+		if err == nil && count != 1 {
+			return fmt.Errorf("expected disable, got %d", count)
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved model.Inbound
+	if err := db.First(&saved, ib.Id).Error; err != nil {
+		t.Fatal(err)
+	}
+	if saved.Enable || saved.Up != math.MaxInt64 || saved.Down != 10 {
+		t.Fatalf("inbound not safely capped: %+v", saved)
+	}
+}
+
+func TestInboundTrafficRejectsNegativeWithoutPartialWrite(t *testing.T) {
+	setupBulkDB(t)
+	db := database.GetDB()
+	ib := mkInbound(t, 29226, model.VLESS, `{"clients":[]}`)
+	err := db.Transaction(func(tx *gorm.DB) error {
+		return (&InboundService{}).addInboundTraffic(tx, []*xray.Traffic{{Tag: ib.Tag, IsInbound: true, Up: 3}, {Tag: ib.Tag, IsInbound: true, Down: -1}})
+	})
+	if err == nil {
+		t.Fatal("negative delta accepted")
+	}
+	var saved model.Inbound
+	if err := db.First(&saved, ib.Id).Error; err != nil {
+		t.Fatal(err)
+	}
+	if saved.Up != 0 || saved.Down != 0 {
+		t.Fatalf("partial write: %+v", saved)
+	}
+}
+
+func TestInboundDepletionTreatsCorruptNegativeCountersAsExhausted(t *testing.T) {
+	setupBulkDB(t)
+	db := database.GetDB()
+	ib := mkInbound(t, 29227, model.VLESS, `{"clients":[]}`)
+	if err := db.Model(&model.Inbound{}).Where("id = ?", ib.Id).Updates(map[string]any{"enable": true, "total": 100, "up": int64(math.MinInt64)}).Error; err != nil {
+		t.Fatal(err)
+	}
+	_, count, err := (&InboundService{}).disableInvalidInbounds(db)
+	if err != nil || count != 1 {
+		t.Fatalf("count=%d err=%v", count, err)
+	}
+}
+
+func TestInboundDepletionSumDoesNotOverflow(t *testing.T) {
+	setupBulkDB(t)
+	db := database.GetDB()
+	ib := mkInbound(t, 29228, model.VLESS, `{"clients":[]}`)
+	if err := db.Model(&model.Inbound{}).Where("id = ?", ib.Id).Updates(map[string]any{"enable": true, "total": int64(math.MaxInt64), "up": int64(math.MaxInt64 - 5), "down": int64(10)}).Error; err != nil {
+		t.Fatal(err)
+	}
+	_, count, err := (&InboundService{}).disableInvalidInbounds(db)
+	if err != nil || count != 1 {
+		t.Fatalf("count=%d err=%v", count, err)
 	}
 }
