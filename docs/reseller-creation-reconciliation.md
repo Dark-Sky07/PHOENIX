@@ -309,3 +309,6 @@ markers, local fallback files or in-process observations exist, and warns when
 the summary cannot be checked. It exposes only counts/flags, not client
 identities or traffic values. A clear summary is not proof of complete traffic;
 it cannot see incidents not yet detected or fallback files on another host.
+An absent or malformed incident summary is also treated as unavailable by the
+administrator dashboard (including when an older backend returns no summary).
+It is not interpreted as evidence that there are no incidents.

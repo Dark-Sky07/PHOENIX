@@ -40,3 +40,25 @@ func TestCounterIncidentStatusDoesNotTreatUnavailableAsClear(t *testing.T) {
 		t.Fatal("pending in-memory observation was hidden")
 	}
 }
+
+func TestCounterIncidentStatusStorageErrorsAreUnavailable(t *testing.T) {
+	setupConflictDB(t)
+	db := database.GetDB()
+	// A file in place of the fallback directory makes inspection fail even when
+	// the database is healthy. Do not report a clear summary in this case.
+	if err := os.WriteFile(counterIncidentDir(), []byte("not a directory"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := readCounterIncidentStatus(db); got.Available {
+		t.Fatalf("failed fallback inspection reported available: %+v", got)
+	}
+	if err := os.Remove(counterIncidentDir()); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Migrator().DropTable(&model.ResellerNodeCounterIncident{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readCounterIncidentStatus(db); got.Available {
+		t.Fatalf("failed database query reported available: %+v", got)
+	}
+}

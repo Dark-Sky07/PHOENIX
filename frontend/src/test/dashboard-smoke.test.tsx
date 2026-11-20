@@ -235,6 +235,18 @@ describe('smoke: redesigned pages', () => {
     expect(container.querySelector('.ant-alert-error')).toBeNull();
   });
 
+  it('treats absent or malformed incident data as unavailable', async () => {
+    const { default: IndexPage } = await import('@/pages/index/IndexPage');
+    const inputs = [undefined, null, {}, { available: true, databaseCount: -1, fallbackPresent: false, pendingInProcess: false },
+      { available: 'true', databaseCount: 0, fallbackPresent: false, pendingInProcess: false }];
+    for (const input of inputs) {
+      statusObj.counterIncidents = input as never;
+      const { container } = wrap(<IndexPage />);
+      expect(container.querySelector('.ant-alert-error')).toBeTruthy();
+      cleanup();
+    }
+  });
+
   it('renders the inbounds page without runtime errors', async () => {
     const { default: InboundsPage } = await import('@/pages/inbounds/InboundsPage');
     const { container } = wrap(<InboundsPage />);

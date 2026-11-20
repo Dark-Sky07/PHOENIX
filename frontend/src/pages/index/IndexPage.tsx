@@ -340,13 +340,13 @@ export default function IndexPage() {
                     description={t('pages.index.resellerTrafficWarningDescription')}
                   />
 
-                  {status.counterIncidents && (!status.counterIncidents.available || status.counterIncidents.databaseCount > 0 || status.counterIncidents.fallbackPresent || status.counterIncidents.pendingInProcess) && (
+                  {(!status.counterIncidents?.available || status.counterIncidents.databaseCount > 0 || status.counterIncidents.fallbackPresent || status.counterIncidents.pendingInProcess) && (
                     <Alert
                       className="reseller-traffic-warning"
                       type="error"
                       showIcon
                       message={t('pages.index.counterIncidentTitle')}
-                      description={status.counterIncidents.available
+                      description={status.counterIncidents?.available
                         ? t('pages.index.counterIncidentDescription', { count: status.counterIncidents.databaseCount })
                         : t('pages.index.counterIncidentUnavailable')}
                     />

@@ -1,4 +1,5 @@
 import { NumberFormatter } from '@/utils';
+import { CounterIncidentStatusSchema } from '@/schemas/status';
 
 export class CurTotal {
   current: number;
@@ -119,7 +120,11 @@ export class Status {
 
   constructor(data?: StatusInput | null) {
     if (data == null) return;
-    this.counterIncidents = data.counterIncidents;
+    // parseMsg deliberately returns raw data on schema failure. Validate this
+    // safety signal independently so malformed or older responses are unknown,
+    // never silently interpreted as a clean incident status.
+    const incidents = CounterIncidentStatusSchema.safeParse(data.counterIncidents);
+    this.counterIncidents = incidents.success ? incidents.data : undefined;
 
     this.cpu = new CurTotal(data.cpu ?? 0, 100);
     this.cpuCores = data.cpuCores ?? 0;

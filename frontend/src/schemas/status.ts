@@ -41,13 +41,15 @@ export const DaemonInfoSchema = z.object({
   manualStop: z.boolean(),
 }).partial();
 
+export const CounterIncidentStatusSchema = z.object({
+  available: z.boolean(),
+  databaseCount: z.number().int().nonnegative(),
+  fallbackPresent: z.boolean(),
+  pendingInProcess: z.boolean(),
+});
+
 export const StatusSchema = z.object({
-  counterIncidents: z.object({
-    available: z.boolean(),
-    databaseCount: z.number(),
-    fallbackPresent: z.boolean(),
-    pendingInProcess: z.boolean(),
-  }).optional(),
+  counterIncidents: CounterIncidentStatusSchema.optional(),
   cpu: z.number().optional(),
   cpuCores: z.number().optional(),
   logicalPro: z.number().optional(),
