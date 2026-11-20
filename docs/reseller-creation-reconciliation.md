@@ -96,3 +96,9 @@ identities stop replay and retain the journal for manual reconciliation even
 when the ambiguous identity did not change. An operator must investigate the
 counter and owner records before resuming collection; this does not recover
 traffic lost before a journal was written.
+
+Xray polls reject duplicate or negative traffic counters and malformed nil
+entries before advancing any in-memory baseline, so a later valid poll can
+retry that interval. Other, non-traffic statistics are ignored. This protects
+against malformed responses while the same core remains available; it does
+not make counters durable across a core crash or stop.

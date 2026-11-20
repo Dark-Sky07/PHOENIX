@@ -93,3 +93,47 @@ func TestGetTrafficCapturesFirstManagedIntervalAndRetainsBaselineOnError(t *test
 		t.Fatal("stats poll reset runtime counters")
 	}
 }
+
+func TestGetTrafficRejectsMalformedPollWithoutAdvancingBaselines(t *testing.T) {
+	const uplink = "user>>>alice@example.test>>>traffic>>>uplink"
+	const downlink = "user>>>alice@example.test>>>traffic>>>downlink"
+	for _, tc := range []struct {
+		name string
+		bad  []*statsService.Stat
+	}{
+		{"negative", []*statsService.Stat{{Name: uplink, Value: 120}, {Name: downlink, Value: -1}}},
+		{"duplicate", []*statsService.Stat{{Name: uplink, Value: 120}, {Name: uplink, Value: 110}}},
+		{"nil entry", []*statsService.Stat{{Name: uplink, Value: 120}, nil}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeTrafficStatsClient{}
+			var client statsService.StatsServiceClient = fake
+			api := &XrayAPI{grpcClient: &grpc.ClientConn{}, StatsServiceClient: &client}
+			api.ResetTrafficBaseline(true)
+			fake.response = &statsService.QueryStatsResponse{Stat: []*statsService.Stat{{Name: uplink, Value: 100}, {Name: downlink, Value: 50}}}
+			if _, _, err := api.GetTraffic(); err != nil {
+				t.Fatal(err)
+			}
+			fake.response = &statsService.QueryStatsResponse{Stat: tc.bad}
+			if _, _, err := api.GetTraffic(); err == nil {
+				t.Fatal("invalid poll accepted")
+			}
+			fake.response = &statsService.QueryStatsResponse{Stat: []*statsService.Stat{{Name: uplink, Value: 130}, {Name: downlink, Value: 60}}}
+			_, rows, err := api.GetTraffic()
+			if err != nil || len(rows) != 1 || rows[0].Up != 30 || rows[0].Down != 10 {
+				t.Fatalf("retry lost or double counted traffic: %+v %v", rows, err)
+			}
+		})
+	}
+}
+
+func TestGetTrafficIgnoresNonTrafficStats(t *testing.T) {
+	fake := &fakeTrafficStatsClient{response: &statsService.QueryStatsResponse{Stat: []*statsService.Stat{{Name: "prefix user>>>alice>>>traffic>>>uplink suffix", Value: 7}, {Name: "some-other-metric", Value: 42}}}}
+	var client statsService.StatsServiceClient = fake
+	api := &XrayAPI{grpcClient: &grpc.ClientConn{}, StatsServiceClient: &client}
+	api.ResetTrafficBaseline(true)
+	traffic, clients, err := api.GetTraffic()
+	if err != nil || len(traffic) != 0 || len(clients) != 0 || len(api.StatsLastValues) != 0 {
+		t.Fatalf("unexpected stats: %+v %+v %v", traffic, clients, err)
+	}
+}

@@ -548,14 +548,14 @@ func (x *XrayAPI) RemoveUser(inboundTag, email string) error {
 	return nil
 }
 
-// GetTraffic queries traffic statistics from the Xray core, optionally resetting counters.
+// GetTraffic queries traffic statistics from the Xray core without resetting counters.
 func (x *XrayAPI) GetTraffic() ([]*Traffic, []*ClientTraffic, error) {
 	if x.grpcClient == nil {
 		return nil, nil, common.NewError("xray api is not initialized")
 	}
 
-	trafficRegex := regexp.MustCompile(`(inbound|outbound)>>>([^>]+)>>>traffic>>>(downlink|uplink)`)
-	clientTrafficRegex := regexp.MustCompile(`user>>>([^>]+)>>>traffic>>>(downlink|uplink)`)
+	trafficRegex := regexp.MustCompile(`^(inbound|outbound)>>>([^>]+)>>>traffic>>>(downlink|uplink)$`)
+	clientTrafficRegex := regexp.MustCompile(`^user>>>([^>]+)>>>traffic>>>(downlink|uplink)$`)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
 	defer cancel()
@@ -569,19 +569,46 @@ func (x *XrayAPI) GetTraffic() ([]*Traffic, []*ClientTraffic, error) {
 		logger.Debug("Failed to query Xray stats:", err)
 		return nil, nil, err
 	}
+	if resp == nil {
+		return nil, nil, fmt.Errorf("empty Xray stats response")
+	}
 
 	tagTrafficMap := make(map[string]*Traffic)
 	emailTrafficMap := make(map[string]*ClientTraffic)
 
+	// Validate the entire relevant response before advancing any baseline.
+	// A duplicate or negative counter makes this poll ambiguous; accepting a
+	// partial response would make its remaining deltas impossible to retry.
+	seen := make(map[string]struct{})
 	for _, stat := range resp.GetStat() {
+		if stat == nil {
+			return nil, nil, fmt.Errorf("nil Xray statistic")
+		}
+		if !trafficRegex.MatchString(stat.Name) && !clientTrafficRegex.MatchString(stat.Name) {
+			continue
+		}
+		if stat.Value < 0 {
+			return nil, nil, fmt.Errorf("negative Xray traffic counter %q", stat.Name)
+		}
+		if _, ok := seen[stat.Name]; ok {
+			return nil, nil, fmt.Errorf("duplicate Xray traffic counter %q", stat.Name)
+		}
+		seen[stat.Name] = struct{}{}
+	}
+	for _, stat := range resp.GetStat() {
+		tagMatches := trafficRegex.FindStringSubmatch(stat.Name)
+		clientMatches := clientTrafficRegex.FindStringSubmatch(stat.Name)
+		if len(tagMatches) != 4 && len(clientMatches) != 3 {
+			continue
+		}
 		value, include := x.trafficCounterDelta(stat.Name, stat.Value)
 		if !include {
 			continue
 		}
-		if matches := trafficRegex.FindStringSubmatch(stat.Name); len(matches) == 4 {
-			processTraffic(matches, value, tagTrafficMap)
-		} else if matches := clientTrafficRegex.FindStringSubmatch(stat.Name); len(matches) == 3 {
-			processClientTraffic(matches, value, emailTrafficMap)
+		if len(tagMatches) == 4 {
+			processTraffic(tagMatches, value, tagTrafficMap)
+		} else {
+			processClientTraffic(clientMatches, value, emailTrafficMap)
 		}
 	}
 	x.statsBaselineReady = true
