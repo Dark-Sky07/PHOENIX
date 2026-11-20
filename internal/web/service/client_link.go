@@ -13,17 +13,40 @@ import (
 )
 
 func (s *ClientService) SyncInbound(tx *gorm.DB, inboundId int, clients []model.Client) error {
-	return s.syncInbound(tx, inboundId, clients, false)
+	return s.syncInbound(tx, inboundId, clients, false, nil)
 }
 
 // SyncInboundPreservingExisting rebuilds only the association rows for an
 // imported inbound. Existing ClientRecord rows remain authoritative; clients
 // absent from the canonical table are created from the imported payload.
 func (s *ClientService) SyncInboundPreservingExisting(tx *gorm.DB, inboundId int, clients []model.Client) error {
-	return s.syncInbound(tx, inboundId, clients, true)
+	return s.syncInbound(tx, inboundId, clients, true, nil)
 }
 
-func (s *ClientService) syncInbound(tx *gorm.DB, inboundId int, clients []model.Client, preserveExisting bool) error {
+// syncNodeInbound preserves canonical reseller-owned records while maintaining
+// node links. Remote snapshot metadata is not authority to rewrite their
+// credentials, renewal schedule or quota.
+func (s *ClientService) syncNodeInbound(tx *gorm.DB, inboundId int, clients []model.Client) error {
+	keys := make([]string, 0, len(clients))
+	for _, client := range clients {
+		if key := transferEmailKey(client.Email); key != "" {
+			keys = append(keys, key)
+		}
+	}
+	protected := make(map[string]bool)
+	for _, batch := range chunkStrings(keys, sqlInChunk) {
+		var mappings []model.ResellerClient
+		if err := tx.Where("LOWER(TRIM(email)) IN ?", batch).Find(&mappings).Error; err != nil {
+			return err
+		}
+		for _, mapping := range mappings {
+			protected[transferEmailKey(mapping.Email)] = true
+		}
+	}
+	return s.syncInbound(tx, inboundId, clients, false, protected)
+}
+
+func (s *ClientService) syncInbound(tx *gorm.DB, inboundId int, clients []model.Client, preserveExisting bool, protected map[string]bool) error {
 	if tx == nil {
 		tx = database.GetDB()
 	}
@@ -113,7 +136,7 @@ func (s *ClientService) syncInbound(tx *gorm.DB, inboundId int, clients []model.
 		}
 
 		idByEmail[key] = row.Id
-		if preserveExisting {
+		if preserveExisting || protected[transferEmailKey(email)] {
 			continue
 		}
 

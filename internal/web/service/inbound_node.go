@@ -787,8 +787,8 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 				}
 			}
 		}
-		if err := s.clientService.SyncInbound(tx, c.Id, filtered); err != nil {
-			logger.Warningf("setRemoteTraffic: sync clients for tag %q failed: %v", snapIb.Tag, err)
+		if err := s.clientService.syncNodeInbound(tx, c.Id, filtered); err != nil {
+			return false, fmt.Errorf("sync node clients for tag %q: %w", snapIb.Tag, err)
 		}
 	}
 

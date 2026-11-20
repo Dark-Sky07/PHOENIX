@@ -3,9 +3,11 @@ package service
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
 	"github.com/Dark-Sky07/phoenix/internal/web/runtime"
+	"github.com/Dark-Sky07/phoenix/internal/xray"
 	"gorm.io/gorm"
 )
 
@@ -42,8 +44,31 @@ func validateNodeResellerSnapshot(tx *gorm.DB, nodeID int, snap *runtime.Traffic
 	if len(attached) == 0 {
 		return nil
 	}
+	keys := make([]string, 0, len(attached))
+	seenKeys := make(map[string]bool, len(attached))
+	for _, link := range attached {
+		key := nodeEmailKey(link.Email)
+		if !seenKeys[key] {
+			seenKeys[key] = true
+			keys = append(keys, key)
+		}
+	}
+	localStats := make(map[string]xray.ClientTraffic, len(keys))
+	for _, batch := range chunkStrings(keys, sqlInChunk) {
+		var rows []xray.ClientTraffic
+		if err := tx.Where("LOWER(TRIM(email)) IN ?", batch).Find(&rows).Error; err != nil {
+			return err
+		}
+		for _, row := range rows {
+			key := nodeEmailKey(row.Email)
+			if _, exists := localStats[key]; exists {
+				return fmt.Errorf("ambiguous reseller traffic for %q", key)
+			}
+			localStats[key] = row
+		}
+	}
 	byInbound := make(map[int]*model.Inbound)
-	stats := make(map[string][]int64)
+	stats := make(map[string][]xray.ClientTraffic)
 	for _, remote := range snap.Inbounds {
 		if remote == nil {
 			continue
@@ -56,10 +81,11 @@ func validateNodeResellerSnapshot(tx *gorm.DB, nodeID int, snap *runtime.Traffic
 		}
 		for _, traffic := range remote.ClientStats {
 			key := nodeEmailKey(traffic.Email)
-			stats[key] = append(stats[key], traffic.Total)
+			stats[key] = append(stats[key], traffic)
 		}
 	}
-	clientsByInbound := make(map[int]map[string]int64)
+	clientsByInbound := make(map[int]map[string]model.Client)
+	originalByInbound := make(map[int]map[string]model.Client)
 	for _, link := range attached {
 		key := nodeEmailKey(link.Email)
 		remote := byInbound[link.InboundID]
@@ -78,7 +104,7 @@ func validateNodeResellerSnapshot(tx *gorm.DB, nodeID int, snap *runtime.Traffic
 				if err := json.Unmarshal([]byte(remote.Settings), &settings); err != nil || settings.Clients == nil {
 					return fmt.Errorf("invalid node client settings for inbound %d; manual reconciliation required", link.InboundID)
 				}
-				clients = make(map[string]int64, len(settings.Clients))
+				clients = make(map[string]model.Client, len(settings.Clients))
 				for _, client := range settings.Clients {
 					k := nodeEmailKey(client.Email)
 					if k == "" {
@@ -87,20 +113,51 @@ func validateNodeResellerSnapshot(tx *gorm.DB, nodeID int, snap *runtime.Traffic
 					if _, duplicate := clients[k]; duplicate {
 						return fmt.Errorf("duplicate node client in inbound %d", link.InboundID)
 					}
-					clients[k] = client.TotalGB
+					clients[k] = client
 				}
 				clientsByInbound[link.InboundID] = clients
 			}
-			if quota, ok := clients[key]; !ok || quota != link.TotalGB {
+			client, ok := clients[key]
+			if !ok || client.TotalGB != link.TotalGB {
 				return fmt.Errorf("reseller client %q missing or changed node quota; manual reconciliation required", link.Email)
+			}
+			original, ok := originalByInbound[link.InboundID]
+			if !ok {
+				var stored model.Inbound
+				if err := tx.Select("settings").First(&stored, link.InboundID).Error; err != nil {
+					return err
+				}
+				var settings struct {
+					Clients []model.Client `json:"clients"`
+				}
+				if err := json.Unmarshal([]byte(stored.Settings), &settings); err != nil || settings.Clients == nil {
+					return fmt.Errorf("invalid stored reseller inbound %d settings", link.InboundID)
+				}
+				original = make(map[string]model.Client, len(settings.Clients))
+				for _, entry := range settings.Clients {
+					key := nodeEmailKey(entry.Email)
+					if _, dup := original[key]; dup {
+						return fmt.Errorf("ambiguous stored reseller inbound %d settings", link.InboundID)
+					}
+					original[key] = entry
+				}
+				originalByInbound[link.InboundID] = original
+			}
+			prior, ok := original[key]
+			if !ok || !sameNodeResellerClientSecurity(prior, client) {
+				return fmt.Errorf("reseller client %q node settings changed; manual reconciliation required", link.Email)
 			}
 			if len(stats[key]) == 0 {
 				return fmt.Errorf("reseller client %q missing node traffic; manual reconciliation required", link.Email)
 			}
 		}
-		for _, quota := range stats[key] {
-			if quota != link.TotalGB {
-				return fmt.Errorf("reseller client %q node traffic quota mismatch; manual reconciliation required", link.Email)
+		local, exists := localStats[key]
+		if !exists {
+			return fmt.Errorf("reseller client %q has no local traffic counter; manual reconciliation required", link.Email)
+		}
+		for _, traffic := range stats[key] {
+			if traffic.Total != link.TotalGB || traffic.ExpiryTime != local.ExpiryTime || traffic.Reset != local.Reset {
+				return fmt.Errorf("reseller client %q node traffic limits changed; manual reconciliation required", link.Email)
 			}
 		}
 	}
@@ -178,4 +235,17 @@ func rejectNewNodeResellerAssociations(tx *gorm.DB, snap *runtime.TrafficSnapsho
 		}
 	}
 	return nil
+}
+
+// Node display metadata may change independently, but authorization, quota,
+// expiry and renewal settings must match the last accepted inbound snapshot.
+func sameNodeResellerClientSecurity(a, b model.Client) bool {
+	a.Email, b.Email = nodeEmailKey(a.Email), nodeEmailKey(b.Email)
+	a.Comment, b.Comment = "", ""
+	a.Group, b.Group = "", ""
+	a.CreatedAt, b.CreatedAt = 0, 0
+	a.UpdatedAt, b.UpdatedAt = 0, 0
+	a.SubLastUpdatedAt, b.SubLastUpdatedAt = 0, 0
+	a.SubLastUserAgent, b.SubLastUserAgent = "", ""
+	return reflect.DeepEqual(a, b)
 }

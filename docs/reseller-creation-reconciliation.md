@@ -137,3 +137,11 @@ client rows within an inbound, and corrupt or ambiguous stored baselines for
 reported clients before applying the snapshot. Delta additions saturate rather
 than wrap. Rejected snapshots require investigation and can stall collection;
 they do not establish a trustworthy final reading from the remote node.
+
+For already-attached reseller clients, node sync also checks authorization and
+renewal fields against the last accepted inbound settings and checks traffic
+expiry/reset values against the local counter. Unexpected changes pause sync
+for manual reconciliation. Node sync preserves the canonical reseller client
+record rather than overwriting its credentials or renewal settings, and rolls
+back on link synchronization errors. These checks cannot undo a change already
+applied directly on a node or establish its final traffic.
