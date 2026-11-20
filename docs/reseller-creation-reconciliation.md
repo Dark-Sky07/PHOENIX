@@ -42,3 +42,10 @@ This closes the identity-change race only for paths that take that lock. It
 cannot fence a lost PostgreSQL lock session, cover unrelated runtime operations,
 or recover traffic lost if the process crashes before its journal is durable.
 Never assume this mechanism accounts for unpolled usage at deletion.
+
+The Xray traffic baseline is shared across service instances in one panel
+process. Because the panel creates its managed core rather than attaching to an
+existing core, a new managed process is counted from zero, including its first
+poll; replacing a job does not recount the same core. This does not recover
+unpolled bytes when the core stops, or bridge the crash window before a batch is
+journaled, and does not coordinate independently managed external cores.

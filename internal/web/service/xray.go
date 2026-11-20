@@ -28,7 +28,26 @@ var (
 	isNeedXrayRestart atomic.Bool // Indicates that restart was requested for Xray
 	isManuallyStopped atomic.Bool // Indicates that Xray was stopped manually from the panel
 	result            string
+	// One baseline per panel process, shared by every XrayService instance.
+	// Both fields are protected by lock, which also protects process changes.
+	trafficState xrayTrafficState
 )
+
+type xrayTrafficState struct {
+	api     xray.XrayAPI
+	process *xray.Process
+}
+
+// observeProcess is called under lock. The only assignment to p starts a new
+// managed core; it never attaches to an existing process, so its counters begin
+// at zero. Sharing this state prevents a replacement job from counting the
+// same core's cumulative counters twice.
+func (t *xrayTrafficState) observeProcess(current *xray.Process) {
+	if t.process != current {
+		t.api.ResetTrafficBaseline(true)
+		t.process = current
+	}
+}
 
 // XrayService provides business logic for Xray process management.
 // It handles starting, stopping, restarting Xray, and managing its configuration.
@@ -36,9 +55,6 @@ type XrayService struct {
 	inboundService InboundService
 	settingService SettingService
 	xrayAPI        xray.XrayAPI
-	trafficAPI     xray.XrayAPI
-	trafficMu      sync.Mutex
-	trafficProcess *xray.Process
 }
 
 // IsXrayRunning checks if the Xray process is currently running.
@@ -920,10 +936,8 @@ func resolveXrayLogPaths(logCfg json_util.RawMessage) json_util.RawMessage {
 
 // GetXrayTraffic fetches the current traffic statistics from the running Xray process.
 func (s *XrayService) GetXrayTraffic() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
-	// Polls can overlap when a slow RPC exceeds the cron interval. Keep the
-	// counter baseline and dedicated connection private to one poll at a time.
-	s.trafficMu.Lock()
-	defer s.trafficMu.Unlock()
+	// The process lock serializes polls across all service instances, as well
+	// as process replacement. The dedicated API shares its baseline globally.
 	lock.Lock()
 	defer lock.Unlock()
 	current := p
@@ -932,18 +946,13 @@ func (s *XrayService) GetXrayTraffic() ([]*xray.Traffic, []*xray.ClientTraffic, 
 		logger.Debug("Attempted to fetch Xray traffic, but Xray is not running:", err)
 		return nil, nil, err
 	}
-	if s.trafficProcess != current {
-		// The first observation might attach to an already-running core, so
-		// baseline it. Subsequent process replacements start fresh counters.
-		s.trafficAPI.ResetTrafficBaseline(s.trafficProcess != nil)
-		s.trafficProcess = current
-	}
-	if err := s.trafficAPI.Init(current.GetAPIPort()); err != nil {
+	trafficState.observeProcess(current)
+	if err := trafficState.api.Init(current.GetAPIPort()); err != nil {
 		logger.Debug("Failed to initialize Xray API:", err)
 		return nil, nil, err
 	}
-	defer s.trafficAPI.Close()
-	traffic, clientTraffic, err := s.trafficAPI.GetTraffic()
+	defer trafficState.api.Close()
+	traffic, clientTraffic, err := trafficState.api.GetTraffic()
 	if err != nil {
 		logger.Debug("Failed to fetch Xray traffic:", err)
 		return nil, nil, err
