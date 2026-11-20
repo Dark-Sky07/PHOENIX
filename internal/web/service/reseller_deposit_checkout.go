@@ -107,6 +107,9 @@ func (s *ResellerDepositCheckoutService) CreateOrder(token string, amount float6
 	if err != nil {
 		return nil, err
 	}
+	if _, ok := currency.Normalize(cfg.currency); !ok {
+		return nil, common.NewError("checkout currency is invalid")
+	}
 	amount = RoundMoney(amount, cfg.currency)
 	if amount <= 0 {
 		return nil, common.NewError("amount is below the minimum unit for ", cfg.currency)
@@ -127,6 +130,7 @@ func (s *ResellerDepositCheckoutService) CreateOrder(token string, amount float6
 		TargetType: "reseller_deposit",
 		TargetRef:  reseller.Username,
 		Amount:     amount,
+		Currency:   cfg.currency,
 		Status:     "pending",
 	}
 	if err := db.Create(order).Error; err != nil {

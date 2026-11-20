@@ -110,6 +110,13 @@ func (s *PaymentWebhookService) processClientRenewalPayment(p PaymentWebhookPayl
 	}
 	var settingSvc SettingService
 	currency, _ := settingSvc.GetCheckoutCurrency()
+	if order.Currency != "" {
+		var ok bool
+		currency, ok = moneycurrency.Normalize(order.Currency)
+		if !ok {
+			return nil, errors.New("invalid order currency; administrator reconciliation required")
+		}
+	}
 	tolerance := 0.5 / math.Pow10(moneycurrency.FractionDigits(currency))
 	if math.IsNaN(order.Amount) || math.IsInf(order.Amount, 0) || order.Amount < 0 || (order.Amount > 0 && (p.Amount <= 0 || math.Abs(p.Amount-order.Amount) > tolerance)) {
 		return nil, errors.New("webhook amount does not match pending order")

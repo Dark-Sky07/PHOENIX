@@ -37,3 +37,12 @@ the currency rounding tolerance). An omitted, zero, negative or mismatching
 amount is rejected. Existing integrations that previously omitted the amount
 must send it. The signed callback and matching amount alone do not independently
 verify payment with a gateway; secure and verify the gateway integration.
+
+New public checkout orders retain the configured currency at order creation,
+so later settings changes do not alter their amount-comparison precision.
+A reseller deposit whose recorded currency differs from the current wallet
+currency is not credited automatically; reconcile or refund it without assuming
+an exchange rate. Orders created before currency snapshots have no reliable
+currency evidence and continue to use the current setting for compatibility;
+operators must inspect their gateway records before processing them after a
+currency change. The callback does not itself carry verified currency evidence.

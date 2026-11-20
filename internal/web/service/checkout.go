@@ -226,6 +226,9 @@ func (s *CheckoutService) CreateOrder(email string, gb int64, months int) (*Chec
 	if err != nil {
 		return nil, err
 	}
+	if _, ok := moneycurrency.Normalize(cfg.currency); !ok {
+		return nil, common.NewError("checkout currency is invalid")
+	}
 	if math.IsNaN(cfg.pricePerGB) || math.IsInf(cfg.pricePerGB, 0) || cfg.pricePerGB < 0 || math.IsNaN(cfg.pricePerMon) || math.IsInf(cfg.pricePerMon, 0) || cfg.pricePerMon < 0 {
 		return nil, common.NewError("checkout prices are invalid")
 	}
@@ -269,6 +272,7 @@ func (s *CheckoutService) CreateOrder(email string, gb int64, months int) (*Chec
 		TargetType: "client_renew",
 		TargetRef:  email,
 		Amount:     amount,
+		Currency:   cfg.currency,
 		AddGB:      gb,
 		AddDays:    months * 30,
 		Status:     "pending",

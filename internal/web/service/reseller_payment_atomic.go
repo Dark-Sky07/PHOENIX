@@ -22,8 +22,10 @@ func (s *PaymentWebhookService) processResellerPayment(p PaymentWebhookPayload) 
 		return nil, errors.New("invalid payment amount")
 	}
 	var settings SettingService
-	currency, _ := settings.GetCheckoutCurrency()
-	if code, ok := moneycurrency.Normalize(currency); ok {
+	currency, currencyErr := settings.GetCheckoutCurrency()
+	code, validCurrency := moneycurrency.Normalize(currency)
+	validCurrency = validCurrency && currencyErr == nil
+	if validCurrency {
 		currency = code
 	} else {
 		currency = "USD"
@@ -53,6 +55,16 @@ func (s *PaymentWebhookService) processResellerPayment(p PaymentWebhookPayload) 
 		}
 		if result.Status != "pending" {
 			return errors.New("order is not pending")
+		}
+		if result.Currency != "" {
+			orderCurrency, ok := moneycurrency.Normalize(result.Currency)
+			if !ok {
+				return errors.New("invalid order currency; administrator reconciliation required")
+			}
+			if result.TargetType == "reseller_deposit" && (!validCurrency || orderCurrency != currency) {
+				return errors.New("deposit currency changed; administrator reconciliation required")
+			}
+			tolerance = 0.5 / math.Pow10(moneycurrency.FractionDigits(orderCurrency))
 		}
 		if result.Amount > 0 && (p.Amount <= 0 || math.Abs(p.Amount-result.Amount) > tolerance) {
 			return errors.New("webhook amount does not match pending order")

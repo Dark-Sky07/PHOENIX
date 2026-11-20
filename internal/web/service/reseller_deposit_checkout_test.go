@@ -56,6 +56,10 @@ func TestResellerDepositCheckoutWebhookAndToken(t *testing.T) {
 	if order.Amount != 25.57 || order.Currency != "USD" || order.GatewayURL == "" || order.OrderId == "" {
 		t.Fatalf("unexpected deposit order: %+v", order)
 	}
+	var stored model.PaymentOrder
+	if err := database.GetDB().Where("order_id = ?", order.OrderId).First(&stored).Error; err != nil || stored.Currency != "USD" {
+		t.Fatalf("deposit currency snapshot: %+v, err=%v", stored, err)
+	}
 	status, err := svc.Status(token, order.OrderId, secret, now)
 	if err != nil || status != "pending" {
 		t.Fatalf("initial Status = %q, err=%v", status, err)

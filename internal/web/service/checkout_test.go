@@ -402,3 +402,65 @@ func TestPricedPaymentOrdersRequireConfirmedAmount(t *testing.T) {
 		})
 	}
 }
+
+func TestCheckoutCurrencySnapshotSurvivesSettingChange(t *testing.T) {
+	setupBulkDB(t)
+	email := seedCheckoutClient(t)
+	enableCheckout(t, 10, 1)
+	order, err := (&CheckoutService{}).CreateOrder(email, 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := database.GetDB()
+	var stored model.PaymentOrder
+	if err := db.Where("order_id = ?", order.OrderId).First(&stored).Error; err != nil || stored.Currency != "USD" {
+		t.Fatalf("currency snapshot: %+v %v", stored, err)
+	}
+	if err := (&SettingService{}).setString("checkoutCurrency", "JPY"); err != nil {
+		t.Fatal(err)
+	}
+	svc := &PaymentWebhookService{}
+	if _, err := svc.ProcessWebhook(PaymentWebhookPayload{OrderId: order.OrderId, Amount: 10.1}); err == nil {
+		t.Fatal("used changed currency tolerance for old order")
+	}
+	if err := db.First(&stored, stored.Id).Error; err != nil || stored.Status != "pending" {
+		t.Fatalf("changed order: %+v %v", stored, err)
+	}
+	if _, err := svc.ProcessWebhook(PaymentWebhookPayload{OrderId: order.OrderId, Amount: 10}); err != nil {
+		t.Fatalf("valid payment rejected: %v", err)
+	}
+}
+
+func TestDepositCurrencyChangeRequiresReconciliation(t *testing.T) {
+	setupBulkDB(t)
+	db := database.GetDB()
+	enableCheckout(t, 1, 1)
+	r := model.Reseller{Username: "currency-check", Password: "hash", Enable: true, TrafficLimit: 1}
+	if err := db.Create(&r).Error; err != nil {
+		t.Fatal(err)
+	}
+	order := model.PaymentOrder{OrderId: "currency-deposit", TargetType: "reseller_deposit", TargetRef: r.Username, Amount: 10, Currency: "USD", Status: "pending"}
+	if err := db.Create(&order).Error; err != nil {
+		t.Fatal(err)
+	}
+	settings := &SettingService{}
+	if err := settings.setString("checkoutCurrency", "JPY"); err != nil {
+		t.Fatal(err)
+	}
+	svc := &PaymentWebhookService{}
+	if _, err := svc.ProcessWebhook(PaymentWebhookPayload{OrderId: order.OrderId, Amount: 10}); err == nil {
+		t.Fatal("credited deposit in a different currency")
+	}
+	if err := db.First(&order, order.Id).Error; err != nil || order.Status != "pending" {
+		t.Fatalf("changed order: %+v %v", order, err)
+	}
+	if err := db.First(&r, r.Id).Error; err != nil || r.Deposit != 0 {
+		t.Fatalf("changed deposit: %+v %v", r, err)
+	}
+	if err := settings.setString("checkoutCurrency", "USD"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ProcessWebhook(PaymentWebhookPayload{OrderId: order.OrderId, Amount: 10}); err != nil {
+		t.Fatalf("original currency rejected: %v", err)
+	}
+}
