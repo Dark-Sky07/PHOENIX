@@ -57,6 +57,9 @@ func validateResellerNodeBaselines(tx *gorm.DB, resellerID int) error {
 // A nil email slice checks all mappings. A non-nil batch checks only those
 // mappings so an unrelated reseller's incident does not block a no-op.
 func rejectResellerNodeIncidents(tx *gorm.DB, resellerID int, emails []string) error {
+	if xrayCounterIncidentPending.Load() {
+		return fmt.Errorf("local Xray incident persistence pending; manual reconciliation required")
+	}
 	if emails != nil && len(emails) == 0 {
 		return nil
 	}
@@ -80,6 +83,9 @@ func rejectResellerNodeIncidents(tx *gorm.DB, resellerID int, emails []string) e
 // in the accounting transaction. A marker stays significant even if ownership
 // has already drifted or the canonical client record is missing.
 func rejectClientNodeIncidents(tx *gorm.DB, emails []string) error {
+	if xrayCounterIncidentPending.Load() {
+		return fmt.Errorf("local Xray incident persistence pending; client removal blocked")
+	}
 	keys := make([]string, 0, len(emails))
 	for _, email := range emails {
 		if key := transferEmailKey(email); key != "" {
@@ -101,6 +107,9 @@ func rejectClientNodeIncidents(tx *gorm.DB, emails []string) error {
 // Inbound removal affects runtime and links before its DB cleanup. Check all
 // three identity sources first, including older settings-only associations.
 func rejectInboundNodeIncidents(tx *gorm.DB, inbound *model.Inbound) error {
+	if xrayCounterIncidentPending.Load() {
+		return fmt.Errorf("local Xray incident persistence pending; inbound removal blocked")
+	}
 	var incidents int64
 	if err := tx.Table("reseller_node_counter_incidents").Count(&incidents).Error; err != nil {
 		return err

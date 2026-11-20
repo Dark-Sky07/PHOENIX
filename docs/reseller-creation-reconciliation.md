@@ -211,3 +211,10 @@ Collection and affected reseller quota/removal are blocked until manual review.
 This protects a detected reset, not crashes before detection, unpolled bytes,
 or resets whose new counter already exceeds the last reading. If the incident
 cannot be persisted, only the error is reported; a crash can lose the warning.
+
+If writing a detected local Xray counter incident fails, the panel retains the
+original observation in memory and retries its persistence before polling again,
+even when the managed core changes. A process crash can still lose this pending
+observation. During a failed write, this panel process blocks participating
+quota, client removal and inbound deletion checks; other processes are not
+fenced, so this is not a durable or cross-process safety scheme.

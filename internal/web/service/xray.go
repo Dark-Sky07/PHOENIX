@@ -26,19 +26,21 @@ import (
 )
 
 var (
-	p                 *xray.Process
-	lock              sync.Mutex
-	isNeedXrayRestart atomic.Bool // Indicates that restart was requested for Xray
-	isManuallyStopped atomic.Bool // Indicates that Xray was stopped manually from the panel
-	result            string
+	p                          *xray.Process
+	lock                       sync.Mutex
+	isNeedXrayRestart          atomic.Bool // Indicates that restart was requested for Xray
+	isManuallyStopped          atomic.Bool // Indicates that Xray was stopped manually from the panel
+	xrayCounterIncidentPending atomic.Bool // Local in-memory barrier until persistence succeeds.
+	result                     string
 	// One baseline per panel process, shared by every XrayService instance.
-	// Both fields are protected by lock, which also protects process changes.
+	// The state is protected by lock, which also protects process changes.
 	trafficState xrayTrafficState
 )
 
 type xrayTrafficState struct {
-	api     xray.XrayAPI
-	process *xray.Process
+	api                    xray.XrayAPI
+	process                *xray.Process
+	pendingCounterDecrease *xray.UserTrafficCounterDecrease
 }
 
 // observeProcess is called under lock. The only assignment to p starts a new
@@ -943,6 +945,11 @@ func (s *XrayService) GetXrayTraffic() ([]*xray.Traffic, []*xray.ClientTraffic, 
 	// as process replacement. The dedicated API shares its baseline globally.
 	lock.Lock()
 	defer lock.Unlock()
+	// Do not poll again or discard the evidence on a core replacement while
+	// an earlier incident could not be written to the database.
+	if trafficState.pendingCounterDecrease != nil {
+		return nil, nil, trafficState.persistPendingCounterDecrease(database.GetDB())
+	}
 	current := p
 	if current == nil || !current.IsRunning() {
 		err := errors.New("xray is not running")
@@ -962,9 +969,9 @@ func (s *XrayService) GetXrayTraffic() ([]*xray.Traffic, []*xray.ClientTraffic, 
 	if err != nil {
 		var decrease *xray.UserTrafficCounterDecrease
 		if errors.As(err, &decrease) {
-			if storeErr := recordLocalXrayCounterIncident(database.GetDB(), decrease); storeErr != nil {
-				return nil, nil, fmt.Errorf("%w; could not persist local Xray incident: %v", err, storeErr)
-			}
+			trafficState.pendingCounterDecrease = decrease
+			xrayCounterIncidentPending.Store(true)
+			return nil, nil, trafficState.persistPendingCounterDecrease(database.GetDB())
 		}
 		logger.Debug("Failed to fetch Xray traffic:", err)
 		return nil, nil, err
@@ -1268,6 +1275,24 @@ func (s *XrayService) IsNeedRestartAndSetFalse() bool {
 // DidXrayCrash checks if Xray crashed by verifying it's not running and wasn't manually stopped.
 func (s *XrayService) DidXrayCrash() bool {
 	return !s.IsXrayRunning() && !isManuallyStopped.Load()
+}
+
+// persistPendingCounterDecrease runs under the process lock. Keep the original
+// observation until the database confirms it is durable; never replace it with
+// a later, possibly higher reading. A process crash can still lose this memory.
+func (t *xrayTrafficState) persistPendingCounterDecrease(db *gorm.DB) error {
+	decrease := t.pendingCounterDecrease
+	if decrease == nil {
+		return nil
+	}
+	if err := recordLocalXrayCounterIncident(db, decrease); err != nil {
+		return fmt.Errorf("%w; could not persist local Xray incident: %v", decrease, err)
+	}
+	t.pendingCounterDecrease = nil
+	if t == &trafficState {
+		xrayCounterIncidentPending.Store(false)
+	}
+	return decrease
 }
 
 // These markers persist until evidence-based reconciliation. An unobserved

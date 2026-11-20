@@ -41,3 +41,55 @@ func TestLocalXrayCounterIncidentBlocksQuotaAndRemoval(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestLocalXrayIncidentRetriedAfterStorageFailure(t *testing.T) {
+	_, client := seedResellerRenewal(t)
+	db := database.GetDB()
+	state := xrayTrafficState{pendingCounterDecrease: &xray.UserTrafficCounterDecrease{Email: client.Email, Direction: "uplink", Previous: 120, Observed: 4}}
+	if err := db.Migrator().DropTable(&model.ResellerNodeCounterIncident{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.persistPendingCounterDecrease(db); err == nil || state.pendingCounterDecrease == nil {
+		t.Fatal("failed incident write was forgotten")
+	}
+	// Process replacement must not discard the pending evidence.
+	state.observeProcess(xray.NewProcess(nil))
+	if state.pendingCounterDecrease == nil || state.pendingCounterDecrease.Observed != 4 {
+		t.Fatal("process replacement lost evidence")
+	}
+	if err := db.AutoMigrate(&model.ResellerNodeCounterIncident{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.persistPendingCounterDecrease(db); err == nil || state.pendingCounterDecrease != nil {
+		t.Fatal("incident was not retained durably and reported")
+	}
+	var incident model.ResellerNodeCounterIncident
+	if err := db.Where("node_id = ? AND email = ?", 0, client.Email).First(&incident).Error; err != nil {
+		t.Fatal(err)
+	}
+	if incident.PreviousUp != 120 || incident.ObservedUp != 4 {
+		t.Fatalf("changed evidence: %+v", incident)
+	}
+	if err := checkLocalXrayCounterIncidents(db); err == nil {
+		t.Fatal("collector resumed before reconciliation")
+	}
+}
+
+func TestPendingLocalXrayIncidentBlocksParticipatingMutations(t *testing.T) {
+	reseller, client := seedResellerRenewal(t)
+	xrayCounterIncidentPending.Store(true)
+	t.Cleanup(func() { xrayCounterIncidentPending.Store(false) })
+	if err := (&ResellerService{}).CheckTrafficQuota(&reseller, 1); err == nil {
+		t.Fatal("allocation bypassed pending in-memory incident")
+	}
+	if _, err := (&ClientService{}).Delete(&InboundService{}, client.Id, false); err == nil {
+		t.Fatal("client removal bypassed pending in-memory incident")
+	}
+	var link model.ClientInbound
+	if err := database.GetDB().Where("client_id = ?", client.Id).First(&link).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&InboundService{}).DelInbound(link.InboundId); err == nil {
+		t.Fatal("inbound removal bypassed pending in-memory incident")
+	}
+}
