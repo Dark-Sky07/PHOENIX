@@ -161,4 +161,20 @@ func TestResellerNodeBaselinePostgres(t *testing.T) {
 	if err := validateResellerNodeBaselines(tx, 90001); err != nil {
 		t.Fatal(err)
 	}
+	incident := model.ResellerNodeCounterIncident{NodeId: nodeID, Email: client.Email, PreviousUp: 5, PreviousDown: 6, ObservedUp: 2, ObservedDown: 6}
+	if err := tx.Create(&incident).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := validateResellerNodeBaselines(tx, 90001); err == nil {
+		t.Fatal("incident did not block reseller")
+	}
+	if err := tx.Where("client_id = ?", client.Id).Delete(&model.ClientInbound{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := validateResellerNodeBaselines(tx, 90001); err == nil {
+		t.Fatal("detachment hid incident")
+	}
+	if err := validateResellerNodeBaselines(tx, 90002); err != nil {
+		t.Fatalf("incident affected another reseller: %v", err)
+	}
 }

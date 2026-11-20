@@ -176,3 +176,9 @@ baseline from evidence before an administrator removes the marker. Do not
 interpret the difference or the new counter as the missing usage. If writing the
 marker itself fails, the error is logged but no durable barrier is guaranteed;
 crashes before detection and resets that exceed the old reading are not detected.
+
+The incident is associated with the reseller mapping by normalized email, not
+only by the current node attachment: removing an attachment does not clear the
+owner's quota barrier, and the node stays blocked even if the client disappears
+from later snapshots. Deleting or transferring the ownership mapping directly
+can still bypass that association and requires manual audit/reconciliation.

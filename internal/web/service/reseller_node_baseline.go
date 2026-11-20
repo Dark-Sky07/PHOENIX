@@ -13,10 +13,7 @@ import (
 func validateResellerNodeBaselines(tx *gorm.DB, resellerID int) error {
 	var incidents int64
 	err := tx.Table("reseller_node_counter_incidents AS incident").
-		Joins("JOIN inbounds i ON i.node_id = incident.node_id").
-		Joins("JOIN client_inbounds ci ON ci.inbound_id = i.id").
-		Joins("JOIN clients c ON c.id = ci.client_id AND LOWER(TRIM(c.email)) = LOWER(TRIM(incident.email))").
-		Joins("JOIN reseller_clients rc ON LOWER(TRIM(rc.email)) = LOWER(TRIM(c.email))").
+		Joins("JOIN reseller_clients rc ON LOWER(TRIM(rc.email)) = LOWER(TRIM(incident.email))").
 		Where("rc.reseller_id = ?", resellerID).Count(&incidents).Error
 	if err != nil {
 		return err

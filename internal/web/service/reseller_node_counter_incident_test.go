@@ -66,6 +66,17 @@ func TestResellerNodeCounterDecreasePersistsIncident(t *testing.T) {
 			if err := (&ResellerService{}).CheckTrafficQuota(&reseller, 1); err == nil {
 				t.Fatal("allocation allowed with incident")
 			}
+			// A detached link must not make the unresolved incident invisible to
+			// the owner or let node synchronization silently resume.
+			if err := db.Delete(&link).Error; err != nil {
+				t.Fatal(err)
+			}
+			if err := (&ResellerService{}).CheckTrafficQuota(&reseller, 1); err == nil {
+				t.Fatal("detaching hid incident from allocation")
+			}
+			if _, err := svc.SetRemoteTraffic(nodeID, snap, false); err == nil {
+				t.Fatal("detaching hid incident from node sync")
+			}
 			if err := db.Transaction(func(tx *gorm.DB) error {
 				tracker := renewalQuotaTracker{tx: tx, accounts: map[int]*renewalQuotaSnapshot{}}
 				_, err := tracker.reserve(client.Email)

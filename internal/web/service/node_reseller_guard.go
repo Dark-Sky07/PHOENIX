@@ -26,6 +26,15 @@ func (e *resellerNodeCounterDecrease) Error() string {
 // could still cover unpolled traffic. It also blocks newly reported reseller
 // attachments; it does not fence changes made directly on the node.
 func validateNodeResellerSnapshot(tx *gorm.DB, nodeID int, snap *runtime.TrafficSnapshot, tagToCentral map[string]*model.Inbound, dirty bool) error {
+	// A previously recorded reset remains relevant even if an attachment is
+	// removed or the client is no longer present in this particular snapshot.
+	var incidents int64
+	if err := tx.Model(&model.ResellerNodeCounterIncident{}).Where("node_id = ?", nodeID).Count(&incidents).Error; err != nil {
+		return err
+	}
+	if incidents > 0 {
+		return fmt.Errorf("node %d reseller counter incident requires manual reconciliation", nodeID)
+	}
 	type attachment struct {
 		InboundID int
 		Email     string
@@ -89,15 +98,6 @@ func validateNodeResellerSnapshot(tx *gorm.DB, nodeID int, snap *runtime.Traffic
 				return fmt.Errorf("ambiguous or invalid reseller node baseline for %q; manual reconciliation required", key)
 			}
 			baselines[key] = row
-		}
-	}
-	for _, batch := range chunkStrings(keys, sqlInChunk) {
-		var count int64
-		if err := tx.Model(&model.ResellerNodeCounterIncident{}).Where("node_id = ? AND LOWER(TRIM(email)) IN ?", nodeID, batch).Count(&count).Error; err != nil {
-			return err
-		}
-		if count > 0 {
-			return fmt.Errorf("node %d reseller counter incident requires manual reconciliation", nodeID)
 		}
 	}
 	byInbound := make(map[int]*model.Inbound)
