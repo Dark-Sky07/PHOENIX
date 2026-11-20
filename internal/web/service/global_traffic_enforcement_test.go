@@ -96,3 +96,51 @@ func TestEffectiveGlobalTrafficEnforcementPostgres(t *testing.T) {
 	}
 	testEffectiveTrafficPredicate(t, db)
 }
+
+func TestInboundTrafficOverflowPostgres(t *testing.T) {
+	dsn := os.Getenv("PHOENIX_TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("PHOENIX_TEST_POSTGRES_DSN not set")
+	}
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{DisableForeignKeyConstraintWhenMigrating: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := db.AutoMigrate(&model.Inbound{}); err != nil {
+		t.Fatal(err)
+	}
+	tx := db.Begin()
+	if tx.Error != nil {
+		t.Fatal(tx.Error)
+	}
+	defer tx.Rollback()
+	ib := model.Inbound{Tag: uuid.NewString(), Protocol: model.VLESS, Settings: `{"clients":[]}`, Enable: true, Up: math.MaxInt64 - 5, Down: 10, Total: math.MaxInt64}
+	if err := tx.Create(&ib).Error; err != nil {
+		t.Fatal(err)
+	}
+	var count int64
+	if err := tx.Model(&model.Inbound{}).Where("id = ?", ib.Id).Where(depletedInboundsCond, 0).Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("overflowing sum: count=%d err=%v", count, err)
+	}
+	if err := (&InboundService{}).addInboundTraffic(tx, []*xray.Traffic{{Tag: ib.Tag, IsInbound: true, Up: 20}}); err != nil {
+		t.Fatal(err)
+	}
+	var saved model.Inbound
+	if err := tx.First(&saved, ib.Id).Error; err != nil {
+		t.Fatal(err)
+	}
+	if saved.Up != math.MaxInt64 {
+		t.Fatalf("unexpected saturated counter: %d", saved.Up)
+	}
+	if err := tx.Model(&model.Inbound{}).Where("id = ?", ib.Id).Update("up", int64(math.MinInt64)).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Model(&model.Inbound{}).Where("id = ?", ib.Id).Where(depletedInboundsCond, 0).Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("corrupt counter: count=%d err=%v", count, err)
+	}
+}
