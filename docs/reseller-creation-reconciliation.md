@@ -218,3 +218,10 @@ even when the managed core changes. A process crash can still lose this pending
 observation. During a failed write, this panel process blocks participating
 quota, client removal and inbound deletion checks; other processes are not
 fenced, so this is not a durable or cross-process safety scheme.
+
+When persisting a detected remote-node counter incident fails, the first
+observation is retained in panel memory and retried before the next snapshot
+for that node. Participating quota and removal checks in the same process are
+blocked while it is pending. If the node remains offline this retry may wait
+until it syncs again; a panel crash loses the pending observation, and other
+processes are not fenced until the incident is durable.

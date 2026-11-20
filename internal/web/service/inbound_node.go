@@ -190,14 +190,15 @@ func (s *InboundService) upsertNodeBaseline(tx *gorm.DB, nodeID int, email strin
 func (s *InboundService) SetRemoteTraffic(nodeID int, snap *runtime.TrafficSnapshot, dirty bool) (bool, error) {
 	var structuralChange bool
 	err := submitTrafficWrite(func() error {
+		if err := persistPendingNodeCounterIncident(database.GetDB(), nodeID); err != nil {
+			return err
+		}
 		var inner error
 		structuralChange, inner = s.setRemoteTrafficLocked(nodeID, snap, dirty)
 		var decrease *resellerNodeCounterDecrease
 		if errors.As(inner, &decrease) {
-			incident := model.ResellerNodeCounterIncident{NodeId: decrease.nodeID, Email: decrease.email, PreviousUp: decrease.previousUp, PreviousDown: decrease.previousDown, ObservedUp: decrease.observedUp, ObservedDown: decrease.observedDown}
-			if err := database.GetDB().Clauses(clause.OnConflict{DoNothing: true}).Create(&incident).Error; err != nil {
-				return fmt.Errorf("%w; could not persist counter incident: %v", inner, err)
-			}
+			rememberNodeCounterDecrease(decrease)
+			return persistPendingNodeCounterIncident(database.GetDB(), nodeID)
 		}
 		return inner
 	})
