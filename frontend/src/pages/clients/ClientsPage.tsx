@@ -1,6 +1,7 @@
 import { lazy, useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
+  Alert,
   Badge,
   Button,
   Card,
@@ -625,6 +626,10 @@ export default function ClientsPage() {
     if (!meta.isEdit) {
       return create(payload);
     }
+    if (isReseller && meta.detach.length > 0) {
+      messageApi.warning(t('resellers.removalTemporarilyUnavailable'));
+      return null;
+    }
     const updateMsg = await update(meta.email, payload);
     if (!updateMsg?.success) return updateMsg;
     if (Array.isArray(meta.attach) && meta.attach.length > 0) {
@@ -636,7 +641,7 @@ export default function ClientsPage() {
       if (!r?.success) return r;
     }
     return updateMsg;
-  }, [create, update, attach, detach]);
+  }, [create, update, attach, detach, isReseller, messageApi, t]);
 
   const pageClass = useMemo(() => {
     const classes = ['clients-page'];
@@ -697,8 +702,8 @@ export default function ClientsPage() {
           <Tooltip title={t('edit')}>
             <Button size="small" type="text" style={{ fontSize: 18 }} icon={<EditOutlined />} onClick={() => onEdit(record)} />
           </Tooltip>
-          <Tooltip title={t('delete')}>
-            <Button size="small" type="text" danger style={{ fontSize: 18 }} icon={<DeleteOutlined />} onClick={() => onDelete(record)} />
+          <Tooltip title={isReseller ? t('resellers.removalTemporarilyUnavailable') : t('delete')}>
+            <Button disabled={isReseller} size="small" type="text" danger style={{ fontSize: 18 }} icon={<DeleteOutlined />} onClick={() => onDelete(record)} />
           </Tooltip>
         </Space>
       ),
@@ -944,6 +949,7 @@ export default function ClientsPage() {
                     )}
                   />
 
+                  {isReseller && <Alert type="warning" showIcon message={t('resellers.removalTemporarilyUnavailable')} style={{ marginBottom: 16 }} />}
                   <StatStrip items={statItems} size={isMobile ? 'compact' : 'default'} className="clients-stats" />
 
                   <div className="phoenix-rise phoenix-rise-3">
@@ -966,7 +972,7 @@ export default function ClientsPage() {
                               <Button icon={<UsergroupAddOutlined />} onClick={() => setBulkAttachOpen(true)}>
                                 {!isMobile && t('pages.clients.attach')}
                               </Button>
-                              <Button danger icon={<UsergroupDeleteOutlined />} onClick={() => setBulkDetachOpen(true)}>
+                              <Button disabled={isReseller} danger icon={<UsergroupDeleteOutlined />} onClick={() => setBulkDetachOpen(true)}>
                                 {!isMobile && t('pages.clients.detach')}
                               </Button>
                               {!isReseller && (
@@ -1023,6 +1029,7 @@ export default function ClientsPage() {
                                   {
                                     key: 'delDepleted',
                                     icon: <RestOutlined />,
+                                    disabled: isReseller,
                                     label: t('pages.clients.delDepleted'),
                                     danger: true,
                                     onClick: onDelDepleted,
@@ -1038,6 +1045,7 @@ export default function ClientsPage() {
                             <Button
                               danger
                               icon={<DeleteOutlined />}
+                              disabled={isReseller}
                               onClick={onBulkDelete}
                               style={{ marginInlineStart: 'auto' }}
                             >
@@ -1281,6 +1289,7 @@ export default function ClientsPage() {
                                             },
                                             {
                                               key: 'delete',
+                                              disabled: isReseller,
                                               danger: true,
                                               label: <><DeleteOutlined /> {t('delete')}</>,
                                               onClick: () => onDelete(row),

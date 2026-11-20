@@ -609,6 +609,9 @@ func (a *ClientController) update(c *gin.Context) {
 }
 
 func (a *ClientController) delete(c *gin.Context) {
+	if !rejectResellerUnverifiedRemoval(c) {
+		return
+	}
 	email := c.Param("email")
 	keepTraffic := c.Query("keepTraffic") == "1"
 	var needRestart bool
@@ -866,6 +869,9 @@ type bulkDetachRequest struct {
 }
 
 func (a *ClientController) bulkDetach(c *gin.Context) {
+	if !rejectResellerUnverifiedRemoval(c) {
+		return
+	}
 	var req bulkDetachRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
@@ -896,6 +902,9 @@ func (a *ClientController) bulkDetach(c *gin.Context) {
 }
 
 func (a *ClientController) bulkDelete(c *gin.Context) {
+	if !rejectResellerUnverifiedRemoval(c) {
+		return
+	}
 	var req bulkDeleteRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
@@ -1030,6 +1039,9 @@ func (a *ClientController) bulkCreate(c *gin.Context) {
 }
 
 func (a *ClientController) delDepleted(c *gin.Context) {
+	if !rejectResellerUnverifiedRemoval(c) {
+		return
+	}
 	if reseller := resellerSession(c); reseller != nil {
 		deleted, needRestart, err := a.delDepletedForReseller(reseller)
 		if needRestart {
@@ -1493,6 +1505,9 @@ func (a *ClientController) getOpenvpnProfile(c *gin.Context) {
 }
 
 func (a *ClientController) detach(c *gin.Context) {
+	if !rejectResellerUnverifiedRemoval(c) {
+		return
+	}
 	email := c.Param("email")
 	var body attachDetachBody
 	if err := c.ShouldBindJSON(&body); err != nil {
@@ -1592,7 +1607,10 @@ func (a *ClientController) scopeResellerClientWrite(reseller *model.Reseller, pa
 			return err
 		}
 		if email := strings.TrimSpace(payload.Client.Email); email != "" {
-			if _, err := a.clientService.GetRecordByEmail(nil, email); err == nil {
+			if current, err := a.clientService.GetRecordByEmail(nil, email); err == nil {
+				if (current.TotalGB == 0 && payload.Client.TotalGB > 0) || (current.TotalGB > 0 && payload.Client.TotalGB > 0 && payload.Client.TotalGB < current.TotalGB) {
+					return errors.New(errResellerUnverifiedRemoval)
+				}
 				if payload.SalePrice != nil {
 					return errors.New("a sale price can only be declared for a new client")
 				}
@@ -1637,8 +1655,8 @@ func (a *ClientController) scopeResellerClientWrite(reseller *model.Reseller, pa
 	return a.resellerService.CheckClientQuota(reseller, len(payloads), addBytes)
 }
 
-// checkResellerClientQuotaDelta charges only the growth of a single client's
-// quota, so lowering it is always allowed.
+// checkResellerClientQuotaDelta rejects quota reductions until final usage is
+// verified and charges any increase against the reseller allocation.
 func (a *ClientController) checkResellerClientQuotaDelta(reseller *model.Reseller, email string, newTotalBytes int64) error {
 	if err := service.ValidateResellerAllocation(reseller, newTotalBytes); err != nil {
 		return err
@@ -1647,7 +1665,10 @@ func (a *ClientController) checkResellerClientQuotaDelta(reseller *model.Reselle
 	if err != nil || current == nil {
 		return err
 	}
-	if newTotalBytes <= current.TotalGB {
+	if (current.TotalGB == 0 && newTotalBytes > 0) || (current.TotalGB > 0 && newTotalBytes > 0 && newTotalBytes < current.TotalGB) {
+		return errors.New(errResellerUnverifiedRemoval)
+	}
+	if newTotalBytes == current.TotalGB {
 		return nil
 	}
 	return a.resellerService.CheckTrafficQuota(reseller, newTotalBytes-current.TotalGB)

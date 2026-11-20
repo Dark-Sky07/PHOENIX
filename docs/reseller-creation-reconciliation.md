@@ -49,3 +49,18 @@ existing core, a new managed process is counted from zero, including its first
 poll; replacing a job does not recount the same core. This does not recover
 unpolled bytes when the core stops, or bridge the crash window before a batch is
 journaled, and does not coordinate independently managed external cores.
+
+## Unverified final traffic and reseller removal
+
+Reseller-session client deletion, depleted-client deletion, inbound detach and
+quota reduction are temporarily blocked. Persisted counters alone cannot prove
+that the runtime has no unpolled traffic. This deliberately keeps the client
+mapping and its allocation rather than inventing usage or releasing capacity.
+Resellers should contact an administrator. Admin paths remain available and
+are **not** an automated verification or fencing mechanism. Before an admin
+removes a client or mapping or reduces quota, they must stop further traffic,
+verify final usage against all runtimes, nodes, journals and payment/backup
+records, and document any manual reconciliation. Where final usage cannot be
+verified, do not proceed. Admin actions, external processes and database edits
+can bypass this reseller-session restriction; it does not guarantee lossless
+accounting under crashes or concurrent external runtime traffic.

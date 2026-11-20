@@ -3,8 +3,6 @@ package controller
 import (
 	"encoding/json"
 	"math"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/Dark-Sky07/phoenix/internal/database"
@@ -61,11 +59,11 @@ func TestResellerDeleteDepletedUsesEffectiveUsageWithoutOverflow(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/panel/api/clients/delDepleted", nil))
-	var body resellerWriteContract
-	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || !body.Success {
-		t.Fatalf("delete response: %s %v", w.Body.String(), err)
+	// Exercise the internal cleanup independently; reseller HTTP access is
+	// blocked until final runtime traffic can be reconciled.
+	deleted, _, err := (&ClientController{}).delDepletedForReseller(&reseller)
+	if err != nil || deleted != 2 {
+		t.Fatalf("depleted cleanup: deleted=%d err=%v", deleted, err)
 	}
 	for _, tc := range []struct {
 		email     string

@@ -36,6 +36,7 @@ func abortForbidden(c *gin.Context, msg string) {
 
 const (
 	errResellerTrafficResetUnavailable = "reseller traffic counter reset is temporarily unavailable until usage accounting supports resets; contact the administrator"
+	errResellerUnverifiedRemoval       = "reseller client removal and quota reduction require administrator verification of final traffic; contact the administrator"
 	errNotYourInbound                  = "inbound not found"
 	errNotYourClient                   = "client not found"
 	// errResellerInboundReadOnly is reported when a reseller session reaches
@@ -44,6 +45,16 @@ const (
 	// probe-able fact, so the message says so plainly.
 	errResellerInboundReadOnly = "inbounds are read-only for reseller accounts"
 )
+
+// Runtime counters can still contain unpolled traffic. Keep the reseller's
+// allocation and ownership intact until an administrator reconciles it.
+func rejectResellerUnverifiedRemoval(c *gin.Context) bool {
+	if resellerSession(c) != nil {
+		abortForbidden(c, errResellerUnverifiedRemoval)
+		return false
+	}
+	return true
+}
 
 // rejectResellerTrafficCounterMutation fails closed while resetting counters
 // would otherwise allow a reseller to erase measured usage before deletion.
