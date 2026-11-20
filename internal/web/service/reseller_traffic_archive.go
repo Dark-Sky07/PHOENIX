@@ -43,6 +43,15 @@ func archiveResellerClientUsageTx(tx *gorm.DB, client *model.ClientRecord, resel
 	if len(mappings) == 0 {
 		return nil
 	}
+	var corruptArchives int64
+	if err := tx.Model(&model.ResellerTrafficArchive{}).
+		Where("client_record_id = ? AND (consumed_bytes < 0 OR prior_consumed_bytes < 0)", client.Id).
+		Count(&corruptArchives).Error; err != nil {
+		return err
+	}
+	if corruptArchives > 0 {
+		return errors.New("negative reseller traffic archive requires reconciliation")
+	}
 	var rows []xray.ClientTraffic
 	if err := tx.Where("LOWER(TRIM(email)) = ?", transferEmailKey(client.Email)).Find(&rows).Error; err != nil {
 		return err
@@ -63,11 +72,17 @@ func archiveResellerClientUsageTx(tx *gorm.DB, client *model.ClientRecord, resel
 	}
 	var globalUp, globalDown int64
 	for _, row := range globals {
+		if row.Up < 0 || row.Down < 0 {
+			return errors.New("negative reseller global traffic requires reconciliation")
+		}
 		globalUp = max(globalUp, row.Up)
 		globalDown = max(globalDown, row.Down)
 	}
 	var used int64
 	for _, row := range rows {
+		if row.Up < 0 || row.Down < 0 {
+			return errors.New("negative reseller client traffic requires reconciliation")
+		}
 		used = saturatingAddBytes(used, max(row.Up, globalUp))
 		used = saturatingAddBytes(used, max(row.Down, globalDown))
 	}
@@ -118,6 +133,9 @@ func closeResellerTrafficWindowTx(tx *gorm.DB, email string) error {
 		return err
 	}
 	for _, entry := range archives {
+		if entry.PriorConsumedBytes < 0 || entry.ConsumedBytes < 0 {
+			return errors.New("negative reseller traffic archive requires reconciliation")
+		}
 		prior := saturatingAddBytes(entry.PriorConsumedBytes, entry.ConsumedBytes)
 		if err := tx.Model(&model.ResellerTrafficArchive{}).Where("id = ?", entry.Id).Updates(map[string]any{
 			"prior_consumed_bytes": prior,

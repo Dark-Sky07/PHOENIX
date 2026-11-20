@@ -108,3 +108,9 @@ inbound settings instead of silently leaving a linked client enabled there,
 keeps large JSON integers intact, and requests an Xray restart if API setup
 fails. Remote pushes can still fail independently and require operator checks;
 a restart request is not proof that live connections have stopped.
+
+Negative persisted client, global or archive counters are invalid, not zero
+usage. Reseller quota calculations, renewal and archival now fail closed when
+such records are encountered; client traffic writes also refuse to overwrite a
+negative local counter. Investigate and restore the correct usage from reliable
+records before resuming. These checks do not reconstruct missing traffic.

@@ -84,12 +84,18 @@ func (t *renewalQuotaTracker) load(id int) (*renewalQuotaSnapshot, error) {
 		}
 		up, down := map[string]int64{}, map[string]int64{}
 		for _, g := range globals {
+			if g.Up < 0 || g.Down < 0 {
+				return nil, errors.New("negative reseller global traffic requires reconciliation")
+			}
 			key := transferEmailKey(g.Email)
 			up[key] = max(up[key], g.Up)
 			down[key] = max(down[key], g.Down)
 		}
 		seenTraffic := map[string]bool{}
 		for _, row := range traffic {
+			if row.Up < 0 || row.Down < 0 {
+				return nil, errors.New("negative reseller client traffic requires reconciliation")
+			}
 			key := transferEmailKey(row.Email)
 			if seenTraffic[key] {
 				return nil, errors.New("ambiguous client traffic counters require reconciliation")
@@ -115,6 +121,9 @@ func (t *renewalQuotaTracker) load(id int) (*renewalQuotaSnapshot, error) {
 		return nil, err
 	}
 	for _, a := range archives {
+		if a.PriorConsumedBytes < 0 || a.ConsumedBytes < 0 {
+			return nil, errors.New("negative reseller traffic archive requires reconciliation")
+		}
 		state.allocated = saturatingAddBytes(state.allocated, a.PriorConsumedBytes)
 		state.used = saturatingAddBytes(state.used, a.PriorConsumedBytes)
 		if _, ok := clients[a.ClientRecordId]; ok {

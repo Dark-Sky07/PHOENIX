@@ -1259,6 +1259,9 @@ func (s *ResellerService) ClientUsage(emails []string) (map[string]*xray.ClientT
 			return nil, fmt.Errorf("read reseller global traffic: %w", err)
 		}
 		for _, g := range globals {
+			if g.Up < 0 || g.Down < 0 {
+				return nil, errors.New("negative reseller global traffic requires reconciliation")
+			}
 			key := transferEmailKey(g.Email)
 			globalUp[key] = max(globalUp[key], g.Up)
 			globalDown[key] = max(globalDown[key], g.Down)
@@ -1269,6 +1272,9 @@ func (s *ResellerService) ClientUsage(emails []string) (map[string]*xray.ClientT
 	// total to each row would double-charge, while merging could undercount.
 	localSeen := make(map[string]bool, len(rows))
 	for _, row := range rows {
+		if row.Up < 0 || row.Down < 0 {
+			return nil, errors.New("negative reseller client traffic requires reconciliation")
+		}
 		key := transferEmailKey(row.Email)
 		if localSeen[key] {
 			return nil, errors.New("ambiguous client traffic counters require reconciliation")
@@ -1411,6 +1417,9 @@ func (s *ResellerService) Stat(reseller *model.Reseller) (*ResellerStat, error) 
 		return nil, err
 	}
 	for _, entry := range archived {
+		if entry.PriorConsumedBytes < 0 || entry.ConsumedBytes < 0 {
+			return nil, errors.New("negative reseller traffic archive requires reconciliation")
+		}
 		// Completed usage windows are additive to the current window.
 		stat.UsedTraffic = saturatingAddBytes(stat.UsedTraffic, entry.PriorConsumedBytes)
 		stat.AllocatedTraffic = saturatingAddBytes(stat.AllocatedTraffic, entry.PriorConsumedBytes)

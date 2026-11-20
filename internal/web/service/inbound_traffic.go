@@ -249,6 +249,11 @@ func (s *InboundService) addClientTraffic(tx *gorm.DB, traffics []*xray.ClientTr
 	if len(dbClientTraffics) == 0 {
 		return nil
 	}
+	for _, row := range dbClientTraffics {
+		if row.Up < 0 || row.Down < 0 {
+			return errors.New("negative stored client traffic requires reconciliation")
+		}
+	}
 
 	dbClientTraffics, err = s.adjustTraffics(tx, dbClientTraffics)
 	if err != nil {
