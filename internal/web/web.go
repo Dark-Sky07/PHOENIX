@@ -315,7 +315,7 @@ func (s *Server) startTask(restartXray bool) {
 
 	go func() {
 		time.Sleep(time.Second * 5)
-		s.cron.AddJob("@every 5s", job.NewXrayTrafficJob())
+		s.cron.AddJob("@every 5s", job.SharedXrayTrafficJob())
 	}()
 
 	// Reconcile mtproto (mtg) sidecars and scrape their traffic

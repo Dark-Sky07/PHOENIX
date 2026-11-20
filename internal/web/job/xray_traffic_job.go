@@ -31,6 +31,14 @@ func NewXrayTrafficJob() *XrayTrafficJob {
 	return new(XrayTrafficJob)
 }
 
+// The production scheduler can be replaced during an in-process panel
+// restart. Keep its pending batch, capture lock and poll serialization with
+// the panel process rather than abandoning them with the old scheduler.
+// This is not durable across a process crash; the journal remains necessary.
+var sharedXrayTrafficJob = NewXrayTrafficJob()
+
+func SharedXrayTrafficJob() *XrayTrafficJob { return sharedXrayTrafficJob }
+
 // Run collects traffic statistics from Xray, updates the database, and pushes
 // real-time updates over WebSocket using compact delta payloads — no REST
 // fallback, scales to 10k–20k+ clients per inbound.

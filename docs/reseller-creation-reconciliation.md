@@ -64,3 +64,8 @@ records, and document any manual reconciliation. Where final usage cannot be
 verified, do not proceed. Admin actions, external processes and database edits
 can bypass this reseller-session restriction; it does not guarantee lossless
 accounting under crashes or concurrent external runtime traffic.
+
+An in-process panel scheduler replacement reuses the same Xray traffic job so
+an uncommitted batch or retained capture lock is not abandoned during a soft
+restart. This does not make the in-memory batch crash durable or fence a lost
+PostgreSQL lock connection; journal and runtime reconciliation are still needed.

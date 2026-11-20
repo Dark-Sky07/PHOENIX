@@ -113,3 +113,45 @@ func TestXrayPollFailureReleasesAllocationLock(t *testing.T) {
 	}
 	unlock()
 }
+
+func TestSharedXrayTrafficJobRetainsUncapturedBatchAcrossSchedulerReplacement(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XUI_DB_FOLDER", dir)
+	if err := database.InitDB(filepath.Join(dir, "test.db")); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.CloseDB() })
+	first := SharedXrayTrafficJob()
+	if first.pending != nil || first.captureUnlock != nil {
+		t.Fatal("shared job is not clean")
+	}
+	t.Cleanup(func() {
+		if first.captureUnlock != nil {
+			first.captureUnlock()
+			first.captureUnlock = nil
+		}
+		first.pending = nil
+	})
+	polls := 0
+	poll := func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
+		polls++
+		return nil, []*xray.ClientTraffic{{Email: "restart@example.test", Up: 31}}, nil
+	}
+	if err := first.prepareXrayBatch(poll, func([]*xray.ClientTraffic) ([]service.XrayTrafficIdentity, error) {
+		return nil, errors.New("database unavailable")
+	}); err == nil {
+		t.Fatal("expected capture failure")
+	}
+	replacement := SharedXrayTrafficJob()
+	if replacement != first || replacement.pending == nil || replacement.captureUnlock == nil {
+		t.Fatal("scheduler replacement abandoned pending traffic or lock")
+	}
+	if err := replacement.prepareXrayBatch(poll, func(rows []*xray.ClientTraffic) ([]service.XrayTrafficIdentity, error) {
+		return []service.XrayTrafficIdentity{{Email: rows[0].Email}}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if polls != 1 || replacement.pending.clients[0].Up != 31 || replacement.captureUnlock != nil {
+		t.Fatalf("batch changed or repolled: polls=%d batch=%+v", polls, replacement.pending)
+	}
+}
