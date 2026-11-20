@@ -121,3 +121,11 @@ than overwriting them with a possibly lower or guessed value. A legitimate
 source must send one nonnegative snapshot per client; the affected records
 need manual reconciliation if the local database is already ambiguous. This
 does not establish ordering or authenticity of external snapshots.
+
+Node sync now refuses a non-dirty snapshot that omits an inbound, client or
+traffic row for a reseller client already attached to that node, or changes
+its configured or traffic quota relative to the canonical record. The database
+transaction is not committed; investigate the node and final traffic before
+reconciling. This preserves known allocations but can pause sync for the entire
+node, and is not proof of final usage: unpolled bytes, direct node changes,
+newly introduced associations and non-participating writers remain risks.

@@ -314,6 +314,13 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 		}
 	}()
 
+	if tx.Error != nil {
+		return false, tx.Error
+	}
+	if err := validateNodeResellerSnapshot(tx, nodeID, snap, tagToCentral, dirty); err != nil {
+		return false, err
+	}
+
 	structuralChange := false
 
 	snapTags := make(map[string]struct{}, len(snap.Inbounds))
