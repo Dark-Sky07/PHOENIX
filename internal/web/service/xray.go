@@ -13,6 +13,7 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/amneziawg"
 	"github.com/Dark-Sky07/phoenix/internal/amneziawgnet"
 	"github.com/Dark-Sky07/phoenix/internal/config"
+	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
 	"github.com/Dark-Sky07/phoenix/internal/logger"
 	"github.com/Dark-Sky07/phoenix/internal/tuic"
@@ -20,6 +21,8 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/xray"
 
 	"go.uber.org/atomic"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var (
@@ -947,6 +950,9 @@ func (s *XrayService) GetXrayTraffic() ([]*xray.Traffic, []*xray.ClientTraffic, 
 		return nil, nil, err
 	}
 	trafficState.observeProcess(current)
+	if err := checkLocalXrayCounterIncidents(database.GetDB()); err != nil {
+		return nil, nil, err
+	}
 	if err := trafficState.api.Init(current.GetAPIPort()); err != nil {
 		logger.Debug("Failed to initialize Xray API:", err)
 		return nil, nil, err
@@ -954,6 +960,12 @@ func (s *XrayService) GetXrayTraffic() ([]*xray.Traffic, []*xray.ClientTraffic, 
 	defer trafficState.api.Close()
 	traffic, clientTraffic, err := trafficState.api.GetTraffic()
 	if err != nil {
+		var decrease *xray.UserTrafficCounterDecrease
+		if errors.As(err, &decrease) {
+			if storeErr := recordLocalXrayCounterIncident(database.GetDB(), decrease); storeErr != nil {
+				return nil, nil, fmt.Errorf("%w; could not persist local Xray incident: %v", err, storeErr)
+			}
+		}
 		logger.Debug("Failed to fetch Xray traffic:", err)
 		return nil, nil, err
 	}
@@ -1256,4 +1268,36 @@ func (s *XrayService) IsNeedRestartAndSetFalse() bool {
 // DidXrayCrash checks if Xray crashed by verifying it's not running and wasn't manually stopped.
 func (s *XrayService) DidXrayCrash() bool {
 	return !s.IsXrayRunning() && !isManuallyStopped.Load()
+}
+
+// These markers persist until evidence-based reconciliation. An unobserved
+// direction is not zero usage: Direction identifies the only measured pair.
+func recordLocalXrayCounterIncident(db *gorm.DB, decrease *xray.UserTrafficCounterDecrease) error {
+	if db == nil || decrease == nil || transferEmailKey(decrease.Email) == "" || decrease.Previous < 0 || decrease.Observed < 0 || decrease.Observed >= decrease.Previous {
+		return errors.New("invalid local Xray counter incident")
+	}
+	incident := model.ResellerNodeCounterIncident{NodeId: 0, Email: transferEmailKey(decrease.Email), Direction: decrease.Direction}
+	switch decrease.Direction {
+	case "uplink":
+		incident.PreviousUp, incident.ObservedUp = decrease.Previous, decrease.Observed
+	case "downlink":
+		incident.PreviousDown, incident.ObservedDown = decrease.Previous, decrease.Observed
+	default:
+		return errors.New("invalid local Xray counter direction")
+	}
+	return db.Clauses(clause.OnConflict{DoNothing: true}).Create(&incident).Error
+}
+
+func checkLocalXrayCounterIncidents(db *gorm.DB) error {
+	if db == nil {
+		return errors.New("database unavailable while checking Xray counter incidents")
+	}
+	var count int64
+	if err := db.Model(&model.ResellerNodeCounterIncident{}).Where("node_id = ?", 0).Count(&count).Error; err != nil {
+		return err
+	}
+	if count > 0 {
+		return errors.New("local Xray counter incident requires manual reconciliation")
+	}
+	return nil
 }

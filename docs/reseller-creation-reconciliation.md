@@ -202,3 +202,12 @@ using its linked clients, traffic records, legacy settings identities, and (for
 a remote inbound) incidents on that node. Affected inbounds are skipped by
 bulk deletion. This preflight does not fence external mutations or a newly
 created incident racing a caller that does not hold the allocation lock.
+
+The local Xray collector now rejects a decrease in an observed user counter
+without advancing any counters in that poll. It records an incident using node
+ID zero and a `direction` of `uplink` or `downlink`; only that direction's
+previous/observed pair is evidence, and the other pair is not a measurement.
+Collection and affected reseller quota/removal are blocked until manual review.
+This protects a detected reset, not crashes before detection, unpolled bytes,
+or resets whose new counter already exceeds the last reading. If the incident
+cannot be persisted, only the error is reported; a crash can lose the warning.

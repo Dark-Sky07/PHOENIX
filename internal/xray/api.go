@@ -548,6 +548,20 @@ func (x *XrayAPI) RemoveUser(inboundTag, email string) error {
 	return nil
 }
 
+// UserTrafficCounterDecrease signals an uncertain interval, not a measured
+// delta. It must be reconciled rather than silently treating the new value as
+// all traffic since the last poll.
+type UserTrafficCounterDecrease struct {
+	Email     string
+	Direction string
+	Previous  int64
+	Observed  int64
+}
+
+func (e *UserTrafficCounterDecrease) Error() string {
+	return fmt.Sprintf("Xray user %q %s counter decreased from %d to %d; reconciliation required", e.Email, e.Direction, e.Previous, e.Observed)
+}
+
 // GetTraffic queries traffic statistics from the Xray core without resetting counters.
 func (x *XrayAPI) GetTraffic() ([]*Traffic, []*ClientTraffic, error) {
 	if x.grpcClient == nil {
@@ -594,6 +608,11 @@ func (x *XrayAPI) GetTraffic() ([]*Traffic, []*ClientTraffic, error) {
 			return nil, nil, fmt.Errorf("duplicate Xray traffic counter %q", stat.Name)
 		}
 		seen[stat.Name] = struct{}{}
+		if match := clientTrafficRegex.FindStringSubmatch(stat.Name); len(match) == 3 {
+			if previous, ok := x.StatsLastValues[stat.Name]; ok && stat.Value < previous {
+				return nil, nil, &UserTrafficCounterDecrease{Email: match[1], Direction: match[2], Previous: previous, Observed: stat.Value}
+			}
+		}
 	}
 	for _, stat := range resp.GetStat() {
 		tagMatches := trafficRegex.FindStringSubmatch(stat.Name)

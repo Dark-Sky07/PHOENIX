@@ -137,3 +137,26 @@ func TestGetTrafficIgnoresNonTrafficStats(t *testing.T) {
 		t.Fatalf("unexpected stats: %+v %+v %v", traffic, clients, err)
 	}
 }
+
+func TestGetTrafficRejectsUserCounterDecreaseWithoutAdvancingAnyBaseline(t *testing.T) {
+	const up = "user>>>alice@example.test>>>traffic>>>uplink"
+	const down = "user>>>alice@example.test>>>traffic>>>downlink"
+	fake := &fakeTrafficStatsClient{}
+	var client statsService.StatsServiceClient = fake
+	api := &XrayAPI{grpcClient: &grpc.ClientConn{}, StatsServiceClient: &client}
+	api.ResetTrafficBaseline(true)
+	fake.response = &statsService.QueryStatsResponse{Stat: []*statsService.Stat{{Name: up, Value: 100}, {Name: down, Value: 50}}}
+	if _, _, err := api.GetTraffic(); err != nil {
+		t.Fatal(err)
+	}
+	fake.response.Stat[0].Value = 120
+	fake.response.Stat[1].Value = 4
+	_, _, err := api.GetTraffic()
+	var decrease *UserTrafficCounterDecrease
+	if !errors.As(err, &decrease) || decrease.Email != "alice@example.test" || decrease.Direction != "downlink" || decrease.Previous != 50 || decrease.Observed != 4 {
+		t.Fatalf("decrease=%+v err=%v", decrease, err)
+	}
+	if api.StatsLastValues[up] != 100 || api.StatsLastValues[down] != 50 {
+		t.Fatalf("partial baseline advance: %+v", api.StatsLastValues)
+	}
+}
