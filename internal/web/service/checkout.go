@@ -273,6 +273,12 @@ func (s *CheckoutService) CreateOrder(email string, gb int64, months int) (*Chec
 		AddDays:    months * 30,
 		Status:     "pending",
 	}
+	// Reject renewals that already cannot be fulfilled before presenting a
+	// payment link. This is only a point-in-time check, not a reservation;
+	// the webhook must validate again under the allocation lock.
+	if _, err := (&PaymentWebhookService{}).preparePaidClientRenewal(order); err != nil {
+		return nil, err
+	}
 	if err := db.Create(order).Error; err != nil {
 		return nil, err
 	}

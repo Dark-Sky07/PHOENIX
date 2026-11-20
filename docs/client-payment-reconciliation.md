@@ -23,3 +23,10 @@ quota checks and automatic renewals are also blocked while the affected client
 remains mapped to that reseller. These safeguards do not fence admin actions,
 external runtime changes, or changes to ownership outside the participating
 paths. Review those separately during reconciliation.
+
+Public checkout checks the current reseller allocation and unresolved creation
+or renewal markers before issuing an order. This check does **not** reserve
+quota: another operation or order can consume capacity before payment arrives.
+The webhook checks again and may reject an already-paid order, which then needs
+provider reconciliation or refund. Operators should not treat order creation as
+a guarantee that capacity has been reserved.

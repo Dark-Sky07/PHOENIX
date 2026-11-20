@@ -338,3 +338,33 @@ func TestConcurrentCheckoutPendingOrderLimit(t *testing.T) {
 		t.Fatalf("pending checkout cap bypassed: successes=%d rows=%d", successes, n)
 	}
 }
+
+func TestCheckoutRejectsUnfulfillableResellerRenewal(t *testing.T) {
+	r, c := seedResellerRenewal(t)
+	db := database.GetDB()
+	enableCheckout(t, 1, 1)
+	svc := &CheckoutService{}
+	if _, err := svc.CreateOrder(c.Email, 1, 0); err == nil {
+		t.Fatal("sold traffic beyond reseller quota")
+	}
+	var n int64
+	if err := db.Model(&model.PaymentOrder{}).Count(&n).Error; err != nil || n != 0 {
+		t.Fatalf("unexpected order: %d %v", n, err)
+	}
+	if err := db.Model(&r).Update("traffic_limit", bytesPerGB+500).Error; err != nil {
+		t.Fatal(err)
+	}
+	intent := model.ResellerCreationIntent{Id: "checkout-unresolved", ResellerId: r.Id, Email: "other@example.test", SubID: "other", InboundIDs: "[]"}
+	if err := db.Create(&intent).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.CreateOrder(c.Email, 1, 0); err == nil {
+		t.Fatal("sold renewal while creation requires reconciliation")
+	}
+	if err := db.Delete(&intent).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.CreateOrder(c.Email, 1, 0); err != nil {
+		t.Fatalf("exact fit should be sellable: %v", err)
+	}
+}
