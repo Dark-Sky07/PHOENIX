@@ -102,3 +102,9 @@ entries before advancing any in-memory baseline, so a later valid poll can
 retry that interval. Other, non-traffic statistics are ignored. This protects
 against malformed responses while the same core remains available; it does
 not make counters durable across a core crash or stop.
+
+When disabling locally depleted clients, the panel now rejects inconsistent
+inbound settings instead of silently leaving a linked client enabled there,
+keeps large JSON integers intact, and requests an Xray restart if API setup
+fails. Remote pushes can still fail independently and require operator checks;
+a restart request is not proof that live connections have stopped.
