@@ -2,6 +2,7 @@ package service
 
 import (
 	"testing"
+	"time"
 
 	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
@@ -213,7 +214,7 @@ func TestManagedXrayExitWatcherRecordsUncertaintyImmediately(t *testing.T) {
 	}
 }
 
-func TestManagedXrayExitWatcherIgnoresManualStopAndReplacedCore(t *testing.T) {
+func TestManagedXrayExitWatcherIgnoresReplacedCore(t *testing.T) {
 	_, _ = seedResellerRenewal(t)
 	db := database.GetDB()
 	oldProcess, oldStopped := p, isManuallyStopped.Load()
@@ -221,14 +222,70 @@ func TestManagedXrayExitWatcherIgnoresManualStopAndReplacedCore(t *testing.T) {
 	started := xray.NewProcess(nil)
 	done := make(chan struct{})
 	close(done)
-	p = started
-	isManuallyStopped.Store(true)
-	watchManagedXrayExit(started, done)
 	isManuallyStopped.Store(false)
 	p = xray.NewProcess(nil)
 	watchManagedXrayExit(started, done)
 	var count int64
 	if err := db.Model(&model.ResellerNodeCounterIncident{}).Count(&count).Error; err != nil || count != 0 {
 		t.Fatalf("unexpected incident=%d err=%v", count, err)
+	}
+}
+
+func TestXrayWatcherBlocksAllocationWhileProcessLockIsBusy(t *testing.T) {
+	reseller, _ := seedResellerRenewal(t)
+	oldProcess, oldStopped := p, isManuallyStopped.Load()
+	t.Cleanup(func() { p = oldProcess; isManuallyStopped.Store(oldStopped); xrayCoreExitPending.Store(false) })
+	started := xray.NewProcess(nil)
+	p = started
+	isManuallyStopped.Store(false)
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	lock.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			lock.Unlock()
+		}
+	}()
+	go func() { watchManagedXrayExit(started, done); close(finished) }()
+	close(done)
+	deadline := time.Now().Add(3 * time.Second)
+	for !hasPendingXrayExitObservation() {
+		if time.Now().After(deadline) {
+			t.Fatal("watcher did not register observation")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := (&ResellerService{}).CheckTrafficQuota(&reseller, 1); err == nil {
+		t.Fatal("quota bypassed waiting watcher")
+	}
+	lock.Unlock()
+	locked = false
+	select {
+	case <-finished:
+	case <-time.After(3 * time.Second):
+		t.Fatal("watcher did not finish")
+	}
+	if hasPendingXrayExitObservation() {
+		t.Fatal("completed observation still pending")
+	}
+	if err := (&ResellerService{}).CheckTrafficQuota(&reseller, 1); err == nil {
+		t.Fatal("durable exit incident did not block quota")
+	}
+}
+
+func TestLateManualStopFlagDoesNotEraseUnexpectedExit(t *testing.T) {
+	_, _ = seedResellerRenewal(t)
+	oldProcess, oldStopped := p, isManuallyStopped.Load()
+	t.Cleanup(func() { p = oldProcess; isManuallyStopped.Store(oldStopped); xrayCoreExitPending.Store(false) })
+	started := xray.NewProcess(nil)
+	p = started
+	isManuallyStopped.Store(true)
+	done := make(chan struct{})
+	close(done)
+	watchManagedXrayExit(started, done)
+	var count int64
+	if err := database.GetDB().Model(&model.ResellerNodeCounterIncident{}).Where("node_id = ? AND direction = ?", 0, "core-exited").Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("exit erased by late stop flag: count=%d err=%v", count, err)
 	}
 }

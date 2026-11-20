@@ -69,7 +69,7 @@ func persistPendingNodeCounterIncident(db *gorm.DB, nodeID int) error {
 }
 
 func pendingCounterIncidentError() error {
-	if xrayCounterIncidentPending.Load() || xrayCoreExitPending.Load() || hasPendingNodeCounterIncidents() {
+	if xrayCounterIncidentPending.Load() || xrayCoreExitPending.Load() || hasPendingXrayExitObservation() || hasPendingNodeCounterIncidents() {
 		return errors.New("counter incident persistence pending; manual reconciliation required")
 	}
 	return diskCounterIncidentError()

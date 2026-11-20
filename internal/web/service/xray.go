@@ -38,6 +38,19 @@ var (
 	trafficState xrayTrafficState
 )
 
+// Reaped cores are registered before the watcher waits for the process lock.
+// Quota/removal checks can therefore fail closed while that lock is busy.
+var pendingXrayExitObservations = struct {
+	sync.Mutex
+	processes map[*xray.Process]struct{}
+}{processes: make(map[*xray.Process]struct{})}
+
+func hasPendingXrayExitObservation() bool {
+	pendingXrayExitObservations.Lock()
+	defer pendingXrayExitObservations.Unlock()
+	return len(pendingXrayExitObservations.processes) > 0
+}
+
 type xrayTrafficState struct {
 	api                    xray.XrayAPI
 	process                *xray.Process
@@ -1149,11 +1162,24 @@ func (s *XrayService) RestartXray(isForce bool) error {
 // the watchdog and restart path retry persistence.
 func watchManagedXrayExit(started *xray.Process, done <-chan struct{}) {
 	<-done
-	lock.Lock()
-	defer lock.Unlock()
-	if p != started || isManuallyStopped.Load() || started.WasStoppedIntentionally() {
+	if started.WasStoppedIntentionally() {
 		return
 	}
+	pendingXrayExitObservations.Lock()
+	pendingXrayExitObservations.processes[started] = struct{}{}
+	pendingXrayExitObservations.Unlock()
+	defer func() {
+		pendingXrayExitObservations.Lock()
+		delete(pendingXrayExitObservations.processes, started)
+		pendingXrayExitObservations.Unlock()
+	}()
+	lock.Lock()
+	defer lock.Unlock()
+	if p != started || started.WasStoppedIntentionally() {
+		return
+	}
+	// A manual-stop flag set after this core already exited does not prove
+	// that its exit was intentional; rely on the process's own stop flag.
 	if err := recordUnexpectedXrayExit(database.GetDB()); err != nil {
 		logger.Error("Record unexpected Xray exit failed:", err)
 	}

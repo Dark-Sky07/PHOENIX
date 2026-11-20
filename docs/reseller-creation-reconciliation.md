@@ -282,3 +282,10 @@ waiting for the periodic health check. Intentional stops and replaced cores are
 not treated as crashes. If persistence fails, the existing in-memory barrier and
 watchdog retry remain in effect. This reduces but cannot eliminate the gap
 between exit and observation, and does not detect a crash of the panel itself.
+
+After the managed child exit is observed, the watcher now sets a process-local
+barrier before waiting on the Xray process lock, so participating quota and
+removal checks cannot proceed merely because that lock is busy. A later manual
+stop flag alone does not erase an already-unexpected exit. The scheduler gap
+before the watcher runs, panel crashes, other hosts and a stop request racing
+the child exit are still not fully fenced.
