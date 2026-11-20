@@ -18,7 +18,7 @@ import (
 // accounting effects together. PostgreSQL locks the order and reseller rows;
 // SQLite conflicting writers fail rather than duplicating the credit.
 func (s *PaymentWebhookService) processResellerPayment(p PaymentWebhookPayload) (*model.PaymentOrder, error) {
-	if math.IsNaN(p.Amount) || math.IsInf(p.Amount, 0) {
+	if math.IsNaN(p.Amount) || math.IsInf(p.Amount, 0) || p.Amount < 0 {
 		return nil, errors.New("invalid payment amount")
 	}
 	var settings SettingService
@@ -54,10 +54,10 @@ func (s *PaymentWebhookService) processResellerPayment(p PaymentWebhookPayload) 
 		if result.Status != "pending" {
 			return errors.New("order is not pending")
 		}
-		if p.Amount > 0 && result.Amount > 0 && math.Abs(p.Amount-result.Amount) > tolerance {
+		if result.Amount > 0 && (p.Amount <= 0 || math.Abs(p.Amount-result.Amount) > tolerance) {
 			return errors.New("webhook amount does not match pending order")
 		}
-		if math.IsNaN(result.Amount) || math.IsInf(result.Amount, 0) || result.AddGB < 0 || result.AddGB > math.MaxInt64/bytesPerGB || result.AddDays < 0 {
+		if math.IsNaN(result.Amount) || math.IsInf(result.Amount, 0) || result.Amount < 0 || result.AddGB < 0 || result.AddGB > math.MaxInt64/bytesPerGB || result.AddDays < 0 {
 			return errors.New("invalid payment accounting values")
 		}
 		var reseller model.Reseller

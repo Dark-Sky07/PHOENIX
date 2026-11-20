@@ -368,3 +368,37 @@ func TestCheckoutRejectsUnfulfillableResellerRenewal(t *testing.T) {
 		t.Fatalf("exact fit should be sellable: %v", err)
 	}
 }
+
+func TestPricedPaymentOrdersRequireConfirmedAmount(t *testing.T) {
+	for _, target := range []string{"client_renew", "reseller_deposit", "reseller_quota"} {
+		t.Run(target, func(t *testing.T) {
+			setupBulkDB(t)
+			db := database.GetDB()
+			email := seedCheckoutClient(t)
+			reseller := model.Reseller{Username: "amount-check", Password: "hash", Enable: true, TrafficLimit: bytesPerGB}
+			if err := db.Create(&reseller).Error; err != nil {
+				t.Fatal(err)
+			}
+			ref := reseller.Username
+			if target == "client_renew" {
+				ref = email
+			}
+			order := model.PaymentOrder{OrderId: "amount-" + target, TargetType: target, TargetRef: ref, Amount: 10, AddDays: 1, Status: "pending"}
+			if err := db.Create(&order).Error; err != nil {
+				t.Fatal(err)
+			}
+			svc := &PaymentWebhookService{}
+			for _, amount := range []float64{0, -1, 9} {
+				if _, err := svc.ProcessWebhook(PaymentWebhookPayload{OrderId: order.OrderId, Amount: amount}); err == nil {
+					t.Fatalf("accepted amount %v", amount)
+				}
+				if err := db.First(&order, order.Id).Error; err != nil || order.Status != "pending" {
+					t.Fatalf("order changed: %+v %v", order, err)
+				}
+			}
+			if _, err := svc.ProcessWebhook(PaymentWebhookPayload{OrderId: order.OrderId, Amount: 10}); err != nil {
+				t.Fatalf("correct amount rejected: %v", err)
+			}
+		})
+	}
+}

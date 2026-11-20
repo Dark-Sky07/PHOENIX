@@ -81,7 +81,7 @@ func CheckResellerProcessingClientRenewals(resellerID int) error {
 // A crash or ambiguous failure leaves "processing" and requires an operator
 // to reconcile it; never automatically repeat a potentially applied renewal.
 func (s *PaymentWebhookService) processClientRenewalPayment(p PaymentWebhookPayload) (*model.PaymentOrder, error) {
-	if math.IsNaN(p.Amount) || math.IsInf(p.Amount, 0) {
+	if math.IsNaN(p.Amount) || math.IsInf(p.Amount, 0) || p.Amount < 0 {
 		return nil, errors.New("invalid payment amount")
 	}
 	db := database.GetDB()
@@ -111,7 +111,7 @@ func (s *PaymentWebhookService) processClientRenewalPayment(p PaymentWebhookPayl
 	var settingSvc SettingService
 	currency, _ := settingSvc.GetCheckoutCurrency()
 	tolerance := 0.5 / math.Pow10(moneycurrency.FractionDigits(currency))
-	if math.IsNaN(order.Amount) || math.IsInf(order.Amount, 0) || (p.Amount > 0 && order.Amount > 0 && math.Abs(p.Amount-order.Amount) > tolerance) {
+	if math.IsNaN(order.Amount) || math.IsInf(order.Amount, 0) || order.Amount < 0 || (order.Amount > 0 && (p.Amount <= 0 || math.Abs(p.Amount-order.Amount) > tolerance)) {
 		return nil, errors.New("webhook amount does not match pending order")
 	}
 	if err := checkProcessingClientRenewal(db, order.TargetRef); err != nil {

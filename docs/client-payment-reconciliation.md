@@ -30,3 +30,10 @@ quota: another operation or order can consume capacity before payment arrives.
 The webhook checks again and may reject an already-paid order, which then needs
 provider reconciliation or refund. Operators should not treat order creation as
 a guarantee that capacity has been reserved.
+
+For a priced pending client renewal or reseller payment, callbacks and manual
+processing must include a positive amount matching the recorded amount (within
+the currency rounding tolerance). An omitted, zero, negative or mismatching
+amount is rejected. Existing integrations that previously omitted the amount
+must send it. The signed callback and matching amount alone do not independently
+verify payment with a gateway; secure and verify the gateway integration.
