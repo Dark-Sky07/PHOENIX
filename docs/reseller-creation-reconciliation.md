@@ -296,3 +296,10 @@ before participating quota checks see the observation. The callback is skipped
 for known intentional stops, and the watcher persists the incident afterward.
 There remains a gap before the operating system reaps the child, a stop/exit
 race, and no fencing of other hosts before the incident is durably recorded.
+
+A manual stop request that finds an unexpectedly stopped managed core now
+records the uncertainty before setting the manual-stop flag. Restart also
+rechecks for a core that died while configuration was built and refuses to
+start a replacement when stopping the old core fails. This closes specific
+late-stop and ignored-stop-error paths, but a signal/exit race and traffic after
+an ordinary final poll remain unresolved.

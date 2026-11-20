@@ -289,3 +289,38 @@ func TestLateManualStopFlagDoesNotEraseUnexpectedExit(t *testing.T) {
 		t.Fatalf("exit erased by late stop flag: count=%d err=%v", count, err)
 	}
 }
+
+func TestManualStopAfterUnobservedExitPreservesIncident(t *testing.T) {
+	reseller, _ := seedResellerRenewal(t)
+	db := database.GetDB()
+	oldProcess, oldStopped := p, isManuallyStopped.Load()
+	t.Cleanup(func() { p = oldProcess; isManuallyStopped.Store(oldStopped); xrayCoreExitPending.Store(false) })
+	p = xray.NewProcess(nil)
+	isManuallyStopped.Store(false)
+	if err := (&XrayService{}).StopXray(); err == nil {
+		t.Fatal("already stopped core reported successful stop")
+	}
+	var count int64
+	if err := db.Model(&model.ResellerNodeCounterIncident{}).Where("node_id = ? AND direction = ?", 0, "core-exited").Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("missing exit incident: count=%d err=%v", count, err)
+	}
+	if err := (&ResellerService{}).CheckTrafficQuota(&reseller, 1); err == nil {
+		t.Fatal("manual stop hid unverified traffic")
+	}
+}
+
+func TestManualStopWithoutManagedCoreDoesNotInventIncident(t *testing.T) {
+	_, _ = seedResellerRenewal(t)
+	db := database.GetDB()
+	oldProcess, oldStopped := p, isManuallyStopped.Load()
+	t.Cleanup(func() { p = oldProcess; isManuallyStopped.Store(oldStopped); xrayCoreExitPending.Store(false) })
+	p = nil
+	isManuallyStopped.Store(false)
+	if err := (&XrayService{}).StopXray(); err == nil {
+		t.Fatal("nil core reported successful stop")
+	}
+	var count int64
+	if err := db.Model(&model.ResellerNodeCounterIncident{}).Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("unexpected incident count=%d err=%v", count, err)
+	}
+}

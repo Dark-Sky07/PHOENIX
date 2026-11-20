@@ -1119,7 +1119,8 @@ func (s *XrayService) RestartXray(isForce bool) error {
 	logger.Debug("restart Xray, force:", isForce)
 	// Evaluate the relay crash-loop guard before the config is regenerated so
 	// a suspension decided here already shapes this very config.
-	crashed := p != nil && !p.IsRunning() && !isManuallyStopped.Load()
+	wasManuallyStopped := isManuallyStopped.Load()
+	crashed := p != nil && !p.IsRunning() && !wasManuallyStopped
 	if crashed {
 		// The dead core can no longer provide its final counters. Keep a
 		// durable uncertainty marker rather than assuming its last poll was
@@ -1146,7 +1147,22 @@ func (s *XrayService) RestartXray(isForce bool) error {
 			logger.Info("Xray config changes applied through the core API, no restart needed")
 			return nil
 		}
-		p.Stop()
+		if stopErr := p.Stop(); stopErr != nil {
+			// A failed stop leaves the core's final accounting uncertain even
+			// when it still reports running.
+			if !wasManuallyStopped {
+				if markErr := recordUnexpectedXrayExit(database.GetDB()); markErr != nil {
+					return fmt.Errorf("stop Xray: %v; record exit: %w", stopErr, markErr)
+				}
+			}
+			return fmt.Errorf("stop Xray before restart: %w", stopErr)
+		}
+	} else if p != nil && !crashed && !wasManuallyStopped {
+		// Config generation may have outlived a core that was running at
+		// the first check. Preserve the uncertainty before replacing it.
+		if err := recordUnexpectedXrayExit(database.GetDB()); err != nil {
+			return err
+		}
 	}
 
 	p = xray.NewProcess(xrayConfig)
@@ -1302,11 +1318,26 @@ func addOutboundReconciling(api *xray.XrayAPI, outbound []byte) error {
 func (s *XrayService) StopXray() error {
 	lock.Lock()
 	defer lock.Unlock()
-	isManuallyStopped.Store(true)
+	wasManuallyStopped := isManuallyStopped.Load()
 	logger.Debug("Attempting to stop Xray...")
 	if s.IsXrayRunning() {
-		return p.Stop()
+		isManuallyStopped.Store(true)
+		err := p.Stop()
+		if err != nil && !wasManuallyStopped {
+			if markErr := recordUnexpectedXrayExit(database.GetDB()); markErr != nil {
+				return fmt.Errorf("stop Xray: %v; record exit: %w", err, markErr)
+			}
+		}
+		return err
 	}
+	// A stop request after an unexpected exit must not suppress the watcher
+	// or let a subsequent restart erase the unresolved accounting interval.
+	if p != nil && !wasManuallyStopped {
+		if err := recordUnexpectedXrayExit(database.GetDB()); err != nil {
+			return err
+		}
+	}
+	isManuallyStopped.Store(true)
 	return errors.New("xray is not running")
 }
 
