@@ -116,3 +116,49 @@ func TestResellerAllocationAdvisoryLockPostgres(t *testing.T) {
 	}
 	second()
 }
+
+func TestResellerNodeBaselinePostgres(t *testing.T) {
+	dsn := os.Getenv("PHOENIX_TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("PHOENIX_TEST_POSTGRES_DSN not set")
+	}
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{DisableForeignKeyConstraintWhenMigrating: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := db.AutoMigrate(&model.ClientRecord{}, &model.ResellerClient{}, &model.Inbound{}, &model.ClientInbound{}, &model.NodeClientTraffic{}); err != nil {
+		t.Fatal(err)
+	}
+	tx := db.Begin()
+	if tx.Error != nil {
+		t.Fatal(tx.Error)
+	}
+	defer tx.Rollback()
+	const nodeID = 90001
+	client := model.ClientRecord{Email: uuid.NewString() + "@node-baseline.test", TotalGB: 100, Enable: true}
+	inbound := model.Inbound{Tag: uuid.NewString(), NodeID: func() *int { n := nodeID; return &n }(), Protocol: model.VLESS}
+	for _, row := range []any{&client, &inbound} {
+		if err := tx.Create(row).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, row := range []any{&model.ResellerClient{ResellerId: 90001, Email: client.Email}, &model.ClientInbound{ClientId: client.Id, InboundId: inbound.Id}} {
+		if err := tx.Create(row).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := validateResellerNodeBaselines(tx, 90001); err == nil {
+		t.Fatal("missing baseline accepted")
+	}
+	if err := tx.Create(&model.NodeClientTraffic{NodeId: nodeID, Email: client.Email, Up: 5, Down: 6}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := validateResellerNodeBaselines(tx, 90001); err != nil {
+		t.Fatal(err)
+	}
+}
