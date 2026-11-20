@@ -415,6 +415,9 @@ func (s *ResellerService) UpdateBrandSettings(resellerID int, name, logo, color,
 func (s *ResellerService) Delete(id int) error {
 	db := database.GetDB()
 	return db.Transaction(func(tx *gorm.DB) error {
+		if err := rejectResellerNodeIncidents(tx, id, nil); err != nil {
+			return err
+		}
 		for _, mdl := range []any{&model.Reseller{}, &model.ResellerInbound{}, &model.ResellerClient{}, &model.ResellerTransaction{}, &model.ResellerSale{}, &model.ResellerHistoricalSale{}, &model.ResellerTrafficArchive{}} {
 			q := tx
 			if _, isReseller := mdl.(*model.Reseller); isReseller {
@@ -1187,6 +1190,9 @@ func (s *ResellerService) UnassignClients(resellerId int, emails []string) error
 				return err
 			}
 			for _, batch := range chunkStrings(keys, sqlInChunk) {
+				if err := rejectResellerNodeIncidents(tx, resellerId, batch); err != nil {
+					return err
+				}
 				var mappings []model.ResellerClient
 				if err := tx.Where("reseller_id = ? AND LOWER(TRIM(email)) IN ?", resellerId, batch).Find(&mappings).Error; err != nil {
 					return err

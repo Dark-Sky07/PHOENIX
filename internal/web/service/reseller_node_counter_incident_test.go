@@ -87,3 +87,43 @@ func TestResellerNodeCounterDecreasePersistsIncident(t *testing.T) {
 		})
 	}
 }
+
+func TestResellerIncidentPreventsUnassignmentAndDeletion(t *testing.T) {
+	reseller, client := seedResellerRenewal(t)
+	db := database.GetDB()
+	other := model.ClientRecord{Email: "other-unassign@example.test", TotalGB: 20, Enable: true}
+	if err := db.Create(&other).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&model.ResellerClient{ResellerId: reseller.Id, Email: other.Email}).Error; err != nil {
+		t.Fatal(err)
+	}
+	incident := model.ResellerNodeCounterIncident{NodeId: 77, Email: client.Email, PreviousUp: 120, ObservedUp: 1}
+	if err := db.Create(&incident).Error; err != nil {
+		t.Fatal(err)
+	}
+	svc := &ResellerService{}
+	if err := svc.UnassignClients(reseller.Id, []string{other.Email, "  RENEW@example.test  "}); err == nil {
+		t.Fatal("batch unassignment accepted unresolved incident")
+	}
+	var count int64
+	if err := db.Model(&model.ResellerClient{}).Where("reseller_id = ?", reseller.Id).Count(&count).Error; err != nil || count != 2 {
+		t.Fatalf("batch was not rolled back: count=%d err=%v", count, err)
+	}
+	if err := svc.Delete(reseller.Id); err == nil {
+		t.Fatal("reseller deletion erased incident ownership")
+	}
+	if err := db.Model(&model.Reseller{}).Where("id = ?", reseller.Id).Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("reseller lost: count=%d err=%v", count, err)
+	}
+	if err := svc.UnassignClient(reseller.Id, other.Email); err != nil {
+		t.Fatalf("unrelated client blocked: %v", err)
+	}
+	// An administrator must first perform evidence-based reconciliation.
+	if err := db.Delete(&incident).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.UnassignClient(reseller.Id, client.Email); err != nil {
+		t.Fatal(err)
+	}
+}

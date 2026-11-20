@@ -182,3 +182,10 @@ only by the current node attachment: removing an attachment does not clear the
 owner's quota barrier, and the node stays blocked even if the client disappears
 from later snapshots. Deleting or transferring the ownership mapping directly
 can still bypass that association and requires manual audit/reconciliation.
+
+The panel rejects explicit reseller-client unassignment and reseller deletion
+while a mapped client has an unresolved node-counter incident, including mixed
+unassignment batches. After evidence-based reconciliation an administrator can
+remove the marker and retry. Other administrative client-deletion paths and
+direct database writes are not automatically fenced by this check; do not use
+them to bypass unresolved accounting.
