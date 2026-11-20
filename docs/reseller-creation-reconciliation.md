@@ -69,3 +69,9 @@ An in-process panel scheduler replacement reuses the same Xray traffic job so
 an uncommitted batch or retained capture lock is not abandoned during a soft
 restart. This does not make the in-memory batch crash durable or fence a lost
 PostgreSQL lock connection; journal and runtime reconciliation are still needed.
+
+On orderly panel shutdown, the Xray collector retries its pending batch and
+attempts one final poll before stopping the core. Failures are logged and
+returned by the stop operation; a pending batch remains available for an
+in-process retry. Traffic can continue between the last poll and core shutdown,
+and a crash can bypass this step, so it is not proof of final usage.

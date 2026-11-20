@@ -39,6 +39,54 @@ var sharedXrayTrafficJob = NewXrayTrafficJob()
 
 func SharedXrayTrafficJob() *XrayTrafficJob { return sharedXrayTrafficJob }
 
+// FlushBeforeStop retries pending batches and, if the managed core is still
+// running, captures one final poll before orderly shutdown. It does not stop
+// traffic during that poll, so bytes transferred afterwards can still be lost.
+func (j *XrayTrafficJob) FlushBeforeStop() error {
+	j.runMu.Lock()
+	defer j.runMu.Unlock()
+	apply := func() error {
+		if j.pending == nil {
+			return nil
+		}
+		if err := j.prepareXrayBatch(j.xrayService.GetXrayTraffic, j.inboundService.CaptureXrayTrafficIdentities); err != nil {
+			return err
+		}
+		batch := j.pending
+		restart, _, err := j.applyPending(func(b *xrayTrafficBatch) (bool, bool, error) {
+			return j.applyJournaledXrayBatch(b)
+		})
+		if restart {
+			j.xrayService.SetToNeedRestart()
+		}
+		if err != nil {
+			return err
+		}
+		if err, restart := j.outboundService.AddTraffic(batch.traffic, batch.clients); err != nil {
+			return fmt.Errorf("persist final outbound traffic: %w", err)
+		} else if restart {
+			j.xrayService.SetToNeedRestart()
+		}
+		return nil
+	}
+	if err := apply(); err != nil {
+		return fmt.Errorf("flush pending Xray traffic: %w", err)
+	}
+	if err := j.replayXrayJournal(); err != nil {
+		return fmt.Errorf("replay Xray traffic journal: %w", err)
+	}
+	if !j.xrayService.IsXrayRunning() {
+		return nil
+	}
+	if err := j.prepareXrayBatch(j.xrayService.GetXrayTraffic, j.inboundService.CaptureXrayTrafficIdentities); err != nil {
+		return fmt.Errorf("prepare final Xray traffic: %w", err)
+	}
+	if err := apply(); err != nil {
+		return fmt.Errorf("flush final Xray traffic: %w", err)
+	}
+	return nil
+}
+
 // Run collects traffic statistics from Xray, updates the database, and pushes
 // real-time updates over WebSocket using compact delta payloads — no REST
 // fallback, scales to 10k–20k+ clients per inbound.

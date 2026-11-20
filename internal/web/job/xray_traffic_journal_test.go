@@ -237,3 +237,43 @@ func TestXrayJournalLateTrafficSurvivesClientDeletion(t *testing.T) {
 		t.Fatalf("late traffic was not archived: %+v %v", stat, err)
 	}
 }
+
+func TestXrayShutdownFlushRetriesPendingWithoutDoubleCounting(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XUI_DB_FOLDER", dir)
+	if err := database.InitDB(filepath.Join(dir, "test.db")); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.CloseDB() })
+	db := database.GetDB()
+	client := model.ClientRecord{Email: "shutdown-flush@example.test", Enable: true}
+	traffic := xray.ClientTraffic{Email: client.Email, Enable: true}
+	for _, row := range []any{&client, &traffic} {
+		if err := db.Create(row).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	job := NewXrayTrafficJob()
+	job.pending = &xrayTrafficBatch{id: uuid.NewString(), clients: []*xray.ClientTraffic{{Email: client.Email, Up: 31, Down: 12}}}
+	if err := db.Exec("CREATE TRIGGER fail_shutdown_flush BEFORE UPDATE ON client_traffics BEGIN SELECT RAISE(ABORT, 'injected failure'); END").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := job.FlushBeforeStop(); err == nil || job.pending == nil {
+		t.Fatalf("failure lost pending batch: %v", err)
+	}
+	if err := db.Exec("DROP TRIGGER fail_shutdown_flush").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := job.FlushBeforeStop(); err != nil {
+		t.Fatal(err)
+	}
+	if job.pending != nil {
+		t.Fatal("successful flush retained pending batch")
+	}
+	if err := job.FlushBeforeStop(); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.First(&traffic, traffic.Id).Error; err != nil || traffic.Up != 31 || traffic.Down != 12 {
+		t.Fatalf("unexpected traffic: %+v %v", traffic, err)
+	}
+}

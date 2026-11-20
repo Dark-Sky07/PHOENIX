@@ -551,10 +551,17 @@ func (s *Server) stop(stopXray bool, stopTgBot bool) error {
 		<-s.cron.Stop().Done()
 	}
 	if stopXray {
+		// Capture a final best-effort Xray batch while the core and traffic
+		// writer are still alive. Active connections can transfer more bytes
+		// until the core actually stops; this is not a lossless barrier.
+		if err := job.SharedXrayTrafficJob().FlushBeforeStop(); err != nil {
+			logger.Warning("persist final Xray traffic on shutdown failed:", err)
+			err2 = common.Combine(err2, err)
+		}
 		tuic.GetManager().StopAll()
 		if err := job.NewTuicJob().FlushStoppedTraffic(); err != nil {
 			logger.Warning("persist final TUIC traffic on shutdown failed:", err)
-			err2 = err
+			err2 = common.Combine(err2, err)
 		}
 		if err := s.xrayService.StopXray(); err != nil && !strings.Contains(err.Error(), "xray is not running") {
 			err2 = common.Combine(err2, err)
