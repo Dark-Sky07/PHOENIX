@@ -138,7 +138,7 @@ func TestCheckoutOrderAndWebhookCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateOrder: %v", err)
 	}
-	if order.Amount != 14 || !strings.HasPrefix(order.OrderId, "co_") || order.GatewayURL != "" {
+	if order.Amount != 14 || order.Currency != "USD" || !strings.HasPrefix(order.OrderId, "co_") || order.GatewayURL != "" {
 		t.Fatalf("unexpected order: %+v", order)
 	}
 
@@ -462,5 +462,30 @@ func TestDepositCurrencyChangeRequiresReconciliation(t *testing.T) {
 	}
 	if _, err := svc.ProcessWebhook(PaymentWebhookPayload{OrderId: order.OrderId, Amount: 10}); err != nil {
 		t.Fatalf("original currency rejected: %v", err)
+	}
+}
+
+func TestCheckoutRejectsUnpricedComponents(t *testing.T) {
+	setupBulkDB(t)
+	email := seedCheckoutClient(t)
+	svc := &CheckoutService{}
+	db := database.GetDB()
+	enableCheckout(t, 0, 1)
+	if _, err := svc.CreateOrder(email, 10000, 1); err == nil {
+		t.Fatal("traffic given away with paid months")
+	}
+	if _, err := svc.CreateOrder(email, 0, 1); err != nil {
+		t.Fatalf("priced months rejected: %v", err)
+	}
+	enableCheckout(t, 1, 0)
+	if _, err := svc.CreateOrder(email, 1, 36); err == nil {
+		t.Fatal("months given away with paid traffic")
+	}
+	if _, err := svc.CreateOrder(email, 1, 0); err != nil {
+		t.Fatalf("priced traffic rejected: %v", err)
+	}
+	var count int64
+	if err := db.Model(&model.PaymentOrder{}).Count(&count).Error; err != nil || count != 2 {
+		t.Fatalf("rejected orders persisted: %d %v", count, err)
 	}
 }

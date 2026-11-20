@@ -1479,7 +1479,7 @@
       "checkoutPricePerGB": "Price Per GB",
       "checkoutPricePerGBDesc": "Charged for each added gigabyte a client selects on the checkout page.",
       "checkoutPricePerMonth": "Price Per Month",
-      "checkoutPricePerMonthDesc": "Charged for each 30-day renewal a client selects on the checkout page.",
+      "checkoutPricePerMonthDesc": "Charged for each 30-day renewal a client selects on the checkout page. Set to zero to disable time purchases.",
       "checkoutGatewayURL": "Payment Gateway Link Template",
       "checkoutGatewayURLDesc": "Optional. When set, clients are redirected to this URL after ordering. Placeholders: {orderId}, {amount}, {ref}.",
       "checkoutPayInfo": "Manual Payment Instructions",

@@ -46,3 +46,9 @@ an exchange rate. Orders created before currency snapshots have no reliable
 currency evidence and continue to use the current setting for compatibility;
 operators must inspect their gateway records before processing them after a
 currency change. The callback does not itself carry verified currency evidence.
+
+Checkout treats a zero per-GB or per-month price as disabling that particular
+purchase option, not as a free add-on to a paid option. Configure a positive
+price for every option intended for sale. Previously created pending orders
+retain their original terms and require review if they included a zero-priced
+component unexpectedly.

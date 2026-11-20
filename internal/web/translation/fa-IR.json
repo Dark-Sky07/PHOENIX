@@ -1465,7 +1465,7 @@
       "checkoutPricePerGB": "قیمت هر گیگابایت",
       "checkoutPricePerGBDesc": "مبلغ دریافتی به‌ازای هر گیگابایت ترافیک اضافه‌ای که کلاینت انتخاب می‌کند.",
       "checkoutPricePerMonth": "قیمت هر ماه",
-      "checkoutPricePerMonthDesc": "مبلغ دریافتی به‌ازای هر ۳۰ روز تمدیدی که کلاینت انتخاب می‌کند.",
+      "checkoutPricePerMonthDesc": "مبلغ دریافتی به‌ازای هر ۳۰ روز تمدید. برای غیرفعال کردن خرید زمان، مقدار را صفر قرار دهید.",
       "checkoutGatewayURL": "قالب لینک درگاه پرداخت",
       "checkoutGatewayURLDesc": "اختیاری. اگر تنظیم شود، کلاینت بعد از ثبت سفارش به این آدرس هدایت می‌شود. جایگزین‌ها: {orderId}، {amount}، {ref}.",
       "checkoutPayInfo": "راهنمای پرداخت دستی",

@@ -232,6 +232,11 @@ func (s *CheckoutService) CreateOrder(email string, gb int64, months int) (*Chec
 	if math.IsNaN(cfg.pricePerGB) || math.IsInf(cfg.pricePerGB, 0) || cfg.pricePerGB < 0 || math.IsNaN(cfg.pricePerMon) || math.IsInf(cfg.pricePerMon, 0) || cfg.pricePerMon < 0 {
 		return nil, common.NewError("checkout prices are invalid")
 	}
+	// A zero price disables that component; otherwise a paid component could
+	// be combined with unlimited quantities of an unconfigured component.
+	if (gb > 0 && cfg.pricePerGB == 0) || (months > 0 && cfg.pricePerMon == 0) {
+		return nil, common.NewError("selected checkout option is not configured")
+	}
 	amount := RoundMoney(float64(gb)*cfg.pricePerGB+float64(months)*cfg.pricePerMon, cfg.currency)
 	if math.IsNaN(amount) || math.IsInf(amount, 0) || amount <= 0 {
 		return nil, common.NewError("checkout prices are not configured")
@@ -288,9 +293,10 @@ func (s *CheckoutService) CreateOrder(email string, gb int64, months int) (*Chec
 	}
 
 	out := &CheckoutOrder{
-		OrderId: order.OrderId,
-		Amount:  amount,
-		PayInfo: cfg.payInfo,
+		OrderId:  order.OrderId,
+		Amount:   amount,
+		Currency: cfg.currency,
+		PayInfo:  cfg.payInfo,
 	}
 	if cfg.gatewayURL != "" {
 		out.GatewayURL = strings.NewReplacer(
