@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"math/bits"
 	"sort"
 	"strings"
 	"sync"
@@ -158,6 +160,13 @@ func nodeEmailKey(email string) string {
 	return transferEmailKey(email)
 }
 
+// Compare nonnegative counter sums without overflowing int64.
+func nodeTrafficTotalLE(up, down, otherUp, otherDown int64) bool {
+	low, carry := bits.Add64(uint64(up), uint64(down), 0)
+	otherLow, otherCarry := bits.Add64(uint64(otherUp), uint64(otherDown), 0)
+	return carry < otherCarry || (carry == otherCarry && low <= otherLow)
+}
+
 func (s *InboundService) upsertNodeBaseline(tx *gorm.DB, nodeID int, email string, up, down int64) error {
 	email = strings.TrimSpace(email)
 	if email == "" {
@@ -194,6 +203,36 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 	}
 	db := database.GetDB()
 	now := time.Now().UnixMilli()
+	// Validate the whole snapshot before any baseline or database mutation.
+	// A malformed counter must not turn into a reset or partially advance a
+	// node's baseline, since doing so could erase or double-charge usage.
+	snapshotEmails := make(map[string]bool)
+	reported := make(map[string]nodeTrafficCounter)
+	for _, inbound := range snap.Inbounds {
+		if inbound == nil {
+			return false, errors.New("nil node inbound snapshot")
+		}
+		if inbound.Up < 0 || inbound.Down < 0 {
+			return false, fmt.Errorf("negative node inbound traffic for %q", inbound.Tag)
+		}
+		seen := make(map[string]bool)
+		for _, traffic := range inbound.ClientStats {
+			key := nodeEmailKey(traffic.Email)
+			if key == "" || traffic.Up < 0 || traffic.Down < 0 {
+				return false, fmt.Errorf("invalid node client traffic for inbound %q", inbound.Tag)
+			}
+			if seen[key] {
+				return false, fmt.Errorf("duplicate node client traffic for %q", key)
+			}
+			seen[key] = true
+			counter := nodeTrafficCounter{Up: traffic.Up, Down: traffic.Down}
+			if previous, exists := reported[key]; exists && previous != counter {
+				return false, fmt.Errorf("conflicting node counters for %q require reconciliation", key)
+			}
+			reported[key] = counter
+			snapshotEmails[key] = true
+		}
+	}
 
 	// originGuidFor attributes a synced inbound to the panel that physically
 	// hosts it: inbounds the node forwards from its own sub-nodes already carry
@@ -264,16 +303,34 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 		return false, err
 	}
 	for i := range baselineRows {
-		nodeBaselines[nodeEmailKey(baselineRows[i].Email)] = nodeTrafficCounter{Up: baselineRows[i].Up, Down: baselineRows[i].Down}
+		key := nodeEmailKey(baselineRows[i].Email)
+		if snapshotEmails[key] {
+			if baselineRows[i].Up < 0 || baselineRows[i].Down < 0 {
+				return false, fmt.Errorf("negative node baseline for %q requires reconciliation", key)
+			}
+			if _, exists := nodeBaselines[key]; exists {
+				return false, fmt.Errorf("ambiguous node baseline for %q requires reconciliation", key)
+			}
+		}
+		nodeBaselines[key] = nodeTrafficCounter{Up: baselineRows[i].Up, Down: baselineRows[i].Down}
 	}
 
-	var existingEmailsList []string
-	if err := db.Model(xray.ClientTraffic{}).Pluck("email", &existingEmailsList).Error; err != nil {
+	var existingRows []xray.ClientTraffic
+	if err := db.Model(xray.ClientTraffic{}).Select("email", "up", "down").Find(&existingRows).Error; err != nil {
 		return false, err
 	}
-	existingEmails := make(map[string]struct{}, len(existingEmailsList))
-	for _, e := range existingEmailsList {
-		existingEmails[nodeEmailKey(e)] = struct{}{}
+	existingEmails := make(map[string]struct{}, len(existingRows))
+	for _, row := range existingRows {
+		key := nodeEmailKey(row.Email)
+		if snapshotEmails[key] {
+			if row.Up < 0 || row.Down < 0 {
+				return false, fmt.Errorf("negative client traffic for %q requires reconciliation", key)
+			}
+			if _, exists := existingEmails[key]; exists {
+				return false, fmt.Errorf("ambiguous client traffic for %q requires reconciliation", key)
+			}
+		}
+		existingEmails[key] = struct{}{}
 	}
 
 	var defaultUserId int
@@ -430,7 +487,10 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 			updates["traffic_reset"] = snapIb.TrafficReset
 			updates["last_traffic_reset_time"] = snapIb.LastTrafficResetTime
 		}
-		if !inGrace || (snapIb.Up+snapIb.Down) <= (c.Up+c.Down) {
+		if inGrace && (c.Up < 0 || c.Down < 0) {
+			return false, fmt.Errorf("negative stored inbound traffic for %q requires reconciliation", c.Tag)
+		}
+		if !inGrace || nodeTrafficTotalLE(snapIb.Up, snapIb.Down, c.Up, c.Down) {
 			updates["up"] = snapIb.Up
 			updates["down"] = snapIb.Down
 		}
@@ -595,13 +655,16 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 			if err := tx.Exec(
 				fmt.Sprintf(
 					`UPDATE client_traffics
-					 SET up = up + ?, down = down + ?, enable = %s, total = ?, expiry_time = ?, reset = ?,
+					 SET up = CASE WHEN up < 0 OR up > ? THEN ? ELSE up + ? END,
+					     down = CASE WHEN down < 0 OR down > ? THEN ? ELSE down + ? END,
+					     enable = %s, total = ?, expiry_time = ?, reset = ?,
 					     last_online = %s
 					 WHERE LOWER(TRIM(email)) = LOWER(?)`,
 					enableExpr,
 					database.GreatestExpr("last_online", "?"),
 				),
-				deltaUp, deltaDown, cs.Enable, cs.Total, cs.ExpiryTime, cs.Reset,
+				int64(math.MaxInt64)-deltaUp, int64(math.MaxInt64), deltaUp,
+				int64(math.MaxInt64)-deltaDown, int64(math.MaxInt64), deltaDown, cs.Enable, cs.Total, cs.ExpiryTime, cs.Reset,
 				cs.LastOnline, email,
 			).Error; err != nil {
 				return false, err

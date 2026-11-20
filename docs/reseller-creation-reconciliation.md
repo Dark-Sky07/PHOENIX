@@ -131,3 +131,9 @@ node, and is not proof of final usage: unpolled bytes, direct node changes,
 non-participating writers and malformed or omitted identities remain risks.
 The sync also refuses newly introduced node associations for mapped reseller
 clients, including traffic-only reports, until manually reconciled.
+
+Node traffic snapshots now reject negative or conflicting counters, duplicate
+client rows within an inbound, and corrupt or ambiguous stored baselines for
+reported clients before applying the snapshot. Delta additions saturate rather
+than wrap. Rejected snapshots require investigation and can stall collection;
+they do not establish a trustworthy final reading from the remote node.
