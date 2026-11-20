@@ -246,3 +246,8 @@ incident can therefore stop all participating local/node collection even when
 the DB write succeeds. If fallback storage fails but the DB marker succeeds,
 the DB barrier remains; neither storage can cover a crash before the first
 successful durable write or fence a separate host with an unshared folder.
+
+An isolated-process regression test now checks that a durable fallback written
+by one process remains a barrier in a freshly launched process sharing the same
+database folder, without depending on a database incident. This does not cover
+separate machines with different folders or simulate every filesystem failure.

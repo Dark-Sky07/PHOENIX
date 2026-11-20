@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -118,5 +119,44 @@ func TestCounterIncidentFallbackStoredBeforeSuccessfulDatabaseWrite(t *testing.T
 				t.Fatal("fallback bypassed after DB marker removal")
 			}
 		})
+	}
+}
+
+// Each helper is a fresh OS process. The writer exits without Go cleanup to
+// model an abrupt panel exit after the fallback has reported durable success.
+func TestCounterIncidentFallbackAcrossProcesses(t *testing.T) {
+	mode := os.Getenv("PHOENIX_COUNTER_INCIDENT_HELPER")
+	if mode != "" {
+		switch mode {
+		case "write":
+			incident := model.ResellerNodeCounterIncident{NodeId: 77, Email: "renew@example.test", PreviousUp: 120, PreviousDown: 180, ObservedUp: 2, ObservedDown: 180}
+			if err := storeCounterIncidentFallback(incident); err != nil {
+				t.Fatalf("store: %v", err)
+			}
+			os.Exit(0)
+		case "check":
+			if err := pendingCounterIncidentError(); err == nil {
+				t.Fatal("fresh process ignored the fallback")
+			}
+			return
+		default:
+			t.Fatalf("unknown helper mode %q", mode)
+		}
+	}
+	reseller, _ := seedResellerRenewal(t)
+	for _, mode := range []string{"write", "check"} {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestCounterIncidentFallbackAcrossProcesses$")
+		cmd.Env = append(os.Environ(), "PHOENIX_COUNTER_INCIDENT_HELPER="+mode)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("helper %s: %v\n%s", mode, err, output)
+		}
+	}
+	if err := (&ResellerService{}).CheckTrafficQuota(&reseller, 1); err == nil {
+		t.Fatal("quota ignored marker written by another process")
+	}
+	var n int64
+	if err := database.GetDB().Model(&model.ResellerNodeCounterIncident{}).Count(&n).Error; err != nil || n != 0 {
+		t.Fatalf("test unexpectedly relied on database incident: count=%d err=%v", n, err)
 	}
 }
