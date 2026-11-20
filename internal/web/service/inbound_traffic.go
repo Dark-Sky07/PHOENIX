@@ -962,7 +962,18 @@ func (s *InboundService) ResetInboundTraffic(id int) error {
 	})
 }
 
-func (s *InboundService) DelDepletedClients(id int) (err error) {
+func (s *InboundService) DelDepletedClients(id int) error {
+	unlock, err := LockResellerAllocation()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return submitTrafficWrite(func() error { return s.delDepletedClientsLocked(id) })
+}
+
+// Snapshots, association updates and counter deletion share a transaction.
+// The caller holds both the allocation lock and the traffic writer.
+func (s *InboundService) delDepletedClientsLocked(id int) (err error) {
 	db := database.GetDB()
 	if db == nil {
 		return fmt.Errorf("database is not initialized")
@@ -1106,6 +1117,27 @@ func (s *InboundService) DelDepletedClients(id int) (err error) {
 		}
 	}
 	if len(toDelete) > 0 {
+		// Never discard a mapped client's persisted usage with its counters.
+		// Missing or ambiguous mapped identities must be reconciled instead.
+		for _, email := range toDelete {
+			var mappings int64
+			if err = tx.Model(&model.ResellerClient{}).Where("LOWER(TRIM(email)) = ?", email).Count(&mappings).Error; err != nil {
+				return err
+			}
+			if mappings == 0 {
+				continue
+			}
+			var clients []model.ClientRecord
+			if err = tx.Where("LOWER(TRIM(email)) = ?", email).Find(&clients).Error; err != nil {
+				return err
+			}
+			if len(clients) != 1 {
+				return fmt.Errorf("cannot archive depleted reseller client %q; manual reconciliation required", email)
+			}
+			if err = archiveResellerClientUsageTx(tx, &clients[0], 0); err != nil {
+				return err
+			}
+		}
 		if err = s.delClientStatsByEmails(tx, toDelete); err != nil {
 			return err
 		}

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -188,5 +189,59 @@ func TestGetClientTrafficByEmailReadsClientsTable(t *testing.T) {
 	}
 	if tr.SubId != "sa" {
 		t.Fatalf("SubId not enriched from clients table, got %q", tr.SubId)
+	}
+}
+
+func TestInboundDepletedCleanupPreservesResellerUsage(t *testing.T) {
+	for _, failArchive := range []bool{false, true} {
+		t.Run(fmt.Sprintf("archive_failure_%v", failArchive), func(t *testing.T) {
+			setupBulkDB(t)
+			db := database.GetDB()
+			reseller := model.Reseller{Username: "depleted-owner", Password: "hash", Enable: true, TrafficLimit: 1000}
+			if err := db.Create(&reseller).Error; err != nil {
+				t.Fatal(err)
+			}
+			client := model.Client{Email: "depleted-owner@example.test", ID: "44444444-4444-4444-4444-444444444444", SubID: "depleted-owner", Enable: true, TotalGB: 100}
+			ib := mkInbound(t, 21005, model.VLESS, clientsSettings(t, []model.Client{client}))
+			if err := (&ClientService{}).SyncInbound(nil, ib.Id, []model.Client{client}); err != nil {
+				t.Fatal(err)
+			}
+			for _, row := range []any{&model.ResellerClient{ResellerId: reseller.Id, Email: client.Email}, &model.ResellerInbound{ResellerId: reseller.Id, InboundId: ib.Id}} {
+				if err := db.Create(row).Error; err != nil {
+					t.Fatal(err)
+				}
+			}
+			mkTraffic(t, ib.Id, client.Email, 60, 40, 100, 0, true)
+			if failArchive {
+				if err := db.Exec("CREATE TRIGGER reject_depleted_archive BEFORE INSERT ON reseller_traffic_archives BEGIN SELECT RAISE(ABORT, 'archive failed'); END").Error; err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := (&InboundService{}).DelDepletedClients(ib.Id)
+			if failArchive {
+				if err == nil {
+					t.Fatal("archive failure allowed deletion")
+				}
+				var count int64
+				if err := db.Model(&xray.ClientTraffic{}).Where("email = ?", client.Email).Count(&count).Error; err != nil || count != 1 {
+					t.Fatalf("traffic lost on rollback: %d %v", count, err)
+				}
+				if err := db.Model(&model.ClientInbound{}).Where("inbound_id = ?", ib.Id).Count(&count).Error; err != nil || count != 1 {
+					t.Fatalf("association lost on rollback: %d %v", count, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var archive model.ResellerTrafficArchive
+			if err := db.Where("reseller_id = ? AND email = ?", reseller.Id, client.Email).First(&archive).Error; err != nil || archive.ConsumedBytes != 100 {
+				t.Fatalf("incorrect archive: %+v %v", archive, err)
+			}
+			stat, err := (&ResellerService{}).Stat(&reseller)
+			if err != nil || stat.UsedTraffic != 100 || stat.AllocatedTraffic != 100 {
+				t.Fatalf("usage changed after deletion: %+v %v", stat, err)
+			}
+		})
 	}
 }
