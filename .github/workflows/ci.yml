@@ -150,11 +150,9 @@ jobs:
       - name: Build
         run: npm run build
         working-directory: frontend
-      - name: Audit production dependencies
-        # Development/build-tool dependencies are not shipped in PHOENIX binaries.
-        # Keep the release gate focused on dependencies included in the product;
-        # known dev-only advisories remain visible through a full local npm audit.
-        run: npm audit --omit=dev --audit-level=moderate
+      - name: Audit all dependencies
+        # Development tooling is part of the build supply chain too.
+        run: npm audit --audit-level=low
         working-directory: frontend
 
   postgres-traffic-identity:
