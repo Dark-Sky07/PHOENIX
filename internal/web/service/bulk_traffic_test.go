@@ -288,3 +288,27 @@ func TestDepletedCleanupUsesGlobalCountersAndAvoidsOverflow(t *testing.T) {
 		})
 	}
 }
+
+func TestScopedInboundDepletedCleanupDoesNotDeleteUnrelatedOrphanCounters(t *testing.T) {
+	setupBulkDB(t)
+	db := database.GetDB()
+	client := model.Client{Email: "target@example.test", ID: "11111111-1111-1111-1111-111111111111", SubID: "target", Enable: true, TotalGB: 100}
+	inbound := mkInbound(t, 21007, model.VLESS, clientsSettings(t, []model.Client{client}))
+	if err := (&ClientService{}).SyncInbound(nil, inbound.Id, []model.Client{client}); err != nil {
+		t.Fatal(err)
+	}
+	mkTraffic(t, inbound.Id, client.Email, 100, 0, 100, 0, true)
+	// The unrelated orphan is depleted and has no client_inbounds row. Its
+	// counters must not be deleted by a request targeting a different inbound.
+	mkTraffic(t, inbound.Id+1000, "orphan@example.test", 45, 55, 100, 0, true)
+	if err := (&InboundService{}).DelDepletedClients(inbound.Id); err != nil {
+		t.Fatal(err)
+	}
+	var rows []xray.ClientTraffic
+	if err := db.Order("email").Find(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Email != "orphan@example.test" || rows[0].Up != 45 || rows[0].Down != 55 {
+		t.Fatalf("scoped cleanup changed unrelated traffic: %+v", rows)
+	}
+}

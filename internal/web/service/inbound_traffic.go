@@ -1036,6 +1036,7 @@ func (s *InboundService) delDepletedClientsLocked(id int) (err error) {
 		new model.Inbound
 	}
 	updates := make([]runtimeUpdate, 0, len(inbounds))
+	removedEmails := make(map[string]struct{})
 	for _, inbound := range inbounds {
 		var settings map[string]any
 		if err = json.Unmarshal([]byte(inbound.Settings), &settings); err != nil {
@@ -1055,8 +1056,10 @@ func (s *InboundService) delDepletedClientsLocked(id int) (err error) {
 				continue
 			}
 			email, _ := client["email"].(string)
-			if _, isDepleted := depletedEmails[transferEmailKey(email)]; isDepleted {
+			key := transferEmailKey(email)
+			if _, isDepleted := depletedEmails[key]; isDepleted {
 				removed = true
+				removedEmails[key] = struct{}{}
 				continue
 			}
 			newClients = append(newClients, rawClient)
@@ -1090,9 +1093,22 @@ func (s *InboundService) delDepletedClientsLocked(id int) (err error) {
 	// Keep a shared client's accounting while another inbound still owns the
 	// canonical association. The link table, rather than a stale
 	// client_traffics.inbound_id or settings substring, is authoritative.
-	emails := make([]string, 0, len(depletedEmails))
-	for email := range depletedEmails {
+	// A scoped cleanup must not delete counters for unrelated orphaned users
+	// merely because they have no current inbound link anywhere.
+	selected := depletedEmails
+	if id >= 0 {
+		selected = removedEmails
+	}
+	emails := make([]string, 0, len(selected))
+	for email := range selected {
 		emails = append(emails, email)
+	}
+	if len(emails) == 0 {
+		if err = tx.Commit().Error; err != nil {
+			return err
+		}
+		committed = true
+		return nil
 	}
 	var toDelete []string
 	if id < 0 {
