@@ -454,3 +454,12 @@ requires rejecting legacy snapshots for affected reseller accounting and
 showing actionable warnings without shutting down the node; those guards and
 UI are not implemented yet. Do not treat the presence of this package as a
 protocol rollout or as permission to clear existing incident markers.
+
+The service now has an experimental verified-global-snapshot entry point that
+applies the existing global accounting rules and advances receiver sequence in
+the same database transaction. It is not wired to an HTTP route or the node
+sender. The existing legacy endpoint still accepts unversioned input and does
+not use this protection; no legacy-node migration guard or dashboard warning
+is active. The eventual route must bind receiver ID and secret to a trusted
+registered peer, impose body limits before parsing, authenticate transport,
+and never accept those trusted values directly from an untrusted request.

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -8,6 +9,7 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
 	"github.com/Dark-Sky07/phoenix/internal/logger"
+	"github.com/Dark-Sky07/phoenix/internal/web/trafficprotocol"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
 
 	"gorm.io/gorm"
@@ -24,6 +26,42 @@ import (
 // unversioned decrease is ambiguous and blocks updates until manual review.
 // Emails this panel doesn't host are dropped.
 func (s *InboundService) AcceptGlobalTraffic(masterGuid string, traffics []*xray.ClientTraffic) error {
+	return s.acceptGlobalTraffic(masterGuid, traffics, nil)
+}
+
+// AcceptVerifiedGlobalTraffic applies a signed snapshot and advances its
+// provisioned receiver sequence in the same database transaction. The caller
+// must obtain receiverID and key from trusted peer provisioning, not the
+// request. This method is not yet exposed on a network endpoint; the legacy
+// endpoint remains separate and is not protected by it.
+func (s *InboundService) AcceptVerifiedGlobalTraffic(receiverID string, key []byte, envelope trafficprotocol.Envelope) error {
+	if len(envelope.Snapshot) == 0 || len(envelope.Snapshot) > trafficprotocol.MaxSnapshotBytes {
+		return errors.New("invalid traffic snapshot size")
+	}
+	if envelope.Sender != strings.TrimSpace(envelope.Sender) {
+		return errors.New("noncanonical traffic snapshot sender")
+	}
+	// Prevent caller mutation between decoding and verification.
+	envelope.Snapshot = append([]byte(nil), envelope.Snapshot...)
+	envelope.MAC = append([]byte(nil), envelope.MAC...)
+	key = append([]byte(nil), key...)
+	var traffics []*xray.ClientTraffic
+	if err := json.Unmarshal(envelope.Snapshot, &traffics); err != nil {
+		return errors.New("invalid global traffic snapshot")
+	}
+	if len(traffics) == 0 {
+		return errors.New("empty verified global traffic snapshot")
+	}
+	return s.acceptGlobalTraffic(envelope.Sender, traffics, func(db *gorm.DB, apply func(*gorm.DB) error) error {
+		return trafficprotocol.ApplyVerified(db, receiverID, key, envelope, func(tx *gorm.DB, _ []byte) error {
+			return apply(tx)
+		})
+	})
+}
+
+type globalTrafficTransaction func(db *gorm.DB, apply func(*gorm.DB) error) error
+
+func (s *InboundService) acceptGlobalTraffic(masterGuid string, traffics []*xray.ClientTraffic, transact globalTrafficTransaction) error {
 	masterGuid = strings.TrimSpace(masterGuid)
 	if masterGuid == "" {
 		return errors.New("global traffic master identity is required")
@@ -74,7 +112,7 @@ func (s *InboundService) AcceptGlobalTraffic(masterGuid string, traffics []*xray
 			}
 			known = append(known, page...)
 		}
-		if len(known) == 0 {
+		if len(known) == 0 && transact == nil {
 			return nil
 		}
 		seenKnown := make(map[string]bool, len(known))
@@ -102,7 +140,7 @@ func (s *InboundService) AcceptGlobalTraffic(masterGuid string, traffics []*xray
 			})
 		}
 
-		err := db.Transaction(func(tx *gorm.DB) error {
+		apply := func(tx *gorm.DB) error {
 			// This protocol has no authenticated generation or ordering. A
 			// decrease may be a reset, a stale replay, or missing traffic; it
 			// cannot safely be treated as a new accounting window.
@@ -160,7 +198,11 @@ func (s *InboundService) AcceptGlobalTraffic(masterGuid string, traffics []*xray
 				}
 			}
 			return nil
-		})
+		}
+		if transact == nil {
+			transact = func(db *gorm.DB, apply func(*gorm.DB) error) error { return db.Transaction(apply) }
+		}
+		err := transact(db, apply)
 		var decrease *globalCounterDecrease
 		if errors.As(err, &decrease) {
 			rememberGlobalCounterIncident(decrease)
