@@ -477,3 +477,10 @@ resetting sequence or generation. No administration UI, sender rollout or
 legacy endpoint guard exists yet. Do not manually reset sequence state to get
 an old snapshot accepted, and do not use this endpoint as proof of complete
 runtime traffic. The old endpoint can still bypass this route entirely.
+
+Node global-traffic forwarding now rejects an unreadable global overlay,
+negative counters, or ambiguous normalized local/global identities instead of
+sending a partial or malformed snapshot. This improves the existing forwarding
+path but does not authenticate it, prove its freshness, or activate the new
+verified sender. A forwarding error may leave the node with an older snapshot;
+investigate the logged error and reconcile before relying on its usage.

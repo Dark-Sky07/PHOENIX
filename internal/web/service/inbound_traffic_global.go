@@ -226,15 +226,25 @@ func chunkGlobalRows(rows []model.ClientGlobalTraffic, size int) [][]model.Clien
 // value any master pushed for that email. Read-path only — callers hand it
 // rows about to be serialized for display; the stored counters are untouched.
 func overlayGlobalTraffic(db *gorm.DB, rows []*xray.ClientTraffic) {
-	if len(rows) == 0 {
-		return
+	if err := overlayGlobalTrafficChecked(db, rows); err != nil {
+		logger.Warning("overlayGlobalTraffic:", err)
 	}
-	// Cheap short-circuit for the common case (a panel no master pushes to).
-	var probe int64
-	if err := db.Model(&model.ClientGlobalTraffic{}).Limit(1).Count(&probe).Error; err != nil || probe == 0 {
-		return
-	}
+}
 
+// overlayGlobalTrafficChecked must be used by accounting/sync senders: a
+// failed or partial overlay is not a valid global snapshot. Display callers
+// retain the best-effort wrapper above.
+func overlayGlobalTrafficChecked(db *gorm.DB, rows []*xray.ClientTraffic) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	var probe int64
+	if err := db.Model(&model.ClientGlobalTraffic{}).Limit(1).Count(&probe).Error; err != nil {
+		return err
+	}
+	if probe == 0 {
+		return nil
+	}
 	emails := make([]string, 0, len(rows))
 	byEmail := make(map[string][]*xray.ClientTraffic, len(rows))
 	for _, r := range rows {
@@ -253,20 +263,30 @@ func overlayGlobalTraffic(db *gorm.DB, rows []*xray.ClientTraffic) {
 	for _, batch := range chunkStrings(emails, sqlInChunk) {
 		var globals []model.ClientGlobalTraffic
 		if err := db.Where("LOWER(TRIM(email)) IN ?", batch).Find(&globals).Error; err != nil {
-			logger.Warning("overlayGlobalTraffic:", err)
-			return
+			return err
 		}
+		seen := make(map[string]bool, len(globals))
 		for i := range globals {
-			for _, r := range byEmail[strings.ToLower(strings.TrimSpace(globals[i].Email))] {
-				if globals[i].Up > r.Up {
-					r.Up = globals[i].Up
+			global := &globals[i]
+			if global.Up < 0 || global.Down < 0 {
+				return errors.New("negative global traffic cannot be forwarded")
+			}
+			identity := global.MasterGuid + "\x00" + transferEmailKey(global.Email)
+			if seen[identity] {
+				return errors.New("ambiguous global traffic cannot be forwarded")
+			}
+			seen[identity] = true
+			for _, r := range byEmail[transferEmailKey(global.Email)] {
+				if global.Up > r.Up {
+					r.Up = global.Up
 				}
-				if globals[i].Down > r.Down {
-					r.Down = globals[i].Down
+				if global.Down > r.Down {
+					r.Down = global.Down
 				}
 			}
 		}
 	}
+	return nil
 }
 
 // overlayGlobalTrafficValues is overlayGlobalTraffic for value slices.
@@ -315,7 +335,20 @@ func (s *InboundService) GetNodeClientTraffics(nodeID int) ([]*xray.ClientTraffi
 		}
 		out = append(out, page...)
 	}
-	overlayGlobalTraffic(db, out)
+	seenRows := make(map[string]bool, len(out))
+	for _, row := range out {
+		if row == nil || transferEmailKey(row.Email) == "" || row.Up < 0 || row.Down < 0 {
+			return nil, errors.New("invalid local traffic cannot be forwarded")
+		}
+		key := transferEmailKey(row.Email)
+		if seenRows[key] {
+			return nil, errors.New("ambiguous local traffic cannot be forwarded")
+		}
+		seenRows[key] = true
+	}
+	if err := overlayGlobalTrafficChecked(db, out); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
