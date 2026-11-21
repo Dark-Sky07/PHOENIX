@@ -47,6 +47,15 @@ func (s *InboundService) AcceptGlobalTraffic(masterGuid string, traffics []*xray
 		return nil
 	}
 
+	// A global snapshot can change effective reseller usage and a decrease can
+	// rewrite its archive. Serialize capture and commit with quota/ownership
+	// mutations and with pushes in other participating panel processes. Take
+	// the allocation lock before entering the writer to preserve lock order.
+	unlock, err := LockResellerAllocation()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	return submitTrafficWrite(func() error {
 		db := database.GetDB()
 		known := make([]string, 0, len(emails))

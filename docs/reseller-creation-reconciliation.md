@@ -312,3 +312,10 @@ it cannot see incidents not yet detected or fallback files on another host.
 An absent or malformed incident summary is also treated as unavailable by the
 administrator dashboard (including when an older backend returns no summary).
 It is not interpreted as evidence that there are no incidents.
+
+Global-traffic snapshot ingestion now takes the shared allocation lock before
+entering the traffic writer and holds it through the snapshot transaction. This
+serializes participating quota/ownership operations and other participating
+pushes using the same database, including across cooperating panel processes.
+It does not authenticate the source, order old snapshots, fence a lost lock
+connection or recover bytes that a master has not reported.
