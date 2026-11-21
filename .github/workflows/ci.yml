@@ -183,6 +183,10 @@ jobs:
         env:
           PHOENIX_TEST_POSTGRES_DSN: postgres://phoenix:phoenix@localhost:5432/phoenix_test?sslmode=disable
         run: go test ./internal/web/service -run '^(TestXrayTrafficIdentityLocksExistingRowsPostgres|TestResellerAllocationAdvisoryLockPostgres|TestConcurrentVoucherRedemptionPostgres|TestConcurrentResellerPaymentPostgres|TestEffectiveGlobalTrafficEnforcementPostgres|TestInboundTrafficOverflowPostgres|TestResellerNodeBaselinePostgres|TestCounterIncidentAcrossPostgresProcesses|TestXrayPollMarkerAcrossPostgresProcesses)$' -count=1
+      - name: Test ordered snapshot sequence concurrency on PostgreSQL
+        env:
+          PHOENIX_TEST_POSTGRES_DSN: postgres://phoenix:phoenix@localhost:5432/phoenix_test?sslmode=disable
+        run: go test ./internal/web/trafficprotocol -run '^TestSnapshotSequencePostgresConcurrency$' -count=1
       - name: Test PostgreSQL quota across processes
         env:
           PHOENIX_TEST_POSTGRES_DSN: postgres://phoenix:phoenix@localhost:5432/phoenix_test?sslmode=disable
