@@ -59,9 +59,7 @@ func (s *InboundService) AcceptVerifiedGlobalTraffic(receiverID string, key []by
 	})
 }
 
-type globalTrafficTransaction func(db *gorm.DB, apply func(*gorm.DB) error) error
-
-func (s *InboundService) acceptGlobalTraffic(masterGuid string, traffics []*xray.ClientTraffic, transact globalTrafficTransaction) error {
+func (s *InboundService) acceptGlobalTraffic(masterGuid string, traffics []*xray.ClientTraffic, transact func(*gorm.DB, func(*gorm.DB) error) error) error {
 	masterGuid = strings.TrimSpace(masterGuid)
 	if masterGuid == "" {
 		return errors.New("global traffic master identity is required")
