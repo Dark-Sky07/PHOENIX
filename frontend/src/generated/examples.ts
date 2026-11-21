@@ -547,6 +547,7 @@ export const EXAMPLES: Record<string, unknown> = {
     "transitive": false,
     "updatedAt": 1700000000,
     "uptimeSecs": 86400,
+    "verifiedGlobalPush": false,
     "xrayError": "",
     "xrayState": "",
     "xrayVersion": "25.10.31"

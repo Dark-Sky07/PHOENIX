@@ -535,6 +535,7 @@ export interface Node {
   transitive?: boolean;
   updatedAt: number;
   uptimeSecs: number;
+  verifiedGlobalPush: boolean;
   xrayError: string;
   xrayState: string;
   xrayVersion: string;

@@ -2443,6 +2443,10 @@
             "example": 86400,
             "type": "integer"
           },
+          "verifiedGlobalPush": {
+            "description": "Experimental rollout mode; ordinary node edits do not alter it. When\nenabled the sender never falls back to unversioned global traffic.",
+            "type": "boolean"
+          },
           "xrayError": {
             "type": "string"
           },
@@ -2487,6 +2491,7 @@
           "tlsVerifyMode",
           "updatedAt",
           "uptimeSecs",
+          "verifiedGlobalPush",
           "xrayError",
           "xrayState",
           "xrayVersion"
@@ -8062,6 +8067,7 @@
                       "transitive": false,
                       "updatedAt": 1700000000,
                       "uptimeSecs": 86400,
+                      "verifiedGlobalPush": false,
                       "xrayError": "",
                       "xrayState": "",
                       "xrayVersion": "25.10.31"

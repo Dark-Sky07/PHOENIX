@@ -11,7 +11,6 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/web/runtime"
 	"github.com/Dark-Sky07/phoenix/internal/web/service"
 	"github.com/Dark-Sky07/phoenix/internal/web/websocket"
-	"github.com/Dark-Sky07/phoenix/internal/xray"
 )
 
 const (
@@ -201,33 +200,45 @@ func (j *NodeTrafficSyncJob) maybePushGlobals(mgr *runtime.Manager, nodes []*mod
 		if err != nil {
 			continue
 		}
-		traffics, err := j.inboundService.GetNodeClientTraffics(n.Id)
-		if err != nil {
-			logger.Warning("node traffic sync: load globals for", n.Name, "failed:", err)
-			continue
-		}
-		if len(traffics) == 0 {
-			continue
-		}
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(n *model.Node, remote *runtime.Remote, traffics []*xray.ClientTraffic) {
+		go func(n *model.Node, remote *runtime.Remote) {
 			defer wg.Done()
 			defer func() { <-sem }()
 			ctx, cancel := context.WithTimeout(context.Background(), nodeTrafficSyncRequestTimeout)
 			defer cancel()
-			if err := remote.PushGlobalClientTraffics(ctx, masterGuid, traffics); err != nil {
-				// An old-build node without the endpoint answers 404 — not worth a
-				// warning every cycle.
-				if strings.Contains(err.Error(), "HTTP 404") {
+			err := dispatchNodeGlobalTraffic(n.VerifiedGlobalPush, func() error {
+				envelope, err := j.inboundService.PrepareVerifiedNodeGlobalTraffic(n.Id, masterGuid, n.ApiToken)
+				if err != nil || envelope == nil {
+					return err
+				}
+				return remote.PushVerifiedGlobalClientTraffics(ctx, envelope)
+			}, func() error {
+				traffics, err := j.inboundService.GetNodeClientTraffics(n.Id)
+				if err != nil || len(traffics) == 0 {
+					return err
+				}
+				return remote.PushGlobalClientTraffics(ctx, masterGuid, traffics)
+			})
+			if err != nil {
+				if !n.VerifiedGlobalPush && strings.Contains(err.Error(), "HTTP 404") {
 					logger.Debug("node traffic sync: node", n.Name, "has no global-traffic endpoint (old build)")
 				} else {
 					logger.Warning("node traffic sync: push globals to", n.Name, "failed:", err)
 				}
 			}
-		}(n, remote, traffics)
+		}(n, remote)
 	}
 	wg.Wait()
+}
+
+// Verified mode is deliberately fail-closed: a provisioning, TLS, or send
+// failure must never trigger a second request through the legacy endpoint.
+func dispatchNodeGlobalTraffic(verified bool, sendVerified, sendLegacy func() error) error {
+	if verified {
+		return sendVerified()
+	}
+	return sendLegacy()
 }
 
 func (j *NodeTrafficSyncJob) syncOne(mgr *runtime.Manager, n *model.Node, doIpSync bool) {

@@ -428,70 +428,41 @@ retention policy.
 
 ### Ordered authenticated snapshots: implementation in progress
 
-`internal/web/trafficprotocol` contains an envelope primitive and transactional
-sequence helpers. They are not
-connected to the existing node or global traffic endpoints and does not yet
-protect production traffic or block legacy nodes. It authenticates exact
-snapshot bytes, registered sender and generation, and a monotonically
-increasing sequence using HMAC-SHA256. Provision a unique random secret per
-sender/receiver relationship; TLS, secure key management and explicit
-registration/revocation are also required. Never trust a sender-provided
-identity or generation as registration. A generation transition must be
-operator-authorized and reconciled, not automatically accepted.
+The experimental verified global-traffic path authenticates exact snapshot
+bytes, registered sender and generation, and a sequence using HMAC-SHA256.
+The receiver binds a full-scope API bearer-token ID to a pre-provisioned
+`api-token:<token-id>` receiver row. Its key is domain-separated from that
+same token, not an independent credential: token compromise permits signatures
+and all other operations allowed by the token. Use a distinct token per peer,
+verified TLS and restricted administration. The receiver commits the
+accounting write and accepted sequence in the same transaction. A request
+cannot register a sender, choose a receiver row, or change its generation.
 
-The unused sequence helpers reserve a sender sequence durably and use a
-compare-and-swap transaction to verify, apply, and advance receiver state.
-They require pre-provisioned sender and receiver records and a trusted key;
-callbacks may make database-only changes in the same transaction. Before
-enabling the protocol, integration must use these helpers correctly and bind
-keys and registrations to the authenticated peer.
-Network retries, concurrent receivers, disconnects, crashes and restored
-backups need integration tests. A database rollback can restore an old
-sequence and invalidate replay protection unless an external monotonic anchor
-or explicit recovery procedure is used. A verified envelope also does not
-prove that a runtime observed or reported all traffic. The agreed rollout
-requires rejecting legacy snapshots for affected reseller accounting and
-showing actionable warnings without shutting down the node; those guards and
-UI are not implemented yet. Do not treat the presence of this package as a
-protocol rollout or as permission to clear existing incident markers.
+The scheduled sender uses this path only for nodes explicitly marked
+`verified_global_push`, with pre-provisioned `node:<id>` sender state. It
+captures under the participating allocation lock, reserves a durable sequence,
+and requires HTTPS with ordinary certificate verification. It does not fall
+back to the old endpoint after a verification, provisioning, transport or
+receiver failure. Ordinary node edits preserve the mode. Unmarked nodes still
+use the legacy endpoint; that endpoint can bypass this verified path entirely.
+The verified mode is not automatically provisioned and has no administration
+UI. Do not enable it until both peers, their identities, generations, sequence
+state and token are configured and reconciled under a reviewed procedure.
 
-The service now has an experimental verified-global-snapshot entry point that
-applies the existing global accounting rules and advances receiver sequence in
-the same database transaction. It is not wired to an HTTP route or the node
-sender. The existing legacy endpoint still accepts unversioned input and does
-not use this protection; no legacy-node migration guard or dashboard warning
-is active. The eventual route must bind receiver ID and secret to a trusted
-registered peer, impose body limits before parsing, authenticate transport,
-and never accept those trusted values directly from an untrusted request.
+The agreed rollout is **not complete**: legacy snapshots for reseller
+accounting are not blocked, no dashboard warning identifies old nodes, and
+cross-process failover/integration testing remains necessary. These mechanisms
+do not prove that a runtime observed or reported all traffic. The lock cannot
+fence a lost PostgreSQL session or nonparticipating writers. Database rollback
+can restore an old sequence and invalidate replay protection unless there is an
+external monotonic anchor or explicit recovery procedure. Never automatically
+accept a new generation or reset sequence state to clear an error. Back up
+sequence state together with accounting data and reconcile restoration, key
+rotation and generation changes; do not clear incident markers merely because
+this experimental path exists.
 
-A separate experimental `pushVerifiedClientTraffics` route now requires an
-authenticated full-scope API bearer token and looks up receiver state using
-`api-token:<token-id>`. That row must already bind the token to an expected
-sender and generation; a request cannot register a peer or select a receiver
-row. The HMAC key is domain-separated from the same bearer token, so it is not
-an independent credential: compromise of that token permits signatures and
-all other operations allowed by its API scope. Use distinct tokens per peer,
-verified TLS, restricted administration and deliberate rotation. A rotation
-requires controlled migration of the token-bound receiver state without
-resetting sequence or generation. No administration UI, sender rollout or
-legacy endpoint guard exists yet. Do not manually reset sequence state to get
-an old snapshot accepted, and do not use this endpoint as proof of complete
-runtime traffic. The old endpoint can still bypass this route entirely.
-
-Node global-traffic forwarding now rejects an unreadable global overlay,
-negative counters, or ambiguous normalized local/global identities instead of
-sending a partial or malformed snapshot. This improves the existing forwarding
-path but does not authenticate it, prove its freshness, or activate the new
-verified sender. A forwarding error may leave the node with an older snapshot;
-investigate the logged error and reconcile before relying on its usage.
-
-An experimental sender building block can capture node global traffic under the
-participating allocation lock, reserve a provisioned `node:<id>` sequence and
-sign the captured bytes using the node API token. Its HTTP sender requires
-HTTPS with ordinary certificate verification and never falls back after an
-error. Neither is wired into the scheduled sync job; there is no peer setup UI,
-legacy downgrade guard or dashboard indication yet. This lock does not fence a
-lost PostgreSQL session or nonparticipating writers, and the sender snapshot
-still cannot prove unpolled runtime consumption. Sequence and peer state must
-be retained with backups; restoration or re-provisioning requires manual
-reconciliation to prevent rollback/replay.
+Node global-traffic forwarding rejects an unreadable global overlay, negative
+counters or ambiguous normalized local/global identities instead of sending a
+partial or malformed snapshot. An error may leave a node with an older snapshot;
+investigate it before relying on usage. This does not authenticate the legacy
+path or prove snapshot freshness.
