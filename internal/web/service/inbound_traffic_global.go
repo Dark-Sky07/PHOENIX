@@ -139,6 +139,19 @@ func (s *InboundService) acceptGlobalTraffic(masterGuid string, traffics []*xray
 		}
 
 		apply := func(tx *gorm.DB) error {
+			if transact == nil {
+				// Once a sender has been registered for ordered snapshots, never
+				// let the legacy endpoint overwrite that sender's accounting.
+				// Provisioning must take the same allocation lock. Unregistered
+				// senders remain legacy and are not authenticated by this guard.
+				var registered int64
+				if err := tx.Model(&model.TrafficSnapshotReceiver{}).Where("sender = ?", masterGuid).Count(&registered).Error; err != nil {
+					return err
+				}
+				if registered != 0 {
+					return errors.New("registered global traffic sender requires verified snapshots")
+				}
+			}
 			// This protocol has no authenticated generation or ordering. A
 			// decrease may be a reset, a stale replay, or missing traffic; it
 			// cannot safely be treated as a new accounting window.

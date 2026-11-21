@@ -4,8 +4,10 @@ package model
 // sender/receiver relationship. Generation changes require reconciliation.
 // It does not contain credentials or attest that a peer is upgraded.
 type TrafficSnapshotReceiver struct {
-	ID           string `gorm:"primaryKey"`
-	Sender       string `gorm:"not null"`
+	ID string `gorm:"primaryKey"`
+	// One sender identity must have one sequence stream; multiple credentials
+	// with independent sequences could otherwise reorder the same traffic row.
+	Sender       string `gorm:"not null;uniqueIndex"`
 	Generation   string `gorm:"not null"`
 	LastSequence int64  `gorm:"not null"`
 }

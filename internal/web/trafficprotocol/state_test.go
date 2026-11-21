@@ -155,3 +155,13 @@ func TestConcurrentSnapshotReplayAtMostOnce(t *testing.T) {
 		t.Fatalf("applied rows: %d, %v", count, err)
 	}
 }
+
+func TestReceiverSenderCannotHaveIndependentSequenceStreams(t *testing.T) {
+	db := stateDB(t)
+	if err := db.Create(&model.TrafficSnapshotReceiver{ID: "token-one", Sender: "master", Generation: "g"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&model.TrafficSnapshotReceiver{ID: "token-two", Sender: "master", Generation: "other"}).Error; err == nil {
+		t.Fatal("one sender was registered with two independent receiver sequences")
+	}
+}

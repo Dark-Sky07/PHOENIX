@@ -431,7 +431,13 @@ retention policy.
 The experimental verified global-traffic path authenticates exact snapshot
 bytes, registered sender and generation, and a sequence using HMAC-SHA256.
 The receiver binds a full-scope API bearer-token ID to a pre-provisioned
-`api-token:<token-id>` receiver row. Its key is domain-separated from that
+`api-token:<token-id>` receiver row. The database enforces one receiver
+sequence stream per registered sender; existing duplicate registrations must be
+reconciled before migration because the unique index will fail closed. The
+legacy global endpoint rejects writes claiming an already registered sender
+while holding the allocation lock; provisioning must use that same lock. This
+cannot authenticate an unregistered sender or prevent a full-access token from
+using other administrative APIs. Its key is domain-separated from that
 same token, not an independent credential: token compromise permits signatures
 and all other operations allowed by the token. Use a distinct token per peer,
 verified TLS and restricted administration. The receiver commits the
@@ -444,7 +450,8 @@ captures under the participating allocation lock, reserves a durable sequence,
 and requires HTTPS with ordinary certificate verification. It does not fall
 back to the old endpoint after a verification, provisioning, transport or
 receiver failure. Ordinary node edits preserve the mode. Unmarked nodes still
-use the legacy endpoint; that endpoint can bypass this verified path entirely.
+use the legacy endpoint; unregistered sender identities are not protected by
+the registered-sender downgrade guard.
 The verified mode is not automatically provisioned and has no administration
 UI. Do not enable it until both peers, their identities, generations, sequence
 state and token are configured and reconciled under a reviewed procedure.

@@ -76,3 +76,25 @@ func TestVerifiedGlobalTrafficAtomicReplayAndIdentity(t *testing.T) {
 		t.Fatalf("snapshot not applied: %+v %v", row, err)
 	}
 }
+
+func TestRegisteredGlobalSenderRejectsLegacyDowngrade(t *testing.T) {
+	_, client := seedResellerRenewal(t)
+	db := database.GetDB()
+	if err := db.Create(&model.ClientGlobalTraffic{MasterGuid: "master", Email: client.Email, Up: 100}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&model.TrafficSnapshotReceiver{ID: "trusted-peer", Sender: "master", Generation: "epoch"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := (&InboundService{}).AcceptGlobalTraffic("master", []*xray.ClientTraffic{{Email: client.Email, Up: 200}}); err == nil {
+		t.Fatal("registered sender accepted legacy traffic")
+	}
+	var row model.ClientGlobalTraffic
+	if err := db.Where("master_guid = ? AND email = ?", "master", client.Email).First(&row).Error; err != nil || row.Up != 100 {
+		t.Fatalf("legacy push altered baseline: %+v %v", row, err)
+	}
+	var state model.TrafficSnapshotReceiver
+	if err := db.First(&state, "id = ?", "trusted-peer").Error; err != nil || state.LastSequence != 0 {
+		t.Fatalf("legacy push altered sequence: %+v %v", state, err)
+	}
+}
