@@ -395,3 +395,13 @@ sharing that database but not a disconnected host, a lost advisory-lock
 session, or non-participating writers. Traffic between polls, failures before
 marker creation, panel/core crashes and traffic after a final poll are not
 reconstructed or proven complete by this mechanism.
+
+A local Xray journal now also blocks participating allocation and direct quota
+checks even if it predates the database poll marker or its marker is absent.
+Replay takes the recovery lock and removes the block only after successful
+application and durable cleanup. Unexpected files (including incomplete
+`.pending-*` writes) and journal-directory inspection failures fail closed;
+retain and investigate them rather than deleting them blindly. The dashboard
+includes local journal presence or inspection failure in its warning. This
+covers only the configured local journal folder: an older, unmarked journal on
+another host with an independent folder is not visible to this guard.

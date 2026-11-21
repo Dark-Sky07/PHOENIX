@@ -439,3 +439,77 @@ func TestPollMarkerDeleteFailureRetainsReceiptAndRetriesOnce(t *testing.T) {
 		t.Fatalf("poll marker remained after retry: %d %v", count, err)
 	}
 }
+
+func TestLegacyJournalWithoutPollMarkerBlocksAllocationUntilReplay(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XUI_DB_FOLDER", dir)
+	if err := database.InitDB(filepath.Join(dir, "test.db")); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.CloseDB() })
+	db := database.GetDB()
+	r := model.Reseller{Username: "legacy-journal", Password: "hash", Enable: true, TrafficLimit: 1000}
+	client := model.ClientRecord{Email: "legacy-journal@example.test", Enable: true, TotalGB: 100}
+	counter := xray.ClientTraffic{Email: client.Email, Enable: true}
+	for _, v := range []any{&r, &client, &counter} {
+		if err := db.Create(v).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Create(&model.ResellerClient{ResellerId: r.Id, Email: client.Email}).Error; err != nil {
+		t.Fatal(err)
+	}
+	batch := &xrayTrafficBatch{id: uuid.NewString(), clients: []*xray.ClientTraffic{{Email: client.Email, Up: 123}}}
+	var err error
+	batch.identities, err = (&service.InboundService{}).CaptureXrayTrafficIdentities(batch.clients)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := storeXrayBatch(batch); err != nil {
+		t.Fatal(err)
+	}
+	if unlock, err := service.LockResellerAllocation(); err == nil {
+		unlock()
+		t.Fatal("legacy journal did not block allocation")
+	}
+	if err := (&service.ResellerService{}).CheckTrafficQuota(&r, 1); err == nil {
+		t.Fatal("legacy journal did not block direct quota check")
+	}
+	if err := NewXrayTrafficJob().replayXrayJournal(); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.First(&counter, counter.Id).Error; err != nil || counter.Up != 123 {
+		t.Fatalf("legacy journal not applied: %+v %v", counter, err)
+	}
+	unlock, err := service.LockResellerAllocation()
+	if err != nil {
+		t.Fatalf("recovered journal still blocked allocation: %v", err)
+	}
+	unlock()
+}
+
+func TestUnexpectedXrayJournalFilesBlockRecoveryAndAllocation(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XUI_DB_FOLDER", dir)
+	if err := database.InitDB(filepath.Join(dir, "test.db")); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.CloseDB() })
+	if err := os.MkdirAll(xrayJournalDir(), 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(xrayJournalDir(), ".pending-incomplete")
+	if err := os.WriteFile(path, []byte("partial"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if unlock, err := service.LockResellerAllocation(); err == nil {
+		unlock()
+		t.Fatal("incomplete journal did not block allocation")
+	}
+	if err := NewXrayTrafficJob().replayXrayJournal(); err == nil {
+		t.Fatal("unexpected journal file silently ignored")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("unexpected journal evidence removed: %v", err)
+	}
+}

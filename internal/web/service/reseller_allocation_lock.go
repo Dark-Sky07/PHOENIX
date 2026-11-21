@@ -112,6 +112,11 @@ func lockResellerAllocation(recovery bool) (func(), error) {
 			resellerAllocationMu.Unlock()
 			return nil, err
 		}
+		if err := pendingXrayJournalError(); err != nil {
+			unlock()
+			resellerAllocationMu.Unlock()
+			return nil, err
+		}
 	}
 	return func() { unlock(); resellerAllocationMu.Unlock() }, nil
 }
@@ -161,6 +166,11 @@ func tryLockResellerAllocation(tx *gorm.DB) (func(), error) {
 		return nil, err
 	}
 	if err := pendingXrayPollError(tx); err != nil {
+		unlock()
+		resellerAllocationMu.Unlock()
+		return nil, err
+	}
+	if err := pendingXrayJournalError(); err != nil {
 		unlock()
 		resellerAllocationMu.Unlock()
 		return nil, err

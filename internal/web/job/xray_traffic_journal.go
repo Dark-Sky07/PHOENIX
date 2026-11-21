@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/Dark-Sky07/phoenix/internal/config"
 	"github.com/Dark-Sky07/phoenix/internal/logger"
 	"github.com/Dark-Sky07/phoenix/internal/web/service"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
@@ -23,7 +22,7 @@ type xrayTrafficJournalEntry struct {
 	Identities []service.XrayTrafficIdentity `json:"identities"`
 }
 
-func xrayJournalDir() string { return filepath.Join(config.GetDBFolderPath(), "xray-traffic-journal") }
+func xrayJournalDir() string { return service.XrayTrafficJournalDir() }
 
 func validXrayBatchID(id string) bool {
 	parsed, err := uuid.Parse(id)
@@ -135,7 +134,7 @@ func (j *XrayTrafficJob) replayXrayJournal() error {
 	}
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
-			continue
+			return fmt.Errorf("unexpected Xray journal entry %q; manual reconciliation required", entry.Name())
 		}
 		data, err := os.ReadFile(filepath.Join(xrayJournalDir(), entry.Name()))
 		if err != nil {

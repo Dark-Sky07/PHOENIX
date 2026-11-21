@@ -1808,6 +1808,9 @@ func (s *ResellerService) CheckTrafficQuota(reseller *model.Reseller, addBytes i
 	if err := pendingXrayPollError(database.GetDB()); err != nil {
 		return err
 	}
+	if err := pendingXrayJournalError(); err != nil {
+		return err
+	}
 	if err := validateResellerNodeBaselines(database.GetDB(), reseller.Id); err != nil {
 		return err
 	}

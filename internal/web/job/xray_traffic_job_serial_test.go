@@ -84,6 +84,9 @@ func TestXrayPollKeepsAllocationLockUntilIdentityCapture(t *testing.T) {
 		t.Fatalf("capture retry = %v, poll count = %d", err, pollCount)
 	}
 	if _, _, err := j.applyPending(func(batch *xrayTrafficBatch) (bool, bool, error) {
+		if err := os.Remove(filepath.Join(xrayJournalDir(), batch.id+".json")); err != nil {
+			return false, false, err
+		}
 		return false, false, service.FinishXrayPoll(batch.id)
 	}); err != nil {
 		t.Fatal(err)
@@ -225,6 +228,9 @@ func TestXrayPollKeepsAllocationLockUntilJournalIsDurable(t *testing.T) {
 		t.Fatalf("journal missing: %v", err)
 	}
 	if _, _, err := j.applyPending(func(batch *xrayTrafficBatch) (bool, bool, error) {
+		if err := os.Remove(filepath.Join(xrayJournalDir(), batch.id+".json")); err != nil {
+			return false, false, err
+		}
 		return false, false, service.FinishXrayPoll(batch.id)
 	}); err != nil {
 		t.Fatal(err)

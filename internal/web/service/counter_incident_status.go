@@ -26,6 +26,11 @@ func readCounterIncidentStatus(db *gorm.DB) CounterIncidentStatus {
 		return status
 	}
 	status.FallbackPresent = len(entries) > 0
+	journalPresent, err := xrayJournalPresent()
+	if err != nil {
+		return status
+	}
+	status.FallbackPresent = status.FallbackPresent || journalPresent
 	if db == nil {
 		return status
 	}

@@ -2,6 +2,7 @@ package service
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/Dark-Sky07/phoenix/internal/database"
@@ -78,5 +79,28 @@ func TestCounterIncidentStatusIncludesXrayPollMarkers(t *testing.T) {
 	}
 	if got := readCounterIncidentStatus(db); got.Available {
 		t.Fatalf("poll-marker query failure reported available: %+v", got)
+	}
+}
+
+func TestCounterIncidentStatusShowsOrCannotInspectXrayJournal(t *testing.T) {
+	setupConflictDB(t)
+	db := database.GetDB()
+	if err := os.MkdirAll(XrayTrafficJournalDir(), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(XrayTrafficJournalDir(), ".pending-incomplete"), []byte("partial"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := readCounterIncidentStatus(db); !got.Available || !got.FallbackPresent {
+		t.Fatalf("incomplete local journal hidden: %+v", got)
+	}
+	if err := os.RemoveAll(XrayTrafficJournalDir()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(XrayTrafficJournalDir(), []byte("not a directory"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := readCounterIncidentStatus(db); got.Available {
+		t.Fatalf("failed journal inspection reported available: %+v", got)
 	}
 }
