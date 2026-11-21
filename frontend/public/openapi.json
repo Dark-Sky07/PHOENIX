@@ -3873,6 +3873,83 @@
         }
       }
     },
+    "/panel/api/inbounds/pushVerifiedClientTraffics": {
+      "post": {
+        "tags": [
+          "Inbounds"
+        ],
+        "summary": "Experimental ordered global snapshot receiver. Requires a bearer token bound to a pre-provisioned sender and generation; the current legacy endpoint is not protected by this route.",
+        "operationId": "post_panel_api_inbounds_pushVerifiedClientTraffics",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "version": {
+                    "type": "integer",
+                    "description": "Envelope protocol version, currently 1."
+                  },
+                  "sender": {
+                    "type": "string",
+                    "description": "Registered sender identity."
+                  },
+                  "generation": {
+                    "type": "string",
+                    "description": "Registered sender generation."
+                  },
+                  "sequence": {
+                    "type": "integer",
+                    "description": "Durably reserved, strictly increasing sequence."
+                  },
+                  "snapshot": {
+                    "type": "string",
+                    "description": "Base64 of the exact JSON traffic array bytes."
+                  },
+                  "mac": {
+                    "type": "string",
+                    "description": "Base64 HMAC of the envelope using the token-derived key."
+                  }
+                },
+                "required": [
+                  "version",
+                  "sender",
+                  "generation",
+                  "sequence",
+                  "snapshot",
+                  "mac"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                },
+                "example": {
+                  "success": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/panel/api/inbounds/pushClientTraffics": {
       "post": {
         "tags": [

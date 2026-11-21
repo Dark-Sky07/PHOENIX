@@ -208,6 +208,20 @@ export const sections: readonly Section[] = [
       },
       {
         method: 'POST',
+        path: '/panel/api/inbounds/pushVerifiedClientTraffics',
+        summary: 'Experimental ordered global snapshot receiver. Requires a bearer token bound to a pre-provisioned sender and generation; the current legacy endpoint is not protected by this route.',
+        params: [
+          { name: 'version', in: 'body (json)', type: 'integer', desc: 'Envelope protocol version, currently 1.' },
+          { name: 'sender', in: 'body (json)', type: 'string', desc: 'Registered sender identity.' },
+          { name: 'generation', in: 'body (json)', type: 'string', desc: 'Registered sender generation.' },
+          { name: 'sequence', in: 'body (json)', type: 'integer', desc: 'Durably reserved, strictly increasing sequence.' },
+          { name: 'snapshot', in: 'body (json)', type: 'string', desc: 'Base64 of the exact JSON traffic array bytes.' },
+          { name: 'mac', in: 'body (json)', type: 'string', desc: 'Base64 HMAC of the envelope using the token-derived key.' },
+        ],
+        response: '{\n  "success": true\n}',
+      },
+      {
+        method: 'POST',
         path: '/panel/api/inbounds/pushClientTraffics',
         summary: 'Receive a master panel\'s aggregated per-client usage, keyed by the master\'s GUID. Stored in a side table used only for the UI display overlay and local quota enforcement — never folded into the local counters that masters poll, so delta accounting stays intact. Called panel-to-panel by the node traffic sync job.',
         params: [
