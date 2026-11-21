@@ -93,6 +93,8 @@ func initModels() error {
 		&model.TuicTrafficReceipt{},
 		&model.XrayTrafficReceipt{},
 		&model.XrayTrafficInFlight{},
+		&model.TrafficSnapshotReceiver{},
+		&model.TrafficSnapshotSender{},
 		&model.UserTemplate{},
 		&model.SupportTicket{},
 		&model.SupportTicketMessage{},

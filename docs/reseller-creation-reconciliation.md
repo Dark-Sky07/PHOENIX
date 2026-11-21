@@ -428,7 +428,8 @@ retention policy.
 
 ### Ordered authenticated snapshots: implementation in progress
 
-`internal/web/trafficprotocol` contains an envelope primitive only. It is not
+`internal/web/trafficprotocol` contains an envelope primitive and transactional
+sequence helpers. They are not
 connected to the existing node or global traffic endpoints and does not yet
 protect production traffic or block legacy nodes. It authenticates exact
 snapshot bytes, registered sender and generation, and a monotonically
@@ -438,9 +439,12 @@ registration/revocation are also required. Never trust a sender-provided
 identity or generation as registration. A generation transition must be
 operator-authorized and reconciled, not automatically accepted.
 
-Before enabling this protocol, the sender must durably reserve sequences;
-the receiver must lock its persisted trusted state and atomically verify,
-apply and advance the accepted sequence in the same database transaction.
+The unused sequence helpers reserve a sender sequence durably and use a
+compare-and-swap transaction to verify, apply, and advance receiver state.
+They require pre-provisioned sender and receiver records and a trusted key;
+callbacks may make database-only changes in the same transaction. Before
+enabling the protocol, integration must use these helpers correctly and bind
+keys and registrations to the authenticated peer.
 Network retries, concurrent receivers, disconnects, crashes and restored
 backups need integration tests. A database rollback can restore an old
 sequence and invalidate replay protection unless an external monotonic anchor
