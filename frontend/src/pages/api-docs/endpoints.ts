@@ -926,6 +926,26 @@ export const sections: readonly Section[] = [
       },
       {
         method: 'POST',
+        path: '/panel/api/nodes/trafficSnapshot/sender/:id',
+        summary: 'Experimental: register a new verified snapshot sender for a node. Interactive superadmin session only; reconciled must be true. This enables verified mode immediately without attesting that the peer is ready; it never resets an existing sequence.',
+        params: [
+          { name: 'id', in: 'path', type: 'integer', desc: 'Local node ID; must use HTTPS with standard TLS verification.' },
+          { name: 'reconciled', in: 'body (json)', type: 'boolean', desc: 'Confirm manual accounting and rollout review.' },
+        ],
+      },
+      {
+        method: 'POST',
+        path: '/panel/api/nodes/trafficSnapshot/receiver',
+        summary: 'Experimental: register a verified snapshot receiver, binding an existing API token to the sender and generation. Interactive superadmin session only; existing streams cannot be replaced or reset.',
+        params: [
+          { name: 'tokenId', in: 'body (json)', type: 'integer', desc: 'Existing enabled, unexpired full-scope API token ID.' },
+          { name: 'sender', in: 'body (json)', type: 'string', desc: 'Reconciled sender panel GUID.' },
+          { name: 'generation', in: 'body (json)', type: 'string', desc: 'Generation supplied by the sender over a secure channel.' },
+          { name: 'reconciled', in: 'body (json)', type: 'boolean', desc: 'Confirm manual accounting and rollout review.' },
+        ],
+      },
+      {
+        method: 'POST',
         path: '/panel/api/nodes/add',
         summary: 'Register a new remote node. Provide its URL, apiToken, and optional remark / allowPrivateAddress flag.',
         body:

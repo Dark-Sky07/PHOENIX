@@ -8169,6 +8169,130 @@
         }
       }
     },
+    "/panel/api/nodes/trafficSnapshot/sender/{id}": {
+      "post": {
+        "tags": [
+          "Nodes"
+        ],
+        "summary": "Experimental: register a new verified snapshot sender for a node. Interactive superadmin session only; reconciled must be true. This enables verified mode immediately without attesting that the peer is ready; it never resets an existing sequence.",
+        "operationId": "post_panel_api_nodes_trafficSnapshot_sender_id",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Local node ID; must use HTTPS with standard TLS verification.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "reconciled": {
+                    "type": "boolean",
+                    "description": "Confirm manual accounting and rollout review."
+                  }
+                },
+                "required": [
+                  "reconciled"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/nodes/trafficSnapshot/receiver": {
+      "post": {
+        "tags": [
+          "Nodes"
+        ],
+        "summary": "Experimental: register a verified snapshot receiver, binding an existing API token to the sender and generation. Interactive superadmin session only; existing streams cannot be replaced or reset.",
+        "operationId": "post_panel_api_nodes_trafficSnapshot_receiver",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "tokenId": {
+                    "type": "integer",
+                    "description": "Existing enabled, unexpired full-scope API token ID."
+                  },
+                  "sender": {
+                    "type": "string",
+                    "description": "Reconciled sender panel GUID."
+                  },
+                  "generation": {
+                    "type": "string",
+                    "description": "Generation supplied by the sender over a secure channel."
+                  },
+                  "reconciled": {
+                    "type": "boolean",
+                    "description": "Confirm manual accounting and rollout review."
+                  }
+                },
+                "required": [
+                  "tokenId",
+                  "sender",
+                  "generation",
+                  "reconciled"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/panel/api/nodes/add": {
       "post": {
         "tags": [

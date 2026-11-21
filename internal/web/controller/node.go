@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"strconv"
 	"time"
@@ -11,6 +12,8 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
 	"github.com/Dark-Sky07/phoenix/internal/web/middleware"
 	"github.com/Dark-Sky07/phoenix/internal/web/service"
+	"github.com/Dark-Sky07/phoenix/internal/web/service/panel"
+	"github.com/Dark-Sky07/phoenix/internal/web/session"
 
 	"github.com/gin-gonic/gin"
 )
@@ -39,8 +42,67 @@ func (a *NodeController) initRouter(g *gin.RouterGroup) {
 	g.POST("/certFingerprint", a.certFingerprint)
 	g.POST("/inbounds", a.inbounds)
 	g.POST("/probe/:id", a.probe)
+	g.POST("/trafficSnapshot/receiver", a.registerTrafficReceiver)
+	g.POST("/trafficSnapshot/sender/:id", a.registerTrafficSender)
 	g.POST("/updatePanel", a.updatePanel)
 	g.GET("/history/:id/:metric/:bucket", a.history)
+}
+
+// Provisioning changes accounting trust and must require an interactive
+// superadmin session, never an API token or reseller session.
+func canProvisionTrafficPeers(c *gin.Context) bool {
+	if c.GetBool("api_authed") || !panel.IsSuperAdmin(session.GetLoginUser(c)) {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"success": false, "msg": "superadmin session required"})
+		return false
+	}
+	return true
+}
+
+func (a *NodeController) registerTrafficReceiver(c *gin.Context) {
+	if !canProvisionTrafficPeers(c) {
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 4096)
+	var req struct {
+		TokenID    int    `json:"tokenId"`
+		Sender     string `json:"sender"`
+		Generation string `json:"generation"`
+		Reconciled bool   `json:"reconciled"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		jsonMsg(c, "invalid verified traffic receiver", err)
+		return
+	}
+	if err := service.RegisterVerifiedTrafficReceiver(req.TokenID, req.Sender, req.Generation, req.Reconciled); err != nil {
+		jsonMsg(c, "verified traffic receiver registration failed", err)
+		return
+	}
+	jsonMsg(c, "verified traffic receiver registered", nil)
+}
+
+func (a *NodeController) registerTrafficSender(c *gin.Context) {
+	if !canProvisionTrafficPeers(c) {
+		return
+	}
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		jsonMsg(c, "invalid node", err)
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 4096)
+	var req struct {
+		Reconciled bool `json:"reconciled"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		jsonMsg(c, "invalid verified traffic sender", err)
+		return
+	}
+	state, err := service.RegisterVerifiedTrafficSender(id, req.Reconciled)
+	if err != nil {
+		jsonMsg(c, "verified traffic sender registration failed", err)
+		return
+	}
+	jsonObj(c, state, nil)
 }
 
 func (a *NodeController) list(c *gin.Context) {

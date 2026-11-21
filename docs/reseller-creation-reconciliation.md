@@ -473,3 +473,16 @@ counters or ambiguous normalized local/global identities instead of sending a
 partial or malformed snapshot. An error may leave a node with an older snapshot;
 investigate it before relying on usage. This does not authenticate the legacy
 path or prove snapshot freshness.
+
+Experimental peer registration is available through interactive superadmin
+sessions only: `POST /panel/api/nodes/trafficSnapshot/sender/:id` creates a
+fresh sender generation and enables verified mode, and
+`POST /panel/api/nodes/trafficSnapshot/receiver` binds a full-scope API token
+ID to that sender and generation. Both require `reconciled: true`; this is an
+operator confirmation, **not** proof that accounting is complete or the other
+peer is ready. The sender endpoint returns the sender GUID and generation for
+secure out-of-band transfer to the receiver. Prepare for verified sends to fail
+until the receiver is registered. Neither endpoint overwrites existing state or
+resets a sequence; token rotation, generation changes, backup rollback, existing
+usage and incidents require manual reconciliation. There is no management UI or
+remote-readiness handshake yet. Unregistered peers still use legacy paths.
