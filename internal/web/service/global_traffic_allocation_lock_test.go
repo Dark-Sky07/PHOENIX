@@ -9,7 +9,7 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/xray"
 )
 
-func TestGlobalTrafficWaitsForAllocationAndPreservesReset(t *testing.T) {
+func TestGlobalTrafficWaitsForAllocationBeforeCommit(t *testing.T) {
 	reseller, client := seedResellerRenewal(t)
 	StartTrafficWriter()
 	defer StopTrafficWriter()
@@ -30,7 +30,7 @@ func TestGlobalTrafficWaitsForAllocationAndPreservesReset(t *testing.T) {
 	finished := make(chan error, 1)
 	go func() {
 		close(started)
-		finished <- svc.AcceptGlobalTraffic("master", []*xray.ClientTraffic{{Email: client.Email}})
+		finished <- svc.AcceptGlobalTraffic("master", []*xray.ClientTraffic{{Email: client.Email, Up: 401, Down: 500}})
 	}()
 	<-started
 	select {
@@ -53,8 +53,8 @@ func TestGlobalTrafficWaitsForAllocationAndPreservesReset(t *testing.T) {
 		t.Fatal("global snapshot did not resume after unlock")
 	}
 	stat, err := (&ResellerService{}).Stat(&reseller)
-	if err != nil || stat.UsedTraffic != 900 {
-		t.Fatalf("reset did not preserve recorded usage: %+v %v", stat, err)
+	if err != nil || stat.UsedTraffic != 901 {
+		t.Fatalf("snapshot usage incorrect: %+v %v", stat, err)
 	}
 }
 
@@ -65,17 +65,19 @@ func TestGlobalTrafficReleasesAllocationAfterFailure(t *testing.T) {
 	if err := svc.AcceptGlobalTraffic("master", []*xray.ClientTraffic{{Email: client.Email, Up: 400}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Exec("CREATE TRIGGER reject_global_lock_archive BEFORE INSERT ON reseller_traffic_archives BEGIN SELECT RAISE(ABORT, 'injected failure'); END").Error; err != nil {
+	if err := db.Exec("CREATE TRIGGER reject_global_lock_archive BEFORE UPDATE ON client_global_traffics BEGIN SELECT RAISE(ABORT, 'injected failure'); END").Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.AcceptGlobalTraffic("master", []*xray.ClientTraffic{{Email: client.Email}}); err == nil {
+	if err := svc.AcceptGlobalTraffic("master", []*xray.ClientTraffic{{Email: client.Email, Up: 401}}); err == nil {
 		t.Fatal("expected archive failure")
 	}
 	if err := db.Exec("DROP TRIGGER reject_global_lock_archive").Error; err != nil {
 		t.Fatal(err)
 	}
 	finished := make(chan error, 1)
-	go func() { finished <- svc.AcceptGlobalTraffic("master", []*xray.ClientTraffic{{Email: client.Email}}) }()
+	go func() {
+		finished <- svc.AcceptGlobalTraffic("master", []*xray.ClientTraffic{{Email: client.Email, Up: 401}})
+	}()
 	select {
 	case err := <-finished:
 		if err != nil {

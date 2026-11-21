@@ -20,8 +20,9 @@ import (
 // local-only counters, so the pushing master's (and any other master's)
 // delta accounting over our snapshot stays correct.
 //
-// Rows are overwritten, not max-merged: a reset on the master propagates here
-// on its next push. Emails this panel doesn't host are dropped.
+// Unmapped clients still accept decreases. For reseller-owned clients, an
+// unversioned decrease is ambiguous and blocks updates until manual review.
+// Emails this panel doesn't host are dropped.
 func (s *InboundService) AcceptGlobalTraffic(masterGuid string, traffics []*xray.ClientTraffic) error {
 	masterGuid = strings.TrimSpace(masterGuid)
 	if masterGuid == "" {
@@ -47,8 +48,7 @@ func (s *InboundService) AcceptGlobalTraffic(masterGuid string, traffics []*xray
 		return nil
 	}
 
-	// A global snapshot can change effective reseller usage and a decrease can
-	// rewrite its archive. Serialize capture and commit with quota/ownership
+	// A global snapshot can change effective reseller usage. Serialize capture and commit with quota/ownership
 	// mutations and with pushes in other participating panel processes. Take
 	// the allocation lock before entering the writer to preserve lock order.
 	unlock, err := LockResellerAllocation()
@@ -58,6 +58,12 @@ func (s *InboundService) AcceptGlobalTraffic(masterGuid string, traffics []*xray
 	defer unlock()
 	return submitTrafficWrite(func() error {
 		db := database.GetDB()
+		if err := retryPendingGlobalCounterIncident(db); err != nil {
+			return err
+		}
+		if err := pendingCounterIncidentError(); err != nil {
+			return err
+		}
 		known := make([]string, 0, len(emails))
 		for _, batch := range chunkStrings(emails, sqlInChunk) {
 			var page []string
@@ -96,10 +102,10 @@ func (s *InboundService) AcceptGlobalTraffic(masterGuid string, traffics []*xray
 			})
 		}
 
-		return db.Transaction(func(tx *gorm.DB) error {
-			// A lower master counter can be a remote reset. Snapshot reseller
-			// usage before overwriting it, then transfer the lost effective
-			// difference to the prior-usage ledger in the same transaction.
+		err := db.Transaction(func(tx *gorm.DB) error {
+			// This protocol has no authenticated generation or ordering. A
+			// decrease may be a reset, a stale replay, or missing traffic; it
+			// cannot safely be treated as a new accounting window.
 			previous := make(map[string]model.ClientGlobalTraffic, len(rows))
 			keys := make([]string, 0, len(rows))
 			for _, row := range rows {
@@ -121,7 +127,9 @@ func (s *InboundService) AcceptGlobalTraffic(masterGuid string, traffics []*xray
 					previous[key] = old
 				}
 			}
-			changed := make([]string, 0)
+			if err := rejectClientNodeIncidents(tx, keys); err != nil {
+				return err
+			}
 			for i := range rows {
 				row := &rows[i]
 				key := transferEmailKey(row.Email)
@@ -141,17 +149,7 @@ func (s *InboundService) AcceptGlobalTraffic(masterGuid string, traffics []*xray
 				if mappings == 0 {
 					continue
 				}
-				var clients []model.ClientRecord
-				if err := tx.Where("LOWER(TRIM(email)) = ?", key).Find(&clients).Error; err != nil {
-					return err
-				}
-				if len(clients) != 1 {
-					return errors.New("cannot preserve global usage without a unique reseller client")
-				}
-				if err := archiveResellerClientUsageTx(tx, &clients[0], 0); err != nil {
-					return err
-				}
-				changed = append(changed, key)
+				return &globalCounterDecrease{masterGuid: masterGuid, email: key, previousUp: old.Up, previousDown: old.Down, observedUp: row.Up, observedDown: row.Down}
 			}
 			for _, batch := range chunkGlobalRows(rows, 200) {
 				if err := tx.Clauses(clause.OnConflict{
@@ -161,20 +159,14 @@ func (s *InboundService) AcceptGlobalTraffic(masterGuid string, traffics []*xray
 					return err
 				}
 			}
-			for _, email := range changed {
-				var local []xray.ClientTraffic
-				if err := tx.Where("LOWER(TRIM(email)) = ?", email).Find(&local).Error; err != nil {
-					return err
-				}
-				if len(local) != 1 {
-					return errors.New("cannot preserve global usage with ambiguous local counters")
-				}
-				if err := rewriteResellerTrafficCountersTx(tx, email, local[0].Up, local[0].Down); err != nil {
-					return err
-				}
-			}
 			return nil
 		})
+		var decrease *globalCounterDecrease
+		if errors.As(err, &decrease) {
+			rememberGlobalCounterIncident(decrease)
+			return retryPendingGlobalCounterIncident(db)
+		}
+		return err
 	})
 }
 

@@ -320,10 +320,33 @@ pushes using the same database, including across cooperating panel processes.
 It does not authenticate the source, order old snapshots, fence a lost lock
 connection or recover bytes that a master has not reported.
 
-Global snapshot replacement now matches each master's previous row using the
-same trimmed, case-insensitive client identity used for accounting. A single
-older spelling variant is updated in place; duplicate normalized rows or a
-negative previous counter are rejected rather than silently creating a second
-row or skipping a reset. Existing duplicates require evidence-based manual
-reconciliation. This does not resolve snapshot ordering or authenticate the
-claimed master identity.
+Global snapshots match each master's previous row using the same trimmed,
+case-insensitive client identity used for accounting. A single older spelling
+variant is updated in place when counters do not decrease; duplicate normalized
+rows or a negative previous counter are rejected. Existing duplicates require
+evidence-based manual reconciliation.
+
+### Unversioned upstream counter decreases
+
+A lower global counter for a reseller-owned client is ambiguous: it could be a
+legitimate reset, an out-of-order or replayed snapshot, or missing traffic.
+The panel no longer guesses that it is a new window. It rejects the whole
+snapshot without changing its baseline, records the first observed values and
+claimed master GUID as a `node_id = -1`, `direction = global-decreased`
+incident, and writes a local fallback file before the database marker. Quota,
+participating removal and subsequent snapshot ingestion are blocked until an
+administrator investigates. Legitimate upstream resets therefore require manual
+reconciliation too; this is an intentional availability trade-off.
+
+Keep the old counters, incident row and fallback file while comparing the
+upstream's actual reset history, all runtimes, journals and backups. The master
+GUID is claimed by the request and is not proof of source identity. Do not
+invent missing bytes or clear markers merely because counters rise again.
+After a documented reconciliation, remove both the database incident and its
+local fallback, including on every affected host, following the usual incident
+procedure. A failed DB write retains the first observation in process memory
+and retries on a later push; if the process crashes before durable storage, or
+both DB and fallback storage fail, other hosts cannot be fenced. Increases and
+snapshots accepted before this protection may still be stale or misleading: the
+protocol has neither source-bound authentication nor generation/sequence
+numbers. Full ordering needs an authenticated, durable upstream protocol.
