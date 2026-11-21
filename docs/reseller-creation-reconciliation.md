@@ -350,3 +350,12 @@ both DB and fallback storage fail, other hosts cannot be fenced. Increases and
 snapshots accepted before this protection may still be stale or misleading: the
 protocol has neither source-bound authentication nor generation/sequence
 numbers. Full ordering needs an authenticated, durable upstream protocol.
+
+Xray polling now retains the participating allocation lock until the captured
+identity snapshot and traffic batch have been written and synced to the local
+journal. A journal-write failure keeps the batch and lock for retry instead of
+allowing allocation or ownership changes before journal durability. This
+reduces that concurrency window; it does not recover a crash during the poll
+or before the journal is durable, account for unpolled bytes, or fence writers
+that do not use the shared lock. A prolonged disk failure can block participating
+allocation operations until storage is repaired or the process stops.

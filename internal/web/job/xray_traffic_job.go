@@ -125,12 +125,11 @@ func (j *XrayTrafficJob) applyPending(apply func(*xrayTrafficBatch) (bool, bool,
 	return restart, disabled, err
 }
 
-// Poll and identity capture must be ordered with participating client and
-// reseller mutations. If capture fails after polling advanced the baseline,
-// retain both the batch and lock until capture can be retried: releasing the
-// lock earlier could attribute the delta to a replacement client or owner.
-// This coordinates only paths that take the allocation lock; it is not a
-// fencing mechanism for lost database sessions or an atomic runtime journal.
+// Poll, identity capture and journal persistence must be ordered with
+// participating client and reseller mutations. After a poll advances the
+// baseline, retain the batch and lock until both capture and durable journal
+// storage succeed. This coordinates only participating paths; it does not
+// fence lost database sessions or make the runtime poll itself atomic.
 func (j *XrayTrafficJob) prepareXrayBatch(
 	poll func() ([]*xray.Traffic, []*xray.ClientTraffic, error),
 	capture func([]*xray.ClientTraffic) ([]service.XrayTrafficIdentity, error),
@@ -159,6 +158,12 @@ func (j *XrayTrafficJob) prepareXrayBatch(
 		j.pending.identities = identities
 	}
 	if j.captureUnlock != nil {
+		// The journal must be durable before another participant can change
+		// ownership or rely on a snapshot that has not yet been recorded.
+		// On failure keep both the captured batch and the allocation lock.
+		if err := storeXrayBatch(j.pending); err != nil {
+			return fmt.Errorf("journal Xray traffic before releasing allocation lock: %w", err)
+		}
 		j.captureUnlock()
 		j.captureUnlock = nil
 	}

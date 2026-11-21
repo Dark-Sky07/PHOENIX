@@ -2,6 +2,7 @@ package job
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -153,5 +154,77 @@ func TestSharedXrayTrafficJobRetainsUncapturedBatchAcrossSchedulerReplacement(t 
 	}
 	if polls != 1 || replacement.pending.clients[0].Up != 31 || replacement.captureUnlock != nil {
 		t.Fatalf("batch changed or repolled: polls=%d batch=%+v", polls, replacement.pending)
+	}
+}
+
+func TestXrayPollKeepsAllocationLockUntilJournalIsDurable(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XUI_DB_FOLDER", dir)
+	if err := database.InitDB(filepath.Join(dir, "test.db")); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.CloseDB() })
+	// Make the journal directory inaccessible without relying on permissions,
+	// which may be ignored when tests run as root.
+	if err := os.WriteFile(xrayJournalDir(), []byte("not a directory"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	j := NewXrayTrafficJob()
+	t.Cleanup(func() {
+		if j.captureUnlock != nil {
+			j.captureUnlock()
+			j.captureUnlock = nil
+		}
+	})
+	polls := 0
+	poll := func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
+		polls++
+		return nil, []*xray.ClientTraffic{{Email: "journal-lock@example.test", Up: 31}}, nil
+	}
+	captures := 0
+	capture := func(rows []*xray.ClientTraffic) ([]service.XrayTrafficIdentity, error) {
+		captures++
+		return []service.XrayTrafficIdentity{{Email: rows[0].Email}}, nil
+	}
+	if err := j.prepareXrayBatch(poll, capture); err == nil || j.pending == nil || j.captureUnlock == nil || j.pending.identities == nil {
+		t.Fatalf("journal failure did not retain captured batch and lock: %v", err)
+	}
+	gotLock := make(chan func(), 1)
+	go func() {
+		unlock, err := service.LockResellerAllocation()
+		if err != nil {
+			gotLock <- nil
+			return
+		}
+		gotLock <- unlock
+	}()
+	select {
+	case unlock := <-gotLock:
+		if unlock != nil {
+			unlock()
+		}
+		t.Fatal("allocation proceeded before durable journal")
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := os.Remove(xrayJournalDir()); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.prepareXrayBatch(poll, capture); err != nil {
+		t.Fatal(err)
+	}
+	if polls != 1 || captures != 1 || j.captureUnlock != nil {
+		t.Fatalf("retry repolled or lost snapshot: polls=%d captures=%d", polls, captures)
+	}
+	if _, err := os.Stat(filepath.Join(xrayJournalDir(), j.pending.id+".json")); err != nil {
+		t.Fatalf("lock released without journal: %v", err)
+	}
+	select {
+	case unlock := <-gotLock:
+		if unlock == nil {
+			t.Fatal("lock acquisition failed")
+		}
+		unlock()
+	case <-time.After(3 * time.Second):
+		t.Fatal("allocation lock not released after durable journal")
 	}
 }
