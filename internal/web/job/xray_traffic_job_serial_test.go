@@ -173,11 +173,6 @@ func TestXrayPollKeepsAllocationLockUntilJournalIsDurable(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = database.CloseDB() })
-	// Make the journal directory inaccessible without relying on permissions,
-	// which may be ignored when tests run as root.
-	if err := os.WriteFile(xrayJournalDir(), []byte("not a directory"), 0600); err != nil {
-		t.Fatal(err)
-	}
 	j := NewXrayTrafficJob()
 	t.Cleanup(func() {
 		if j.captureUnlock != nil {
@@ -193,6 +188,11 @@ func TestXrayPollKeepsAllocationLockUntilJournalIsDurable(t *testing.T) {
 	captures := 0
 	capture := func(rows []*xray.ClientTraffic) ([]service.XrayTrafficIdentity, error) {
 		captures++
+		// Inject the storage failure after allocation lock acquisition and poll.
+		// Using a file instead of a directory also works when tests run as root.
+		if err := os.WriteFile(xrayJournalDir(), []byte("not a directory"), 0600); err != nil {
+			return nil, err
+		}
 		return []service.XrayTrafficIdentity{{Email: rows[0].Email}}, nil
 	}
 	if err := j.prepareXrayBatch(poll, capture); err == nil || j.pending == nil || j.captureUnlock == nil || j.pending.identities == nil {
