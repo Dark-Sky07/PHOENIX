@@ -484,3 +484,14 @@ sending a partial or malformed snapshot. This improves the existing forwarding
 path but does not authenticate it, prove its freshness, or activate the new
 verified sender. A forwarding error may leave the node with an older snapshot;
 investigate the logged error and reconcile before relying on its usage.
+
+An experimental sender building block can capture node global traffic under the
+participating allocation lock, reserve a provisioned `node:<id>` sequence and
+sign the captured bytes using the node API token. Its HTTP sender requires
+HTTPS with ordinary certificate verification and never falls back after an
+error. Neither is wired into the scheduled sync job; there is no peer setup UI,
+legacy downgrade guard or dashboard indication yet. This lock does not fence a
+lost PostgreSQL session or nonparticipating writers, and the sender snapshot
+still cannot prove unpolled runtime consumption. Sequence and peer state must
+be retained with backups; restoration or re-provisioning requires manual
+reconciliation to prevent rollback/replay.

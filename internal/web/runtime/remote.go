@@ -18,6 +18,7 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
 	"github.com/Dark-Sky07/phoenix/internal/logger"
 	"github.com/Dark-Sky07/phoenix/internal/util/netsafe"
+	"github.com/Dark-Sky07/phoenix/internal/web/trafficprotocol"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
 )
 
@@ -483,6 +484,28 @@ func (r *Remote) PushGlobalClientTraffics(ctx context.Context, masterGuid string
 		"traffics":   traffics,
 	}
 	_, err := r.do(ctx, http.MethodPost, "panel/api/inbounds/pushClientTraffics", payload)
+	return err
+}
+
+// PushVerifiedGlobalClientTraffics sends an already captured and reserved
+// snapshot without falling back to the legacy endpoint. The remote transport
+// uses standard certificate verification; HTTP and insecure/custom TLS modes
+// are refused for this opt-in path. It is not yet used by the sync job.
+func (r *Remote) PushVerifiedGlobalClientTraffics(ctx context.Context, snapshot *trafficprotocol.Envelope) error {
+	if r.node == nil || r.node.Scheme != "https" || (r.node.TlsVerifyMode != "" && r.node.TlsVerifyMode != "verify") {
+		return errors.New("verified global traffic requires HTTPS with standard certificate verification")
+	}
+	if snapshot == nil || snapshot.Sequence == 0 {
+		return errors.New("verified global traffic snapshot is required")
+	}
+	key, err := trafficprotocol.KeyFromAPIToken(r.node.ApiToken)
+	if err != nil {
+		return err
+	}
+	if err := trafficprotocol.Verify(*snapshot, key, trafficprotocol.Expected{Sender: snapshot.Sender, Generation: snapshot.Generation, LastSequence: snapshot.Sequence - 1}); err != nil {
+		return err
+	}
+	_, err = r.do(ctx, http.MethodPost, "panel/api/inbounds/pushVerifiedClientTraffics", snapshot)
 	return err
 }
 
