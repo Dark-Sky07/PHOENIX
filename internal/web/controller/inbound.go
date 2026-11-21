@@ -3,6 +3,7 @@ package controller
 import (
 	"encoding/json"
 	"net"
+	"net/http"
 	"strconv"
 	"strings"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/web/middleware"
 	"github.com/Dark-Sky07/phoenix/internal/web/service"
 	"github.com/Dark-Sky07/phoenix/internal/web/session"
+	"github.com/Dark-Sky07/phoenix/internal/web/trafficprotocol"
 	"github.com/Dark-Sky07/phoenix/internal/web/websocket"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
 
@@ -95,6 +97,7 @@ func (a *InboundController) initRouter(g *gin.RouterGroup) {
 	g.POST("/import", a.importInbound)
 	g.POST("/:id/fallbacks", a.setFallbacks)
 	g.POST("/pushClientTraffics", a.pushClientTraffics)
+	g.POST("/pushVerifiedClientTraffics", a.pushVerifiedClientTraffics)
 }
 
 // getInbounds retrieves the list of inbounds for the logged-in user.
@@ -442,6 +445,51 @@ func (a *InboundController) pushClientTraffics(c *gin.Context) {
 		return
 	}
 	if err := a.inboundService.AcceptGlobalTraffic(req.MasterGuid, req.Traffics); err != nil {
+		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
+		return
+	}
+	jsonMsg(c, "success", nil)
+}
+
+// pushVerifiedClientTraffics accepts only bearer-authenticated peers whose
+// API token ID has a separately provisioned receiver row. The identity and
+// generation are matched against that row inside the accounting transaction.
+// The legacy endpoint remains separate and is not secured by this route.
+func (a *InboundController) pushVerifiedClientTraffics(c *gin.Context) {
+	if !rejectResellerInboundWrite(c) {
+		return
+	}
+	authed, ok := c.Get("api_authed")
+	if !ok || authed != true {
+		c.AbortWithStatus(http.StatusForbidden)
+		return
+	}
+	value, ok := c.Get("api_token_id")
+	tokenID, validID := value.(int)
+	if !ok || !validID || tokenID <= 0 {
+		c.AbortWithStatus(http.StatusForbidden)
+		return
+	}
+	token, ok := strings.CutPrefix(c.GetHeader("Authorization"), "Bearer ")
+	if !ok {
+		c.AbortWithStatus(http.StatusForbidden)
+		return
+	}
+	key, err := trafficprotocol.KeyFromAPIToken(token)
+	if err != nil {
+		c.AbortWithStatus(http.StatusForbidden)
+		return
+	}
+	// JSON base64-encodes the snapshot, so allow its encoding plus modest
+	// envelope overhead while bounding allocations before JSON parsing.
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, int64((trafficprotocol.MaxSnapshotBytes+2)/3*4+8192))
+	var envelope trafficprotocol.Envelope
+	if err := c.ShouldBindJSON(&envelope); err != nil {
+		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
+		return
+	}
+	receiverID := "api-token:" + strconv.Itoa(tokenID)
+	if err := a.inboundService.AcceptVerifiedGlobalTraffic(receiverID, key, envelope); err != nil {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 		return
 	}

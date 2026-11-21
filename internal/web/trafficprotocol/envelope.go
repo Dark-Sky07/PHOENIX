@@ -103,3 +103,16 @@ func Verify(e Envelope, key []byte, expected Expected) error {
 	}
 	return nil
 }
+
+// KeyFromAPIToken derives the envelope key from the separately authenticated
+// node API token. This is not a second factor: disclosure of that token allows
+// signing and grants whatever API scope the token has. Use verified TLS, a
+// distinct token per peer, explicit receiver registration and token rotation.
+func KeyFromAPIToken(token string) ([]byte, error) {
+	if len(token) < 32 {
+		return nil, errors.New("node API token is too short")
+	}
+	m := hmac.New(sha256.New, []byte(token))
+	_, _ = m.Write([]byte("PHOENIX/traffic-snapshot/api-token-key/v1\x00"))
+	return m.Sum(nil), nil
+}

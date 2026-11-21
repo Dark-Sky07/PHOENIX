@@ -463,3 +463,17 @@ not use this protection; no legacy-node migration guard or dashboard warning
 is active. The eventual route must bind receiver ID and secret to a trusted
 registered peer, impose body limits before parsing, authenticate transport,
 and never accept those trusted values directly from an untrusted request.
+
+A separate experimental `pushVerifiedClientTraffics` route now requires an
+authenticated full-scope API bearer token and looks up receiver state using
+`api-token:<token-id>`. That row must already bind the token to an expected
+sender and generation; a request cannot register a peer or select a receiver
+row. The HMAC key is domain-separated from the same bearer token, so it is not
+an independent credential: compromise of that token permits signatures and
+all other operations allowed by its API scope. Use distinct tokens per peer,
+verified TLS, restricted administration and deliberate rotation. A rotation
+requires controlled migration of the token-bound receiver state without
+resetting sequence or generation. No administration UI, sender rollout or
+legacy endpoint guard exists yet. Do not manually reset sequence state to get
+an old snapshot accepted, and do not use this endpoint as proof of complete
+runtime traffic. The old endpoint can still bypass this route entirely.

@@ -85,6 +85,7 @@ func TestResellerInboundWritesReturn403Contract(t *testing.T) {
 		"/import",
 		"/1/fallbacks",
 		"/pushClientTraffics",
+		"/pushVerifiedClientTraffics",
 	}
 	for _, path := range paths {
 		code, body := doResellerInboundRequest(t, r, http.MethodPost, path)
