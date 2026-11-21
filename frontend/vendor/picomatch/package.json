@@ -1,0 +1,9 @@
+{
+  "name": "picomatch",
+  "version": "4.0.8",
+  "description": "PHOENIX security-patched picomatch 4.0.7 based on upstream PR #259",
+  "license": "MIT",
+  "main": "index.js",
+  "sideEffects": false,
+  "files": ["index.js", "posix.js", "lib"]
+}

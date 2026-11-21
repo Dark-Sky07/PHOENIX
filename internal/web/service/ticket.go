@@ -5,15 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"fmt"
-	"math"
 	"strings"
 	"time"
 
 	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
 	"github.com/Dark-Sky07/phoenix/internal/util/common"
-	moneycurrency "github.com/Dark-Sky07/phoenix/internal/util/currency"
 	"gorm.io/gorm"
 )
 
@@ -247,139 +244,27 @@ func (s *PaymentWebhookService) ProcessWebhook(p PaymentWebhookPayload) (*model.
 	if p.OrderId == "" {
 		return nil, common.NewError("orderId is required")
 	}
-
-	db := database.GetDB()
-	// Idempotency check: if OrderId was already processed, return the existing order.
-	var existing model.PaymentOrder
-	if err := db.Where("order_id = ?", p.OrderId).First(&existing).Error; err == nil {
-		if existing.Status != "pending" {
-			return &existing, nil
-		}
-		// A pending checkout order is being confirmed by the gateway: the
-		// effects were chosen when the order was created, the webhook only
-		// proves the payment happened. targetRef/targetType of the payload
-		// are ignored — the stored order stays authoritative.
-		var settingSvc SettingService
-		configuredCurrency, _ := settingSvc.GetCheckoutCurrency()
-		amountTolerance := 0.5 / math.Pow10(moneycurrency.FractionDigits(configuredCurrency))
-		if p.Amount > 0 && existing.Amount > 0 && math.Abs(p.Amount-existing.Amount) > amountTolerance {
-			return nil, common.NewError("webhook amount does not match pending order ", p.OrderId)
-		}
-		if err := s.applyOrderEffects(&existing); err != nil {
-			return nil, err
-		}
-		if err := db.Model(&model.PaymentOrder{}).Where("id = ?", existing.Id).
-			Update("status", "completed").Error; err != nil {
-			return nil, err
-		}
-		existing.Status = "completed"
-		return &existing, nil
-	}
-
-	// Fresh (non-checkout) orders describe their own target; pending checkout
-	// completion above is the only flow allowed to omit targetRef.
-	if p.TargetRef == "" {
-		return nil, common.NewError("targetRef is required")
-	}
-	if p.Gateway == "" {
-		p.Gateway = "webhook"
-	}
-
-	order := &model.PaymentOrder{
-		OrderId:      p.OrderId,
-		Gateway:      p.Gateway,
-		TargetType:   p.TargetType,
-		TargetRef:    p.TargetRef,
-		Amount:       p.Amount,
-		AddGB:        p.AddGB,
-		AddDays:      p.AddDays,
-		ResetTraffic: p.ResetTraffic,
-		Status:       "completed",
-	}
-	if err := s.applyOrderEffects(order); err != nil {
+	unlock, err := LockResellerAllocation()
+	if err != nil {
 		return nil, err
 	}
-	if err := db.Create(order).Error; err != nil {
-		return nil, err
-	}
-	return order, nil
-}
+	defer unlock()
 
-// applyOrderEffects performs one order's side effects: topping up a reseller
-// deposit, extending a reseller quota, or renewing a client.
-func (s *PaymentWebhookService) applyOrderEffects(order *model.PaymentOrder) error {
 	db := database.GetDB()
-	switch order.TargetType {
-	case "reseller_deposit":
-		if order.Amount <= 0 {
-			return common.NewError("positive amount is required for reseller_deposit")
-		}
-		reseller, err := s.resellerService.GetByUsername(order.TargetRef)
-		if err != nil {
-			return fmt.Errorf("reseller %q not found: %w", order.TargetRef, err)
-		}
-		comment := fmt.Sprintf("Webhook (%s) #%s", order.Gateway, order.OrderId)
-		if _, err := s.resellerService.AdjustBalance(reseller.Id, order.Amount, comment); err != nil {
-			return err
-		}
-		if order.AddGB > 0 {
-			addBytes := order.AddGB * bytesPerGB
-			_ = db.Model(&model.Reseller{}).
-				Where("id = ?", reseller.Id).
-				Update("traffic_limit", gorm.Expr("traffic_limit + ?", addBytes)).Error
-		}
-
-	case "reseller_quota":
-		reseller, err := s.resellerService.GetByUsername(order.TargetRef)
-		if err != nil {
-			return fmt.Errorf("reseller %q not found: %w", order.TargetRef, err)
-		}
-		updates := map[string]any{"updated_at": time.Now().UnixMilli()}
-		if order.AddGB > 0 {
-			updates["traffic_limit"] = reseller.TrafficLimit + (order.AddGB * bytesPerGB)
-		}
-		if order.AddDays > 0 {
-			base := time.Now().UnixMilli()
-			if reseller.ExpiryTime > base {
-				base = reseller.ExpiryTime
-			}
-			updates["expiry_time"] = base + int64(order.AddDays)*86400000
-		}
-		if err := db.Model(&model.Reseller{}).Where("id = ?", reseller.Id).Updates(updates).Error; err != nil {
-			return err
-		}
-
-	case "client_renew":
-		rec, err := s.clientService.GetRecordByEmail(nil, order.TargetRef)
-		if err != nil {
-			return fmt.Errorf("client %q not found: %w", order.TargetRef, err)
-		}
-		if order.ResetTraffic {
-			_ = s.inboundService.ResetClientTrafficByEmail(order.TargetRef)
-		}
-		updated := *rec.ToClient()
-		if order.AddGB > 0 {
-			updated.TotalGB += order.AddGB * bytesPerGB
-		}
-		if order.AddDays > 0 {
-			nowMs := time.Now().UnixMilli()
-			if updated.ExpiryTime < 0 {
-				updated.ExpiryTime -= int64(order.AddDays) * 86400000
-			} else {
-				base := nowMs
-				if updated.ExpiryTime > nowMs {
-					base = updated.ExpiryTime
-				}
-				updated.ExpiryTime = base + int64(order.AddDays)*86400000
-			}
-		}
-		updated.Enable = true
-		if _, err := s.clientService.UpdateByEmail(&s.inboundService, order.TargetRef, updated); err != nil {
-			return err
-		}
-
-	default:
-		return common.NewError("unsupported targetType:", order.TargetType)
+	// Reseller payments commit the order, balance/ledger, and quota together.
+	// The persisted order is authoritative even if a callback supplies another type.
+	var probe model.PaymentOrder
+	probeErr := db.Where("order_id = ?", p.OrderId).First(&probe).Error
+	if probeErr != nil && !errors.Is(probeErr, gorm.ErrRecordNotFound) {
+		return nil, probeErr
 	}
-	return nil
+	if (probeErr == nil && (probe.TargetType == "reseller_deposit" || probe.TargetType == "reseller_quota")) ||
+		(errors.Is(probeErr, gorm.ErrRecordNotFound) && (p.TargetType == "reseller_deposit" || p.TargetType == "reseller_quota")) {
+		return s.processResellerPayment(p)
+	}
+	if (probeErr == nil && probe.TargetType == "client_renew") ||
+		(errors.Is(probeErr, gorm.ErrRecordNotFound) && p.TargetType == "client_renew") {
+		return s.processClientRenewalPayment(p)
+	}
+	return nil, common.NewError("unsupported or missing payment order target")
 }

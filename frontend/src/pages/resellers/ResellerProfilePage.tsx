@@ -175,6 +175,9 @@ export default function ResellerProfilePage() {
       if (!msg.success) throw new Error(msg.msg || 'failed');
       return msg.obj as ResellerStat;
     },
+    // Public signup links can create clients outside this browser session; the
+    // reseller profile has no access to the admin-only websocket stream.
+    refetchInterval: 60_000,
   });
 
   const stat = profileQuery.data;

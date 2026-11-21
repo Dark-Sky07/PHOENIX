@@ -169,3 +169,67 @@ func TestSnapshotListNotOverlaid_SlimOverlaid(t *testing.T) {
 		t.Errorf("slim list should carry the global overlay, got up=%d", slim[0].ClientStats[0].Up)
 	}
 }
+
+func TestAcceptGlobalTrafficRejectsDuplicateOrInvalidIdentitiesWithoutWriting(t *testing.T) {
+	db := initTrafficTestDB(t)
+	seedClientRow(t, "alice", 1, 0, 0, 1000)
+	svc := &InboundService{}
+	if err := svc.AcceptGlobalTraffic("master", []*xray.ClientTraffic{{Email: "alice", Up: 500}}); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		master string
+		rows   []*xray.ClientTraffic
+	}{
+		{"master", []*xray.ClientTraffic{{Email: "alice", Up: 600}, {Email: " ALICE ", Up: 1}}},
+		{"master", []*xray.ClientTraffic{{Email: "alice", Up: 600}, nil}},
+		{"master", []*xray.ClientTraffic{{Email: "alice", Up: 600}, {Email: " ", Up: 10}}},
+		{" ", []*xray.ClientTraffic{{Email: "alice", Up: 600}}},
+	}
+	for _, tc := range cases {
+		if err := svc.AcceptGlobalTraffic(tc.master, tc.rows); err == nil {
+			t.Fatalf("invalid snapshot accepted: %+v", tc)
+		}
+		var row model.ClientGlobalTraffic
+		if err := db.Where("master_guid = ? AND email = ?", "master", "alice").First(&row).Error; err != nil {
+			t.Fatal(err)
+		}
+		if row.Up != 500 {
+			t.Fatalf("invalid snapshot changed stored value: %+v", row)
+		}
+	}
+}
+
+func TestAcceptGlobalTrafficRejectsAmbiguousLocalCounter(t *testing.T) {
+	db := initTrafficTestDB(t)
+	seedClientRow(t, "alice", 1, 0, 0, 1000)
+	seedClientRow(t, "ALICE", 1, 0, 0, 1000)
+	err := (&InboundService{}).AcceptGlobalTraffic("master", []*xray.ClientTraffic{{Email: "alice", Up: 5}})
+	if err == nil {
+		t.Fatal("ambiguous local counters accepted")
+	}
+	var count int64
+	if err := db.Model(&model.ClientGlobalTraffic{}).Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("unexpected global rows: %d %v", count, err)
+	}
+}
+
+func TestAcceptGlobalTrafficDoesNotOverwriteCorruptPriorCounter(t *testing.T) {
+	db := initTrafficTestDB(t)
+	seedClientRow(t, "alice", 1, 0, 0, 1000)
+	old := model.ClientGlobalTraffic{MasterGuid: "master", Email: "alice", Up: -1, Down: 100}
+	if err := db.Create(&old).Error; err != nil {
+		t.Fatal(err)
+	}
+	err := (&InboundService{}).AcceptGlobalTraffic("master", []*xray.ClientTraffic{{Email: "alice", Up: 50, Down: 100}})
+	if err == nil {
+		t.Fatal("corrupt prior counter accepted")
+	}
+	var row model.ClientGlobalTraffic
+	if err := db.First(&row, old.Id).Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.Up != -1 {
+		t.Fatalf("corrupt counter overwritten: %+v", row)
+	}
+}

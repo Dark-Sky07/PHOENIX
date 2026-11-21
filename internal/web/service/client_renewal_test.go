@@ -1,8 +1,15 @@
 package service
 
 import (
+	"errors"
+	"math"
+	"strconv"
 	"testing"
 	"time"
+
+	"github.com/Dark-Sky07/phoenix/internal/database"
+	"github.com/Dark-Sky07/phoenix/internal/xray"
+	"gorm.io/gorm"
 )
 
 // ts builds a millisecond timestamp in the local zone (the renewal math uses
@@ -138,5 +145,36 @@ func TestNextRenewalExpiry_Weekly(t *testing.T) {
 	// Invalid weekday cannot produce a schedule.
 	if got := nextRenewalExpiry(old, now, renewalSchedule{mode: RenewalModeWeekly, day: 7}); got != 0 {
 		t.Fatalf("invalid weekday must skip, got %d", got)
+	}
+}
+
+func TestNextRenewalExpiryRejectsRollingOverflow(t *testing.T) {
+	if got := nextRenewalExpiry(math.MaxInt64-1, math.MaxInt64, renewalSchedule{rollingDays: 1}); got != 0 {
+		t.Fatalf("overflowing expiry should be rejected, got %d", got)
+	}
+	if strconv.IntSize == 64 {
+		days := int64(math.MaxInt64/msPerDay + 1)
+		if got := nextRenewalExpiry(1, 2, renewalSchedule{rollingDays: int(days)}); got != 0 {
+			t.Fatalf("overflowing interval should be rejected, got %d", got)
+		}
+	}
+}
+
+func TestCalendarRenewalLookupPropagatesDatabaseFailure(t *testing.T) {
+	setupConflictDB(t)
+	db := database.GetDB()
+	cause := errors.New("injected schedule lookup failure")
+	const callback = "test:fail-calendar-renewal-lookup"
+	if err := db.Callback().Query().Before("gorm:query").Register(callback, func(tx *gorm.DB) {
+		if tx.Statement.Table == "clients" {
+			tx.AddError(cause)
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Callback().Query().Remove(callback) })
+	_, err := loadCalendarRenewalSchedules(db, []*xray.ClientTraffic{{Email: "calendar@example.test", Reset: 1}})
+	if !errors.Is(err, cause) {
+		t.Fatalf("lookup failure must not fall back to rolling renewal: %v", err)
 	}
 }

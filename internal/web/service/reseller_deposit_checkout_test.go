@@ -56,6 +56,10 @@ func TestResellerDepositCheckoutWebhookAndToken(t *testing.T) {
 	if order.Amount != 25.57 || order.Currency != "USD" || order.GatewayURL == "" || order.OrderId == "" {
 		t.Fatalf("unexpected deposit order: %+v", order)
 	}
+	var stored model.PaymentOrder
+	if err := database.GetDB().Where("order_id = ?", order.OrderId).First(&stored).Error; err != nil || stored.Currency != "USD" {
+		t.Fatalf("deposit currency snapshot: %+v, err=%v", stored, err)
+	}
 	status, err := svc.Status(token, order.OrderId, secret, now)
 	if err != nil || status != "pending" {
 		t.Fatalf("initial Status = %q, err=%v", status, err)
@@ -81,5 +85,42 @@ func TestResellerDepositCheckoutWebhookAndToken(t *testing.T) {
 	status, err = svc.Status(token, order.OrderId, secret, now)
 	if err != nil || status != "completed" {
 		t.Fatalf("final Status = %q, err=%v", status, err)
+	}
+}
+
+func TestConcurrentResellerDepositCheckoutPendingLimit(t *testing.T) {
+	setupBulkDB(t)
+	enableCheckout(t, 1, 1)
+	db := database.GetDB()
+	reseller := model.Reseller{Username: "deposit-race", Password: "hash", Enable: true, TrafficLimit: 1000}
+	if err := db.Create(&reseller).Error; err != nil {
+		t.Fatal(err)
+	}
+	svc := &ResellerDepositCheckoutService{}
+	now := time.Now()
+	secret := []byte("concurrent-test-secret")
+	token, err := svc.CreateLink(reseller.Id, secret, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const attempts = resellerDepositMaxPending + 5
+	start := make(chan struct{})
+	results := make(chan error, attempts)
+	for i := 0; i < attempts; i++ {
+		go func() { <-start; _, err := svc.CreateOrder(token, 1, secret, now); results <- err }()
+	}
+	close(start)
+	successes := 0
+	for i := 0; i < attempts; i++ {
+		if <-results == nil {
+			successes++
+		}
+	}
+	var pending int64
+	if err := db.Model(&model.PaymentOrder{}).Where("target_type = ? AND target_ref = ? AND status = ?", "reseller_deposit", reseller.Username, "pending").Count(&pending).Error; err != nil {
+		t.Fatal(err)
+	}
+	if successes != resellerDepositMaxPending || pending != resellerDepositMaxPending {
+		t.Fatalf("pending cap bypassed: successes=%d pending=%d", successes, pending)
 	}
 }

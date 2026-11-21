@@ -291,6 +291,7 @@ export default function CheckoutPage() {
                 <InputNumber
                   min={0}
                   max={10000}
+                  disabled={info.pricePerGb <= 0 || info.totalBytes <= 0}
                   value={gb}
                   onChange={(v) => setGb(Math.max(0, Math.floor(Number(v) || 0)))}
                   addonAfter="GB"
@@ -308,6 +309,7 @@ export default function CheckoutPage() {
                 <InputNumber
                   min={0}
                   max={36}
+                  disabled={info.pricePerMonth <= 0}
                   value={months}
                   onChange={(v) => setMonths(Math.max(0, Math.floor(Number(v) || 0)))}
                   addonAfter={t('pages.checkout.months')}
@@ -328,7 +330,7 @@ export default function CheckoutPage() {
               icon={<PlusSquareOutlined />}
               block
               loading={submitting}
-              disabled={total <= 0}
+              disabled={total <= 0 || (gb > 0 && (info.pricePerGb <= 0 || info.totalBytes <= 0)) || (months > 0 && info.pricePerMonth <= 0)}
               onClick={placeOrder}
             >
               {t('pages.checkout.pay')} — {formatAmount(total, currency)}

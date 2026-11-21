@@ -593,6 +593,7 @@ export const sections: readonly Section[] = [
         params: [
           { name: 'client', in: 'body (json)', type: 'object', desc: 'Client fields: email, subId, id (uuid), password, auth, flow, totalGB, expiryTime, limitIp, tgId (numeric Telegram user ID, 0 = none), comment, enable.' },
           { name: 'inboundIds', in: 'body (json)', type: 'integer[]', desc: 'Inbound IDs to attach the client to. At least one required.' },
+          { name: 'salePrice', in: 'body (json)', type: 'object', optional: true, desc: 'For reseller-created clients: optional self-declared {amountMinor, currency}; non-negative integer minor units and a supported currency code. Not payment verification.' },
         ],
         body: '{\n  "client": {\n    "email": "alice@example.com",\n    "totalGB": 53687091200,\n    "expiryTime": 1735689600000,\n    "tgId": 0,\n    "limitIp": 0,\n    "enable": true\n  },\n  "inboundIds": [3, 5]\n}',
         response: '{\n  "success": true,\n  "msg": "Client added"\n}',
@@ -649,7 +650,7 @@ export const sections: readonly Section[] = [
       {
         method: 'POST',
         path: '/panel/api/clients/resetAllTraffics',
-        summary: 'Reset the up/down counters for every client globally. Quotas and expiry are not affected. Triggers an Xray restart if any counter actually moved.',
+        summary: 'Admin only; reseller requests are temporarily rejected to protect usage accounting. Reset the up/down counters for every client globally. Quotas and expiry are not affected. Triggers an Xray restart if any counter actually moved.',
         response: '{\n  "success": true\n}',
       },
       {
@@ -718,7 +719,7 @@ export const sections: readonly Section[] = [
       {
         method: 'POST',
         path: '/panel/api/clients/bulkResetTraffic',
-        summary: 'Zero up/down counters for many clients in one call. Loops the single-reset path so each client is re-enabled across its attached inbounds and pushed to Xray/remote nodes. Returns the count of successfully reset clients.',
+        summary: 'Admin only; reseller requests are temporarily rejected to protect usage accounting. Zero up/down counters for many clients in one call. Loops the single-reset path so each client is re-enabled across its attached inbounds and pushed to Xray/remote nodes. Returns the count of successfully reset clients.',
         body: '{\n  "emails": ["alice", "bob"]\n}',
         response: '{\n  "success": true,\n  "obj": {\n    "affected": 2\n  }\n}',
       },
@@ -761,7 +762,7 @@ export const sections: readonly Section[] = [
       {
         method: 'POST',
         path: '/panel/api/clients/resetTraffic/:email',
-        summary: 'Zero out a single client’s up/down counters. Re-enables the client across every attached inbound and pushes the change to Xray (or the remote node) so depleted users can connect again immediately.',
+        summary: 'Admin only; reseller requests are temporarily rejected to protect usage accounting. Zero out a single client’s up/down counters. Re-enables the client across every attached inbound and pushes the change to Xray (or the remote node) so depleted users can connect again immediately.',
         params: [
           { name: 'email', in: 'path', type: 'string', desc: 'Client email.' },
         ],
@@ -769,7 +770,7 @@ export const sections: readonly Section[] = [
       {
         method: 'POST',
         path: '/panel/api/clients/updateTraffic/:email',
-        summary: 'Manually adjust a client’s upload + download counters. Useful for migrations from external accounting systems.',
+        summary: 'Admin only; reseller requests are temporarily rejected to protect usage accounting. Manually adjust a client’s upload + download counters. Useful for migrations from external accounting systems.',
         params: [
           { name: 'email', in: 'path', type: 'string', desc: 'Client email.' },
         ],
@@ -1433,6 +1434,44 @@ export const sections: readonly Section[] = [
       },
       {
         method: 'GET',
+        path: '/panel/api/resellers/report/:id/sales',
+        summary: 'Recorded account creations, initial traffic and self-declared prices by UTC period. Amounts are exact decimal strings in currency minor units; unknown historical prices are counted separately. Declarations are not verified payments.',
+        params: [
+          { name: 'id', in: 'path', type: 'integer', desc: 'Reseller id.' },
+          { name: 'period', in: 'query', type: 'string', optional: true, desc: 'daily, monthly or yearly.' },
+          { name: 'from', in: 'query', type: 'integer', optional: true, desc: 'Inclusive Unix milliseconds.' },
+          { name: 'to', in: 'query', type: 'integer', optional: true, desc: 'Exclusive Unix milliseconds.' },
+        ],
+      },
+      {
+        method: 'GET',
+        path: '/panel/api/resellers/report/:id/sales/export',
+        summary: 'Export the recorded account creation report as CSV; accepts the same filters as the sales report.',
+        params: [{ name: 'id', in: 'path', type: 'integer', desc: 'Reseller id.' }],
+      },
+      {
+        method: 'GET',
+        path: '/panel/api/resellers/report/:id/sales/history',
+        summary: 'List the latest 500 manually recorded historical sales, with their source reference and actor.',
+        params: [{ name: 'id', in: 'path', type: 'integer', desc: 'Reseller id.' }],
+      },
+      {
+        method: 'POST',
+        path: '/panel/api/resellers/report/:id/sales/history',
+        summary: 'Administrator-only append of a historical sale. Records are self-reported, not verified payments. Reference must be unique for the reseller; check against recorded sales before importing.',
+        params: [
+          { name: 'id', in: 'path', type: 'integer', desc: 'Reseller id.' },
+          { name: 'reference', in: 'body (json)', type: 'string', desc: 'Unique source reference.' },
+          { name: 'source', in: 'body (json)', type: 'string', desc: 'Evidence or source description.' },
+          { name: 'email', in: 'body (json)', type: 'string' },
+          { name: 'soldAt', in: 'body (json)', type: 'integer', desc: 'Sale time in Unix milliseconds, not in the future.' },
+          { name: 'trafficBytes', in: 'body (json)', type: 'integer', desc: 'Initial traffic allocation in bytes.' },
+          { name: 'amountMinor', in: 'body (json)', type: 'integer', optional: true, desc: 'Declared amount in currency minor units; omit for unknown.' },
+          { name: 'currency', in: 'body (json)', type: 'string', optional: true, desc: 'Currency code when an amount is supplied.' },
+        ],
+      },
+      {
+        method: 'GET',
         path: '/panel/api/resellers/export',
         summary:
           'Download the full resellers list with live usage numbers as CSV (UTF-8 with BOM; one row per reseller).',
@@ -1613,6 +1652,21 @@ export const sections: readonly Section[] = [
         path: '/panel/api/reseller/report/export',
         summary:
           'Download the signed-in reseller own client report as CSV (UTF-8 with BOM, CRLF rows, RFC 4180 quoting; traffic in binary GB).',
+      },
+      {
+        method: 'GET',
+        path: '/panel/api/reseller/sales',
+        summary: 'The signed-in reseller’s recorded account creations and initial traffic by UTC period.',
+        params: [
+          { name: 'period', in: 'query', type: 'string', optional: true, desc: 'daily, monthly or yearly.' },
+          { name: 'from', in: 'query', type: 'integer', optional: true, desc: 'Inclusive Unix milliseconds.' },
+          { name: 'to', in: 'query', type: 'integer', optional: true, desc: 'Exclusive Unix milliseconds.' },
+        ],
+      },
+      {
+        method: 'GET',
+        path: '/panel/api/reseller/sales/export',
+        summary: 'Export the signed-in reseller’s account creation report as CSV; accepts the same filters as the sales report.',
       },
       {
         method: 'POST',

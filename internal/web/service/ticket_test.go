@@ -19,7 +19,7 @@ func TestSupportTicketsAndPaymentWebhook(t *testing.T) {
 	t.Cleanup(func() { _ = database.CloseDB() })
 
 	var resellerSvc ResellerService
-	r1 := &model.Reseller{Username: "reseller_one", Name: "Reseller One", Enable: true}
+	r1 := &model.Reseller{Username: "reseller_one", Name: "Reseller One", Enable: true, TrafficLimit: 100}
 	if err := resellerSvc.Add(r1, "pass1234"); err != nil {
 		t.Fatalf("Add r1 failed: %v", err)
 	}

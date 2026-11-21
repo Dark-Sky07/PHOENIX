@@ -61,7 +61,12 @@ func (a *APIController) checkAPIAuth(c *gin.Context) {
 			return
 		}
 	}
-	if !session.IsLogin(c) {
+	user := session.GetLoginUser(c)
+	var reseller *model.Reseller
+	if user == nil {
+		reseller = session.GetCurrentLoginReseller(c)
+	}
+	if user == nil && reseller == nil {
 		if c.GetHeader("X-Requested-With") == "XMLHttpRequest" {
 			c.AbortWithStatus(http.StatusUnauthorized)
 		} else {
@@ -69,6 +74,7 @@ func (a *APIController) checkAPIAuth(c *gin.Context) {
 		}
 		return
 	}
+	session.PinLoginReseller(c, reseller)
 	c.Next()
 }
 

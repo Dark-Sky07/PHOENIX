@@ -2,6 +2,8 @@ package job
 
 import (
 	"encoding/json"
+	"fmt"
+	"sync"
 
 	"github.com/Dark-Sky07/phoenix/internal/logger"
 	"github.com/Dark-Sky07/phoenix/internal/web/service"
@@ -9,11 +11,15 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/web/websocket"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
 
+	"github.com/google/uuid"
 	"github.com/valyala/fasthttp"
 )
 
 // XrayTrafficJob collects and processes traffic statistics from Xray, updating the database and optionally informing external APIs.
 type XrayTrafficJob struct {
+	runMu           sync.Mutex
+	pending         *xrayTrafficBatch
+	captureUnlock   func()
 	settingService  service.SettingService
 	xrayService     service.XrayService
 	inboundService  service.InboundService
@@ -25,21 +31,168 @@ func NewXrayTrafficJob() *XrayTrafficJob {
 	return new(XrayTrafficJob)
 }
 
+// The production scheduler can be replaced during an in-process panel
+// restart. Keep its pending batch, capture lock and poll serialization with
+// the panel process rather than abandoning them with the old scheduler.
+// This is not durable across a process crash; the journal remains necessary.
+var sharedXrayTrafficJob = NewXrayTrafficJob()
+
+func SharedXrayTrafficJob() *XrayTrafficJob { return sharedXrayTrafficJob }
+
+// FlushBeforeStop retries pending batches and, if the managed core is still
+// running, captures one final poll before orderly shutdown. It does not stop
+// traffic during that poll, so bytes transferred afterwards can still be lost.
+func (j *XrayTrafficJob) FlushBeforeStop() error {
+	j.runMu.Lock()
+	defer j.runMu.Unlock()
+	apply := func() error {
+		if j.pending == nil {
+			return nil
+		}
+		if err := j.prepareXrayBatch(j.xrayService.GetXrayTraffic, j.inboundService.CaptureXrayTrafficIdentities); err != nil {
+			return err
+		}
+		batch := j.pending
+		restart, _, err := j.applyPending(func(b *xrayTrafficBatch) (bool, bool, error) {
+			return j.applyJournaledXrayBatch(b)
+		})
+		if restart {
+			j.xrayService.SetToNeedRestart()
+		}
+		if err != nil {
+			return err
+		}
+		if err, restart := j.outboundService.AddTraffic(batch.traffic, batch.clients); err != nil {
+			return fmt.Errorf("persist final outbound traffic: %w", err)
+		} else if restart {
+			j.xrayService.SetToNeedRestart()
+		}
+		return nil
+	}
+	if err := apply(); err != nil {
+		return fmt.Errorf("flush pending Xray traffic: %w", err)
+	}
+	if err := j.replayXrayJournal(); err != nil {
+		return fmt.Errorf("replay Xray traffic journal: %w", err)
+	}
+	if !j.xrayService.IsXrayRunning() {
+		return nil
+	}
+	if err := j.prepareXrayBatch(j.xrayService.GetXrayTraffic, j.inboundService.CaptureXrayTrafficIdentities); err != nil {
+		return fmt.Errorf("prepare final Xray traffic: %w", err)
+	}
+	if err := apply(); err != nil {
+		return fmt.Errorf("flush final Xray traffic: %w", err)
+	}
+	return nil
+}
+
 // Run collects traffic statistics from Xray, updates the database, and pushes
 // real-time updates over WebSocket using compact delta payloads — no REST
 // fallback, scales to 10k–20k+ clients per inbound.
 func (j *XrayTrafficJob) Run() {
-	if !j.xrayService.IsXrayRunning() {
+	j.runOnce(j.run)
+}
+
+// A poll and its database writes must remain ordered. Cron can invoke Run
+// again while a slow poll is still persisting its previous delta; skip that
+// tick rather than advance the baseline and persist a later interval first.
+func (j *XrayTrafficJob) runOnce(run func()) {
+	if !j.runMu.TryLock() {
 		return
 	}
-	traffics, clientTraffics, err := j.xrayService.GetXrayTraffic()
-	if err != nil {
+	defer j.runMu.Unlock()
+	run()
+}
+
+type xrayTrafficBatch struct {
+	id         string
+	traffic    []*xray.Traffic
+	clients    []*xray.ClientTraffic
+	identities []service.XrayTrafficIdentity
+}
+
+// applyPending keeps the same identity and counters on error, including an
+// ambiguous commit. Call only while runMu is held.
+func (j *XrayTrafficJob) applyPending(apply func(*xrayTrafficBatch) (bool, bool, error)) (bool, bool, error) {
+	if j.pending == nil {
+		return false, false, nil
+	}
+	restart, disabled, err := apply(j.pending)
+	if err == nil {
+		j.pending = nil
+	}
+	return restart, disabled, err
+}
+
+// Poll and identity capture must be ordered with participating client and
+// reseller mutations. If capture fails after polling advanced the baseline,
+// retain both the batch and lock until capture can be retried: releasing the
+// lock earlier could attribute the delta to a replacement client or owner.
+// This coordinates only paths that take the allocation lock; it is not a
+// fencing mechanism for lost database sessions or an atomic runtime journal.
+func (j *XrayTrafficJob) prepareXrayBatch(
+	poll func() ([]*xray.Traffic, []*xray.ClientTraffic, error),
+	capture func([]*xray.ClientTraffic) ([]service.XrayTrafficIdentity, error),
+) error {
+	if j.pending == nil {
+		unlock, err := service.LockResellerAllocation()
+		if err != nil {
+			return err
+		}
+		traffic, clients, err := poll()
+		if err != nil {
+			unlock()
+			return err
+		}
+		j.pending = &xrayTrafficBatch{id: uuid.NewString(), traffic: traffic, clients: clients}
+		j.captureUnlock = unlock
+	}
+	if j.pending.identities == nil {
+		identities, err := capture(j.pending.clients)
+		if err != nil {
+			return fmt.Errorf("capture Xray traffic identity: %w", err)
+		}
+		if identities == nil {
+			return fmt.Errorf("capture Xray traffic identity returned no snapshot")
+		}
+		j.pending.identities = identities
+	}
+	if j.captureUnlock != nil {
+		j.captureUnlock()
+		j.captureUnlock = nil
+	}
+	return nil
+}
+
+func (j *XrayTrafficJob) run() {
+	// Never advance the in-memory baseline again while a previous batch is
+	// uncommitted. The receipt makes an ambiguous commit safe to retry.
+	if j.pending == nil {
+		if err := j.replayXrayJournal(); err != nil {
+			logger.Warning("recover Xray traffic journal failed:", err)
+			return
+		}
+		if !j.xrayService.IsXrayRunning() {
+			return
+		}
+	}
+	if err := j.prepareXrayBatch(j.xrayService.GetXrayTraffic, j.inboundService.CaptureXrayTrafficIdentities); err != nil {
+		logger.Warning("prepare Xray traffic batch failed; retaining capture lock when necessary:", err)
 		return
 	}
-	needRestart0, clientsDisabled, err := j.inboundService.AddTraffic(traffics, clientTraffics)
+	batch := j.pending
+	needRestart0, clientsDisabled, err := j.applyPending(func(b *xrayTrafficBatch) (bool, bool, error) {
+		return j.applyJournaledXrayBatch(b)
+	})
 	if err != nil {
-		logger.Warning("add inbound traffic failed:", err)
+		if needRestart0 {
+			j.xrayService.SetToNeedRestart()
+		}
+		logger.Warning("add inbound traffic failed; retaining batch for retry:", err)
+		return
 	}
+	traffics, clientTraffics := batch.traffic, batch.clients
 	err, needRestart1 := j.outboundService.AddTraffic(traffics, clientTraffics)
 	if err != nil {
 		logger.Warning("add outbound traffic failed:", err)

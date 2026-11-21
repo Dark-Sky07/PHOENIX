@@ -1,9 +1,11 @@
 package service
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	moneycurrency "github.com/Dark-Sky07/phoenix/internal/util/currency"
 )
@@ -12,9 +14,24 @@ import (
 // readable when the file is opened by double click.
 var csvBOM = []byte{0xEF, 0xBB, 0xBF}
 
-// csvEscape quotes a field following RFC 4180 (comma, quote, CR or LF force
-// quoting; embedded quotes are doubled).
+// csvEscape neutralizes spreadsheet formulas in untrusted text before RFC
+// 4180 quoting. CSV quotes alone do not prevent Excel or other spreadsheet
+// applications from interpreting a cell as a formula. The apostrophe is an
+// intentional text prefix and becomes part of the CSV value for other tools.
 func csvEscape(field string) string {
+	for _, r := range field {
+		if r == '\t' || r == '\r' || r == '\n' || unicode.IsControl(r) || r == '\uFEFF' {
+			field = "'" + field
+			break
+		}
+		if unicode.IsSpace(r) {
+			continue
+		}
+		if strings.ContainsRune("=+-@", r) {
+			field = "'" + field
+		}
+		break
+	}
 	if strings.ContainsAny(field, ",\"\r\n") {
 		return `"` + strings.ReplaceAll(field, `"`, `""`) + `"`
 	}
@@ -88,6 +105,32 @@ func RenderResellerClientsCSV(report *ResellerReport) []byte {
 			csvDate(row.ExpiryTime),
 			csvEscape(strings.Join(ids, ";")),
 			csvEscape(row.SubID),
+		)
+	}
+	return w.bytes()
+}
+
+// RenderResellerSalesCSV renders account sales, quota and declared amounts by UTC period.
+func RenderResellerSalesCSV(report *ResellerSalesReport) []byte {
+	w := &csvRowBuilder{}
+	w.row("period", "sales", "historical_sales", "traffic_gb", "traffic_bytes", "unknown_prices", "declared_amounts_minor")
+	if report == nil {
+		return w.bytes()
+	}
+	for _, bucket := range report.Buckets {
+		amounts := make([]string, 0, len(bucket.AmountsMinor))
+		for code, amount := range bucket.AmountsMinor {
+			amounts = append(amounts, code+":"+amount)
+		}
+		sort.Strings(amounts)
+		w.row(
+			bucket.Period,
+			strconv.FormatInt(bucket.Sales, 10),
+			strconv.FormatInt(bucket.HistoricalSales, 10),
+			csvGB(bucket.TrafficBytes),
+			strconv.FormatInt(bucket.TrafficBytes, 10),
+			strconv.FormatInt(bucket.UnknownPrices, 10),
+			csvEscape(strings.Join(amounts, ";")),
 		)
 	}
 	return w.bytes()

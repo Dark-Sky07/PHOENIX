@@ -3,6 +3,7 @@ package service
 import (
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
 	"github.com/Dark-Sky07/phoenix/internal/util/random"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // VoucherService manages Reseller Wallet Gift/Voucher codes.
@@ -31,6 +33,9 @@ func (s *VoucherService) List() ([]model.ResellerVoucher, error) {
 }
 
 func (s *VoucherService) Create(code string, amount float64, trafficGB int64, maxUses int, expiresAt int64, note string) (*model.ResellerVoucher, error) {
+	if math.IsNaN(amount) || math.IsInf(amount, 0) || trafficGB > math.MaxInt64/bytesPerGB {
+		return nil, errors.New("voucher amount or traffic exceeds supported range")
+	}
 	if amount <= 0 && trafficGB <= 0 {
 		return nil, errors.New("voucher must grant a positive wallet amount or traffic quota (GB)")
 	}
@@ -77,7 +82,7 @@ func (s *VoucherService) Redeem(resellerId int, rawCode string) (*model.Reseller
 
 	err := db.Transaction(func(tx *gorm.DB) error {
 		var v model.ResellerVoucher
-		if err := tx.Where("UPPER(code) = ?", code).First(&v).Error; err != nil {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("UPPER(code) = ?", code).First(&v).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return errors.New("invalid voucher code")
 			}
@@ -94,23 +99,40 @@ func (s *VoucherService) Redeem(resellerId int, rawCode string) (*model.Reseller
 		}
 
 		var r model.Reseller
-		if err := tx.First(&r, resellerId).Error; err != nil {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&r, resellerId).Error; err != nil {
 			return err
 		}
 
+		if math.IsNaN(v.Amount) || math.IsInf(v.Amount, 0) || math.IsNaN(r.Deposit) || math.IsInf(r.Deposit, 0) || v.TrafficGB < 0 || v.TrafficGB > math.MaxInt64/bytesPerGB {
+			return errors.New("voucher or reseller has invalid accounting values")
+		}
 		updates := map[string]any{
 			"updated_at": now,
 		}
 		newBalance := r.Deposit
 		if v.Amount > 0 {
 			newBalance = Round2(r.Deposit + v.Amount)
+			if math.IsInf(newBalance, 0) || math.IsNaN(newBalance) {
+				return errors.New("voucher balance exceeds supported range")
+			}
 			updates["deposit"] = newBalance
 		}
-		if v.TrafficGB > 0 && r.TrafficLimit > 0 {
-			updates["traffic_limit"] = r.TrafficLimit + v.TrafficGB*1024*1024*1024
+		if v.TrafficGB > 0 && r.TrafficLimit <= 0 {
+			return errors.New("cannot redeem traffic grant for an unlimited or invalid reseller quota")
 		}
-		if err := tx.Model(&model.Reseller{}).Where("id = ?", resellerId).Updates(updates).Error; err != nil {
-			return err
+		if v.TrafficGB > 0 {
+			addition := v.TrafficGB * bytesPerGB
+			if r.TrafficLimit > math.MaxInt64-addition {
+				return errors.New("voucher traffic quota exceeds supported range")
+			}
+			updates["traffic_limit"] = r.TrafficLimit + addition
+		}
+		result := tx.Model(&model.Reseller{}).Where("id = ? AND deposit = ? AND traffic_limit = ?", resellerId, r.Deposit, r.TrafficLimit).Updates(updates)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return errors.New("reseller account changed concurrently; retry voucher redemption")
 		}
 
 		if v.Amount > 0 {

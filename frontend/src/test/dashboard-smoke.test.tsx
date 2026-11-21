@@ -120,6 +120,7 @@ vi.mock('@/api/queries/useNodesQuery', () => ({
 }));
 
 const statusObj = {
+  counterIncidents: { available: true, databaseCount: 0, fallbackPresent: false, pendingInProcess: false },
   cpu: 5.8, cpuCores: 4, logicalPro: 8, cpuSpeedMhz: 2900,
   disk: { current: 65820373811.2, total: 171798691840 },
   loads: [0.42, 0.51, 0.47],
@@ -194,12 +195,17 @@ describe('smoke: redesigned pages', () => {
     errors.length = 0;
     vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => { errors.push(args); });
   });
-  afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+  afterEach(() => {
+    statusObj.counterIncidents = { available: true, databaseCount: 0, fallbackPresent: false, pendingInProcess: false };
+    cleanup();
+    vi.restoreAllMocks();
+  });
 
   it('renders the dashboard without runtime errors', async () => {
     const { default: IndexPage } = await import('@/pages/index/IndexPage');
     const { container } = wrap(<IndexPage />);
     expect(container.querySelector('.dash-hero')).toBeTruthy();
+    expect(container.querySelector('.reseller-traffic-warning')).toBeTruthy();
     expect(container.querySelectorAll('.resource-tile').length).toBe(4);
     expect(container.querySelectorAll('.service-row').length).toBeGreaterThanOrEqual(3);
     expect(screen.getAllByText('Xray').length).toBeGreaterThan(0);
@@ -208,6 +214,37 @@ describe('smoke: redesigned pages', () => {
     expect(screen.getByText('185.92.14.37')).toBeTruthy();
     const realErrors = errors.filter(isRealError);
     expect(realErrors, JSON.stringify(realErrors.map((a) => String(a[0]).slice(0, 200)))).toEqual([]);
+  });
+
+  it('warns when accounting incident status is active or unavailable', async () => {
+    const { default: IndexPage } = await import('@/pages/index/IndexPage');
+    const states = [
+      { available: true, databaseCount: 1, fallbackPresent: false, pendingInProcess: false },
+      { available: true, databaseCount: 0, fallbackPresent: true, pendingInProcess: false },
+      { available: true, databaseCount: 0, fallbackPresent: false, pendingInProcess: true },
+      { available: false, databaseCount: 0, fallbackPresent: false, pendingInProcess: false },
+    ];
+    for (const state of states) {
+      statusObj.counterIncidents = state;
+      const { container } = wrap(<IndexPage />);
+      expect(container.querySelector('.ant-alert-error')).toBeTruthy();
+      cleanup();
+    }
+    statusObj.counterIncidents = { available: true, databaseCount: 0, fallbackPresent: false, pendingInProcess: false };
+    const { container } = wrap(<IndexPage />);
+    expect(container.querySelector('.ant-alert-error')).toBeNull();
+  });
+
+  it('treats absent or malformed incident data as unavailable', async () => {
+    const { default: IndexPage } = await import('@/pages/index/IndexPage');
+    const inputs = [undefined, null, {}, { available: true, databaseCount: -1, fallbackPresent: false, pendingInProcess: false },
+      { available: 'true', databaseCount: 0, fallbackPresent: false, pendingInProcess: false }];
+    for (const input of inputs) {
+      statusObj.counterIncidents = input as never;
+      const { container } = wrap(<IndexPage />);
+      expect(container.querySelector('.ant-alert-error')).toBeTruthy();
+      cleanup();
+    }
   });
 
   it('renders the inbounds page without runtime errors', async () => {

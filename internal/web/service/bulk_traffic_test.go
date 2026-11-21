@@ -1,6 +1,8 @@
 package service
 
 import (
+	"fmt"
+	"math"
 	"testing"
 	"time"
 
@@ -188,5 +190,125 @@ func TestGetClientTrafficByEmailReadsClientsTable(t *testing.T) {
 	}
 	if tr.SubId != "sa" {
 		t.Fatalf("SubId not enriched from clients table, got %q", tr.SubId)
+	}
+}
+
+func TestInboundDepletedCleanupPreservesResellerUsage(t *testing.T) {
+	for _, failArchive := range []bool{false, true} {
+		t.Run(fmt.Sprintf("archive_failure_%v", failArchive), func(t *testing.T) {
+			setupBulkDB(t)
+			db := database.GetDB()
+			reseller := model.Reseller{Username: "depleted-owner", Password: "hash", Enable: true, TrafficLimit: 1000}
+			if err := db.Create(&reseller).Error; err != nil {
+				t.Fatal(err)
+			}
+			client := model.Client{Email: "depleted-owner@example.test", ID: "44444444-4444-4444-4444-444444444444", SubID: "depleted-owner", Enable: true, TotalGB: 100}
+			ib := mkInbound(t, 21005, model.VLESS, clientsSettings(t, []model.Client{client}))
+			if err := (&ClientService{}).SyncInbound(nil, ib.Id, []model.Client{client}); err != nil {
+				t.Fatal(err)
+			}
+			for _, row := range []any{&model.ResellerClient{ResellerId: reseller.Id, Email: client.Email}, &model.ResellerInbound{ResellerId: reseller.Id, InboundId: ib.Id}} {
+				if err := db.Create(row).Error; err != nil {
+					t.Fatal(err)
+				}
+			}
+			mkTraffic(t, ib.Id, client.Email, 60, 40, 100, 0, true)
+			if failArchive {
+				if err := db.Exec("CREATE TRIGGER reject_depleted_archive BEFORE INSERT ON reseller_traffic_archives BEGIN SELECT RAISE(ABORT, 'archive failed'); END").Error; err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := (&InboundService{}).DelDepletedClients(ib.Id)
+			if failArchive {
+				if err == nil {
+					t.Fatal("archive failure allowed deletion")
+				}
+				var count int64
+				if err := db.Model(&xray.ClientTraffic{}).Where("email = ?", client.Email).Count(&count).Error; err != nil || count != 1 {
+					t.Fatalf("traffic lost on rollback: %d %v", count, err)
+				}
+				if err := db.Model(&model.ClientInbound{}).Where("inbound_id = ?", ib.Id).Count(&count).Error; err != nil || count != 1 {
+					t.Fatalf("association lost on rollback: %d %v", count, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var archive model.ResellerTrafficArchive
+			if err := db.Where("reseller_id = ? AND email = ?", reseller.Id, client.Email).First(&archive).Error; err != nil || archive.ConsumedBytes != 100 {
+				t.Fatalf("incorrect archive: %+v %v", archive, err)
+			}
+			stat, err := (&ResellerService{}).Stat(&reseller)
+			if err != nil || stat.UsedTraffic != 100 || stat.AllocatedTraffic != 100 {
+				t.Fatalf("usage changed after deletion: %+v %v", stat, err)
+			}
+		})
+	}
+}
+
+func TestDepletedCleanupUsesGlobalCountersAndAvoidsOverflow(t *testing.T) {
+	for _, mode := range []string{"client", "inbound"} {
+		t.Run(mode, func(t *testing.T) {
+			setupBulkDB(t)
+			db := database.GetDB()
+			clients := []model.Client{
+				{Email: "global-cleanup@example.test", ID: "11111111-1111-1111-1111-111111111111", SubID: "global-cleanup", Enable: true, TotalGB: 100},
+				{Email: "overflow-cleanup@example.test", ID: "22222222-2222-2222-2222-222222222222", SubID: "overflow-cleanup", Enable: true, TotalGB: math.MaxInt64},
+				{Email: "safe-cleanup@example.test", ID: "33333333-3333-3333-3333-333333333333", SubID: "safe-cleanup", Enable: true, TotalGB: 100},
+			}
+			inbound := mkInbound(t, 21006, model.VLESS, clientsSettings(t, clients))
+			clientSvc := &ClientService{}
+			inboundSvc := &InboundService{}
+			if err := clientSvc.SyncInbound(nil, inbound.Id, clients); err != nil {
+				t.Fatal(err)
+			}
+			mkTraffic(t, inbound.Id, clients[0].Email, 60, 10, 100, 0, true)
+			mkTraffic(t, inbound.Id, clients[1].Email, math.MaxInt64-5, 10, math.MaxInt64, 0, true)
+			mkTraffic(t, inbound.Id, clients[2].Email, 60, 39, 100, 0, true)
+			if err := db.Create(&model.ClientGlobalTraffic{MasterGuid: "master", Email: clients[0].Email, Up: 20, Down: 40}).Error; err != nil {
+				t.Fatal(err)
+			}
+			if mode == "client" {
+				count, _, err := clientSvc.DelDepleted(inboundSvc)
+				if err != nil || count != 2 {
+					t.Fatalf("client cleanup = %d %v", count, err)
+				}
+			} else if err := inboundSvc.DelDepletedClients(inbound.Id); err != nil {
+				t.Fatal(err)
+			}
+			fresh, err := inboundSvc.GetInbound(inbound.Id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			remaining, err := inboundSvc.GetClients(fresh)
+			if err != nil || len(remaining) != 1 || remaining[0].Email != clients[2].Email {
+				t.Fatalf("remaining = %+v %v", remaining, err)
+			}
+		})
+	}
+}
+
+func TestScopedInboundDepletedCleanupDoesNotDeleteUnrelatedOrphanCounters(t *testing.T) {
+	setupBulkDB(t)
+	db := database.GetDB()
+	client := model.Client{Email: "target@example.test", ID: "11111111-1111-1111-1111-111111111111", SubID: "target", Enable: true, TotalGB: 100}
+	inbound := mkInbound(t, 21007, model.VLESS, clientsSettings(t, []model.Client{client}))
+	if err := (&ClientService{}).SyncInbound(nil, inbound.Id, []model.Client{client}); err != nil {
+		t.Fatal(err)
+	}
+	mkTraffic(t, inbound.Id, client.Email, 100, 0, 100, 0, true)
+	// The unrelated orphan is depleted and has no client_inbounds row. Its
+	// counters must not be deleted by a request targeting a different inbound.
+	mkTraffic(t, inbound.Id+1000, "orphan@example.test", 45, 55, 100, 0, true)
+	if err := (&InboundService{}).DelDepletedClients(inbound.Id); err != nil {
+		t.Fatal(err)
+	}
+	var rows []xray.ClientTraffic
+	if err := db.Order("email").Find(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Email != "orphan@example.test" || rows[0].Up != 45 || rows[0].Down != 55 {
+		t.Fatalf("scoped cleanup changed unrelated traffic: %+v", rows)
 	}
 }

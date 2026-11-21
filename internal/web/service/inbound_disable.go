@@ -14,6 +14,10 @@ import (
 	"gorm.io/gorm"
 )
 
+// Avoid overflowing up+down when deciding whether an inbound is depleted.
+// Negative stored counters are treated as corrupt and fail closed.
+const depletedInboundsCond = `((total > 0 AND (CASE WHEN up < 0 OR down < 0 OR up >= total THEN 1 WHEN down >= total - up THEN 1 ELSE 0 END) = 1) OR (expiry_time > 0 AND expiry_time <= ?))`
+
 func (s *InboundService) disableInvalidInbounds(tx *gorm.DB) (bool, int64, error) {
 	now := time.Now().Unix() * 1000
 	needRestart := false
@@ -22,43 +26,46 @@ func (s *InboundService) disableInvalidInbounds(tx *gorm.DB) (bool, int64, error
 		var tags []string
 		err := tx.Table("inbounds").
 			Select("inbounds.tag").
-			Where("((total > 0 and up + down >= total) or (expiry_time > 0 and expiry_time <= ?)) and enable = ? and node_id IS NULL AND protocol NOT IN (?, ?, ?, ?)", now, true, model.OpenVPN, model.L2TP, model.SSTP, model.PPTP).
+			Where(depletedInboundsCond+" AND enable = ? AND node_id IS NULL AND protocol NOT IN (?, ?, ?, ?)", now, true, model.OpenVPN, model.L2TP, model.SSTP, model.PPTP).
 			Scan(&tags).Error
 		if err != nil {
 			return false, 0, err
 		}
-		s.xrayApi.Init(p.GetAPIPort())
-		for _, tag := range tags {
-			err1 := s.xrayApi.DelInbound(tag)
-			if err1 == nil {
-				logger.Debug("Inbound disabled by api:", tag)
-			} else {
-				logger.Debug("Error in disabling inbound by api:", err1)
+		if len(tags) > 0 {
+			if err := s.xrayApi.Init(p.GetAPIPort()); err != nil {
+				logger.Warning("Cannot initialize Xray API to disable inbounds:", err)
 				needRestart = true
+			} else {
+				for _, tag := range tags {
+					if err := s.xrayApi.DelInbound(tag); err != nil {
+						logger.Debug("Error in disabling inbound by api:", err)
+						needRestart = true
+					} else {
+						logger.Debug("Inbound disabled by api:", tag)
+					}
+				}
+				s.xrayApi.Close()
 			}
 		}
-		s.xrayApi.Close()
 	}
 
 	result := tx.Model(model.Inbound{}).
-		Where("((total > 0 and up + down >= total) or (expiry_time > 0 and expiry_time <= ?)) and enable = ? and node_id IS NULL", now, true).
+		Where(depletedInboundsCond+" AND enable = ? AND node_id IS NULL", now, true).
 		Update("enable", false)
 	err := result.Error
 	count := result.RowsAffected
 	return needRestart, count, err
 }
 
-// depletedClientsCond matches clients that exhausted their quota or expired.
-// Besides the local counters it also trips on the cross-panel usage a master
-// pushed into client_global_traffics — that's what lets a node cut a client
-// whose combined usage exceeds the quota even though the local share doesn't
-// (placeholders: now).
-const depletedClientsCond = `((total > 0 AND up + down >= total)
-	OR (expiry_time > 0 AND expiry_time <= ?)
-	OR (total > 0 AND EXISTS (
-		SELECT 1 FROM client_global_traffics g
-		WHERE LOWER(TRIM(g.email)) = LOWER(TRIM(client_traffics.email)) AND g.up + g.down >= client_traffics.total
-	)))`
+// The effective usage is the per-direction maximum of local counters and all
+// master snapshots, matching overlayGlobalTraffic and reseller accounting.
+// Use subtraction rather than adding counters: PostgreSQL bigint addition can
+// overflow and SQLite may round oversized integers to float.
+const maxGlobalUp = `COALESCE((SELECT MAX(g.up) FROM client_global_traffics g WHERE LOWER(TRIM(g.email)) = LOWER(TRIM(client_traffics.email))), 0)`
+const maxGlobalDown = `COALESCE((SELECT MAX(g.down) FROM client_global_traffics g WHERE LOWER(TRIM(g.email)) = LOWER(TRIM(client_traffics.email))), 0)`
+const effectiveUp = `(CASE WHEN client_traffics.up > ` + maxGlobalUp + ` THEN client_traffics.up ELSE ` + maxGlobalUp + ` END)`
+const effectiveDown = `(CASE WHEN client_traffics.down > ` + maxGlobalDown + ` THEN client_traffics.down ELSE ` + maxGlobalDown + ` END)`
+const depletedClientsCond = `((total > 0 AND (` + effectiveUp + ` >= total OR ` + effectiveDown + ` >= total - ` + effectiveUp + `)) OR (expiry_time > 0 AND expiry_time <= ?))`
 
 func (s *InboundService) disableInvalidClients(tx *gorm.DB) (bool, int64, []int, error) {
 	now := time.Now().Unix() * 1000
@@ -123,30 +130,34 @@ func (s *InboundService) disableInvalidClients(tx *gorm.DB) (bool, int64, []int,
 	}
 
 	if p != nil && len(localTargets) > 0 {
-		s.xrayApi.Init(p.GetAPIPort())
-		for _, t := range localTargets {
-			// OpenVPN and L2TP are reconciled by their host-daemon jobs, not
-			// by the Xray API. The canonical client/stat rows and settings
-			// below are the source of truth for the next daemon reconcile.
-			if t.Protocol == model.OpenVPN || t.Protocol == model.L2TP || t.Protocol == model.SSTP || t.Protocol == model.PPTP {
-				continue
+		if err := s.xrayApi.Init(p.GetAPIPort()); err != nil {
+			logger.Warning("Cannot initialize Xray API to disable clients:", err)
+			needRestart = true
+		} else {
+			for _, t := range localTargets {
+				// OpenVPN and L2TP are reconciled by their host-daemon jobs, not
+				// by the Xray API. The canonical client/stat rows and settings
+				// below are the source of truth for the next daemon reconcile.
+				if t.Protocol == model.OpenVPN || t.Protocol == model.L2TP || t.Protocol == model.SSTP || t.Protocol == model.PPTP {
+					continue
+				}
+				err1 := s.xrayApi.RemoveUser(t.Tag, t.Email)
+				if err1 == nil {
+					logger.Debug("Client disabled by api:", t.Email)
+				} else if strings.Contains(err1.Error(), fmt.Sprintf("User %s not found.", t.Email)) {
+					logger.Debug("User is already disabled. Nothing to do more...")
+				} else {
+					logger.Debug("Error in disabling client by api:", err1)
+					needRestart = true
+				}
 			}
-			err1 := s.xrayApi.RemoveUser(t.Tag, t.Email)
-			if err1 == nil {
-				logger.Debug("Client disabled by api:", t.Email)
-			} else if strings.Contains(err1.Error(), fmt.Sprintf("User %s not found.", t.Email)) {
-				logger.Debug("User is already disabled. Nothing to do more...")
-			} else {
-				logger.Debug("Error in disabling client by api:", err1)
-				needRestart = true
-			}
+			s.xrayApi.Close()
 		}
-		s.xrayApi.Close()
 	}
 
 	for inboundID, emails := range localByInbound {
 		if _, _, mErr := s.markClientsDisabledInSettings(tx, inboundID, emails); mErr != nil {
-			logger.Warning("disableInvalidClients: settings.JSON sync failed for inbound", inboundID, ":", mErr)
+			return true, 0, nil, fmt.Errorf("disable client settings for inbound %d: %w", inboundID, mErr)
 		}
 	}
 
@@ -163,7 +174,7 @@ func (s *InboundService) disableInvalidClients(tx *gorm.DB) (bool, int64, []int,
 		if err := tx.Model(&model.ClientRecord{}).
 			Where("LOWER(TRIM(email)) IN ?", depletedEmails).
 			Updates(map[string]any{"enable": false, "updated_at": now}).Error; err != nil {
-			logger.Warning("disableInvalidClients update clients.enable:", err)
+			return true, 0, nil, fmt.Errorf("disable client records: %w", err)
 		}
 	}
 
@@ -204,21 +215,35 @@ func (s *InboundService) markClientsDisabledInSettings(tx *gorm.DB, inboundID in
 	snapshot := ib
 
 	settings := map[string]any{}
-	if err := json.Unmarshal([]byte(ib.Settings), &settings); err != nil {
+	if !json.Valid([]byte(ib.Settings)) {
+		return nil, nil, fmt.Errorf("invalid inbound settings JSON")
+	}
+	decoder := json.NewDecoder(strings.NewReader(ib.Settings))
+	decoder.UseNumber()
+	if err := decoder.Decode(&settings); err != nil {
 		return nil, nil, err
 	}
-	clients, _ := settings["clients"].([]any)
+	clients, ok := settings["clients"].([]any)
+	if !ok {
+		return nil, nil, fmt.Errorf("inbound %d has invalid clients", inboundID)
+	}
 	now := time.Now().Unix() * 1000
 	mutated := false
+	matched := make(map[string]bool, len(emails))
 	for i := range clients {
 		entry, ok := clients[i].(map[string]any)
 		if !ok {
+			return nil, nil, fmt.Errorf("inbound %d has invalid client", inboundID)
+		}
+		email, ok := entry["email"].(string)
+		if !ok || transferEmailKey(email) == "" {
+			return nil, nil, fmt.Errorf("inbound %d has client without email", inboundID)
+		}
+		key := transferEmailKey(email)
+		if _, hit := emails[key]; !hit {
 			continue
 		}
-		email, _ := entry["email"].(string)
-		if _, hit := emails[transferEmailKey(email)]; !hit {
-			continue
-		}
+		matched[key] = true
 		if cur, exists := entry["enable"].(bool); exists && !cur {
 			continue
 		}
@@ -226,6 +251,11 @@ func (s *InboundService) markClientsDisabledInSettings(tx *gorm.DB, inboundID in
 		entry["updated_at"] = now
 		clients[i] = entry
 		mutated = true
+	}
+	for email := range emails {
+		if !matched[email] {
+			return nil, nil, fmt.Errorf("client %q missing from inbound %d settings", email, inboundID)
+		}
 	}
 	if !mutated {
 		return &snapshot, &ib, nil

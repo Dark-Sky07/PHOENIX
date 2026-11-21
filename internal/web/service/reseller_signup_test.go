@@ -101,3 +101,54 @@ func TestResellerSignupSignedLinkAndTemplateScope(t *testing.T) {
 		t.Fatal("expected expired registration link to fail")
 	}
 }
+
+// An interrupted or uncompensated public signup must fence subsequent
+// allocations for the same reseller, even though signup has no panel session.
+func TestResellerSignupPreservesIntentWhenCompensationCannotFinish(t *testing.T) {
+	setupBulkDB(t)
+	db := database.GetDB()
+	r := model.Reseller{Username: "signup-intent", Password: "hash", Enable: true, TrafficLimit: 1000}
+	in := model.Inbound{UserId: 1, Port: 19955, Protocol: model.VLESS, Settings: `{"clients":[]}`, Tag: "signup-intent-inbound"}
+	for _, row := range []any{&r, &in} {
+		if err := db.Create(row).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Create(&model.ResellerInbound{ResellerId: r.Id, InboundId: in.Id}).Error; err != nil {
+		t.Fatal(err)
+	}
+	plan := model.UserTemplate{Name: "intent-signup-plan", TotalGB: 50, InboundIds: []int{in.Id}}
+	if err := db.Create(&plan).Error; err != nil {
+		t.Fatal(err)
+	}
+	svc := &ResellerSignupService{}
+	secret := []byte("intent-test-secret")
+	now := time.Now()
+	token, err := svc.CreateLink(r.Id, plan.Id, secret, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(`CREATE TRIGGER reject_signup_sale BEFORE INSERT ON reseller_sales BEGIN SELECT RAISE(ABORT, 'sale failure'); END`).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(`CREATE TRIGGER reject_signup_intent_delete BEFORE DELETE ON reseller_creation_intents BEGIN SELECT RAISE(ABORT, 'intent failure'); END`).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.Register(token, "first-signup@example.test", secret, now); err == nil {
+		t.Fatal("expected signup failure")
+	}
+	var intents []model.ResellerCreationIntent
+	if err := db.Where("reseller_id = ?", r.Id).Find(&intents).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(intents) != 1 || intents[0].SubID == "" || intents[0].Email != "first-signup@example.test" {
+		t.Fatalf("missing durable intent: %+v", intents)
+	}
+	if _, _, err := svc.Register(token, "second-signup@example.test", secret, now); err == nil || !strings.Contains(err.Error(), "reconciliation") {
+		t.Fatalf("expected pending intent to block signup, got %v", err)
+	}
+	var count int64
+	if err := db.Model(&model.ResellerSale{}).Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("unexpected sale count %d, %v", count, err)
+	}
+}

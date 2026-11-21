@@ -35,6 +35,7 @@ type PaymentOrder struct {
 	TargetType   string  `json:"targetType" gorm:"column:target_type"` // reseller_deposit | client_renew
 	TargetRef    string  `json:"targetRef" gorm:"column:target_ref"`   // reseller username or client email
 	Amount       float64 `json:"amount"`
+	Currency     string  `json:"currency" gorm:"size:8"` // empty for legacy orders
 	AddGB        int64   `json:"addGb" gorm:"column:add_gb"`
 	AddDays      int     `json:"addDays" gorm:"column:add_days"`
 	ResetTraffic bool    `json:"resetTraffic" gorm:"column:reset_traffic"`

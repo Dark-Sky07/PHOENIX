@@ -194,6 +194,9 @@ func (s *ClientService) BulkResetTraffic(inboundSvc *InboundService, emails []st
 	err := submitTrafficWrite(func() error {
 		db := database.GetDB()
 		return db.Transaction(func(tx *gorm.DB) error {
+			if err := closeResellerTrafficWindowsTx(tx, cleanEmails); err != nil {
+				return err
+			}
 			for _, batch := range chunkStrings(cleanEmails, sqlInChunk) {
 				res := tx.Model(xray.ClientTraffic{}).
 					Where("LOWER(TRIM(email)) IN ?", batch).
@@ -236,6 +239,9 @@ func (s *ClientService) resetAllClientTrafficsLocked(id int) error {
 			Pluck("email", &resetEmails).Error; err != nil {
 			return err
 		}
+		if err := closeResellerTrafficWindowsTx(tx, resetEmails); err != nil {
+			return err
+		}
 
 		result := tx.Model(xray.ClientTraffic{}).
 			Where(whereText, id).
@@ -268,15 +274,26 @@ func (s *ClientService) resetAllClientTrafficsLocked(id int) error {
 }
 
 func (s *ClientService) ResetAllTraffics() (bool, error) {
-	db := database.GetDB()
-	res := db.Model(&xray.ClientTraffic{}).
-		Where("1 = 1").
-		Updates(map[string]any{"up": 0, "down": 0})
-	if res.Error != nil {
-		return false, res.Error
-	}
-	if err := db.Where("1 = 1").Delete(&model.ClientGlobalTraffic{}).Error; err != nil {
-		return false, err
-	}
-	return res.RowsAffected > 0, nil
+	var affected int64
+	err := submitTrafficWrite(func() error {
+		return database.GetDB().Transaction(func(tx *gorm.DB) error {
+			var emails, globalEmails []string
+			if err := tx.Model(&xray.ClientTraffic{}).Pluck("email", &emails).Error; err != nil {
+				return err
+			}
+			if err := tx.Model(&model.ClientGlobalTraffic{}).Pluck("email", &globalEmails).Error; err != nil {
+				return err
+			}
+			if err := closeResellerTrafficWindowsTx(tx, append(emails, globalEmails...)); err != nil {
+				return err
+			}
+			res := tx.Model(&xray.ClientTraffic{}).Where("1 = 1").Updates(map[string]any{"up": 0, "down": 0})
+			if res.Error != nil {
+				return res.Error
+			}
+			affected = res.RowsAffected
+			return tx.Where("1 = 1").Delete(&model.ClientGlobalTraffic{}).Error
+		})
+	})
+	return err == nil && affected > 0, err
 }

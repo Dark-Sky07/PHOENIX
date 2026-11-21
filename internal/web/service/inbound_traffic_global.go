@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"strings"
 	"time"
 
@@ -24,24 +25,37 @@ import (
 func (s *InboundService) AcceptGlobalTraffic(masterGuid string, traffics []*xray.ClientTraffic) error {
 	masterGuid = strings.TrimSpace(masterGuid)
 	if masterGuid == "" {
-		return nil
+		return errors.New("global traffic master identity is required")
 	}
 	emails := make([]string, 0, len(traffics))
 	byEmail := make(map[string]*xray.ClientTraffic, len(traffics))
 	for _, t := range traffics {
 		if t == nil || strings.TrimSpace(t.Email) == "" {
-			continue
+			return errors.New("global traffic client identity is required")
+		}
+		if t.Up < 0 || t.Down < 0 {
+			return errors.New("negative global traffic counters")
 		}
 		key := strings.ToLower(strings.TrimSpace(t.Email))
-		if _, dup := byEmail[key]; !dup {
-			emails = append(emails, key)
+		if _, dup := byEmail[key]; dup {
+			return errors.New("duplicate global traffic identity")
 		}
+		emails = append(emails, key)
 		byEmail[key] = t
 	}
 	if len(emails) == 0 {
 		return nil
 	}
 
+	// A global snapshot can change effective reseller usage and a decrease can
+	// rewrite its archive. Serialize capture and commit with quota/ownership
+	// mutations and with pushes in other participating panel processes. Take
+	// the allocation lock before entering the writer to preserve lock order.
+	unlock, err := LockResellerAllocation()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	return submitTrafficWrite(func() error {
 		db := database.GetDB()
 		known := make([]string, 0, len(emails))
@@ -56,6 +70,14 @@ func (s *InboundService) AcceptGlobalTraffic(masterGuid string, traffics []*xray
 		}
 		if len(known) == 0 {
 			return nil
+		}
+		seenKnown := make(map[string]bool, len(known))
+		for _, email := range known {
+			key := transferEmailKey(email)
+			if seenKnown[key] {
+				return errors.New("ambiguous local client traffic requires reconciliation")
+			}
+			seenKnown[key] = true
 		}
 
 		now := time.Now().UnixMilli()
@@ -75,11 +97,65 @@ func (s *InboundService) AcceptGlobalTraffic(masterGuid string, traffics []*xray
 		}
 
 		return db.Transaction(func(tx *gorm.DB) error {
+			// A lower master counter can be a remote reset. Snapshot reseller
+			// usage before overwriting it, then transfer the lost effective
+			// difference to the prior-usage ledger in the same transaction.
+			previous := make(map[string]model.ClientGlobalTraffic, len(rows))
+			for _, batch := range chunkStrings(known, sqlInChunk) {
+				var oldRows []model.ClientGlobalTraffic
+				if err := tx.Where("master_guid = ? AND email IN ?", masterGuid, batch).Find(&oldRows).Error; err != nil {
+					return err
+				}
+				for _, old := range oldRows {
+					if old.Up < 0 || old.Down < 0 {
+						return errors.New("negative stored global traffic requires reconciliation")
+					}
+					previous[old.Email] = old
+				}
+			}
+			changed := make([]string, 0)
+			for _, row := range rows {
+				old, exists := previous[row.Email]
+				if !exists || (row.Up >= old.Up && row.Down >= old.Down) {
+					continue
+				}
+				key := transferEmailKey(row.Email)
+				var mappings int64
+				if err := tx.Model(&model.ResellerClient{}).Where("LOWER(TRIM(email)) = ?", key).Count(&mappings).Error; err != nil {
+					return err
+				}
+				if mappings == 0 {
+					continue
+				}
+				var clients []model.ClientRecord
+				if err := tx.Where("LOWER(TRIM(email)) = ?", key).Find(&clients).Error; err != nil {
+					return err
+				}
+				if len(clients) != 1 {
+					return errors.New("cannot preserve global usage without a unique reseller client")
+				}
+				if err := archiveResellerClientUsageTx(tx, &clients[0], 0); err != nil {
+					return err
+				}
+				changed = append(changed, key)
+			}
 			for _, batch := range chunkGlobalRows(rows, 200) {
 				if err := tx.Clauses(clause.OnConflict{
 					Columns:   []clause.Column{{Name: "master_guid"}, {Name: "email"}},
 					DoUpdates: clause.AssignmentColumns([]string{"up", "down", "updated_at"}),
 				}).Create(&batch).Error; err != nil {
+					return err
+				}
+			}
+			for _, email := range changed {
+				var local []xray.ClientTraffic
+				if err := tx.Where("LOWER(TRIM(email)) = ?", email).Find(&local).Error; err != nil {
+					return err
+				}
+				if len(local) != 1 {
+					return errors.New("cannot preserve global usage with ambiguous local counters")
+				}
+				if err := rewriteResellerTrafficCountersTx(tx, email, local[0].Up, local[0].Down); err != nil {
 					return err
 				}
 			}

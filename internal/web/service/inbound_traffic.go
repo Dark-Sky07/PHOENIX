@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -30,10 +31,42 @@ func (s *InboundService) DeletePPPTrafficCheckpoints(sessionIDs []string) error 
 }
 
 func (s *InboundService) AddTraffic(inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic) (needRestart bool, clientsDisabled bool, err error) {
+	return s.addTrafficBatch("", inboundTraffics, clientTraffics, nil)
+}
+
+// AddXrayTrafficBatch makes retries after an uncertain database commit
+// idempotent. The receipt and counters commit in the same transaction.
+func (s *InboundService) AddXrayTrafficBatch(id string, inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic) (bool, bool, error) {
+	if id == "" {
+		return false, false, errors.New("Xray traffic batch has no ID")
+	}
+	return s.addTrafficBatch(id, inboundTraffics, clientTraffics, nil)
+}
+
+// AddCheckedXrayTrafficBatch rejects a stale journal when its client or
+// reseller identity has changed, rather than billing a replacement account.
+func (s *InboundService) AddCheckedXrayTrafficBatch(id string, inbounds []*xray.Traffic, clients []*xray.ClientTraffic, identities []XrayTrafficIdentity) (bool, bool, error) {
+	if id == "" || identities == nil {
+		return false, false, errors.New("Xray batch identity snapshot is required")
+	}
+	return s.addTrafficBatch(id, inbounds, clients, identities)
+}
+
+// ForgetXrayTrafficBatch is safe only after the caller has discarded the
+// corresponding retry batch. It prevents a receipt on every poll accumulating
+// indefinitely; leftovers after a crash are harmless.
+func (s *InboundService) ForgetXrayTrafficBatch(id string) error {
+	if id == "" {
+		return errors.New("Xray traffic batch has no ID")
+	}
+	return database.GetDB().Where("id = ?", id).Delete(&model.XrayTrafficReceipt{}).Error
+}
+
+func (s *InboundService) addTrafficBatch(id string, inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic, identities []XrayTrafficIdentity) (needRestart bool, clientsDisabled bool, err error) {
 	var disabledNodeIDs []int
 	err = submitTrafficWrite(func() error {
 		var inner error
-		needRestart, clientsDisabled, disabledNodeIDs, inner = s.addTrafficLocked(inboundTraffics, clientTraffics)
+		needRestart, clientsDisabled, disabledNodeIDs, inner = s.addTrafficLocked(id, inboundTraffics, clientTraffics, identities)
 		return inner
 	})
 	if err == nil && len(disabledNodeIDs) > 0 {
@@ -42,20 +75,41 @@ func (s *InboundService) AddTraffic(inboundTraffics []*xray.Traffic, clientTraff
 	return
 }
 
-func (s *InboundService) addTrafficLocked(inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic) (needRestart bool, clientsDisabled bool, disabledNodeIDs []int, err error) {
+func (s *InboundService) addTrafficLocked(id string, inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic, identities []XrayTrafficIdentity) (needRestart bool, clientsDisabled bool, disabledNodeIDs []int, err error) {
 	db := database.GetDB()
 	tx := db.Begin()
 	if tx.Error != nil {
 		return false, false, nil, tx.Error
 	}
 
+	var unlockRenewalQuota func()
 	defer func() {
 		if err != nil {
 			tx.Rollback()
 		} else if commitErr := tx.Commit().Error; commitErr != nil {
 			err = commitErr
 		}
+		if unlockRenewalQuota != nil {
+			unlockRenewalQuota()
+		}
 	}()
+	if id != "" {
+		result := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&model.XrayTrafficReceipt{ID: id})
+		if result.Error != nil {
+			return false, false, nil, result.Error
+		}
+		if result.RowsAffected == 0 {
+			// An earlier commit succeeded despite returning an error. Request a
+			// conservative restart in case its runtime side effects were missed.
+			return true, false, nil, nil
+		}
+	}
+	if identities != nil {
+		clientTraffics, err = reconcileXrayTrafficIdentities(tx, clientTraffics, identities)
+		if err != nil {
+			return false, false, nil, err
+		}
+	}
 	err = s.addInboundTraffic(tx, inboundTraffics)
 	if err != nil {
 		return false, false, nil, err
@@ -65,9 +119,26 @@ func (s *InboundService) addTrafficLocked(inboundTraffics []*xray.Traffic, clien
 		return false, false, nil, err
 	}
 
-	needRestart0, count, err := s.autoRenewClients(tx)
-	if err != nil {
-		logger.Warning("Error in renew clients:", err)
+	// Keep the just-written traffic even if a renewal cannot be completed,
+	// while ensuring no partially archived/reset renewal is committed.
+	if err = tx.SavePoint("automatic_renewal").Error; err != nil {
+		return false, false, nil, err
+	}
+	var needRestart0 bool
+	var count int64
+	var renewErr error
+	// Allocation paths can submit work to this writer while holding the quota
+	// lock. Never block on that lock here: postpone renewal to the next tick.
+	unlockRenewalQuota, renewErr = tryLockResellerAllocation(tx)
+	if renewErr == nil && unlockRenewalQuota != nil {
+		needRestart0, count, renewErr = s.autoRenewClients(tx)
+	}
+	if renewErr != nil {
+		if err = tx.RollbackTo("automatic_renewal").Error; err != nil {
+			return false, false, nil, err
+		}
+		needRestart0 = false
+		logger.Warning("Error in renew clients:", renewErr)
 	} else if count > 0 {
 		logger.Debugf("%v clients renewed", count)
 	}
@@ -75,7 +146,10 @@ func (s *InboundService) addTrafficLocked(inboundTraffics []*xray.Traffic, clien
 	disabledClientsCount := int64(0)
 	needRestart1, count, disabledNodeIDs, err := s.disableInvalidClients(tx)
 	if err != nil {
-		logger.Warning("Error in disabling invalid clients:", err)
+		// Runtime calls may already have taken effect, but the database must not
+		// commit counters or partial disable state. The caller can retry the
+		// whole traffic batch and reconcile the runtime on restart.
+		return true, false, nil, fmt.Errorf("disable invalid clients: %w", err)
 	} else if count > 0 {
 		logger.Debugf("%v clients disabled", count)
 		disabledClientsCount = count
@@ -83,7 +157,7 @@ func (s *InboundService) addTrafficLocked(inboundTraffics []*xray.Traffic, clien
 
 	needRestart2, count, err := s.disableInvalidInbounds(tx)
 	if err != nil {
-		logger.Warning("Error in disabling invalid inbounds:", err)
+		return true, false, nil, fmt.Errorf("disable invalid inbounds: %w", err)
 	} else if count > 0 {
 		logger.Debugf("%v inbounds disabled", count)
 	}
@@ -98,11 +172,20 @@ func (s *InboundService) addInboundTraffic(tx *gorm.DB, traffics []*xray.Traffic
 	var err error
 
 	for _, traffic := range traffics {
+		if traffic == nil {
+			return errors.New("nil inbound traffic delta")
+		}
 		if traffic.IsInbound {
+			if traffic.Up < 0 || traffic.Down < 0 {
+				return errors.New("negative inbound traffic delta")
+			}
+			// Saturate corrupted or overflowing counters instead of allowing
+			// SQLite float rounding or PostgreSQL bigint overflow to defeat
+			// inbound limits and block the entire accounting batch.
 			err = tx.Model(&model.Inbound{}).Where("tag = ? AND node_id IS NULL", traffic.Tag).
 				Updates(map[string]any{
-					"up":   gorm.Expr("up + ?", traffic.Up),
-					"down": gorm.Expr("down + ?", traffic.Down),
+					"up":   gorm.Expr("CASE WHEN up < 0 OR up > ? THEN ? ELSE up + ? END", int64(math.MaxInt64)-traffic.Up, int64(math.MaxInt64), traffic.Up),
+					"down": gorm.Expr("CASE WHEN down < 0 OR down > ? THEN ? ELSE down + ? END", int64(math.MaxInt64)-traffic.Down, int64(math.MaxInt64), traffic.Down),
 				}).Error
 			if err != nil {
 				return err
@@ -165,6 +248,11 @@ func (s *InboundService) addClientTraffic(tx *gorm.DB, traffics []*xray.ClientTr
 	// Avoid empty slice error
 	if len(dbClientTraffics) == 0 {
 		return nil
+	}
+	for _, row := range dbClientTraffics {
+		if row.Up < 0 || row.Down < 0 {
+			return errors.New("negative stored client traffic requires reconciliation")
+		}
 	}
 
 	dbClientTraffics, err = s.adjustTraffics(tx, dbClientTraffics)
@@ -453,7 +541,10 @@ func (s *InboundService) autoRenewClients(tx *gorm.DB) (bool, int64, error) {
 		return false, 0, nil
 	}
 
-	renewalSchedules := loadCalendarRenewalSchedules(tx, traffics)
+	renewalSchedules, err := loadCalendarRenewalSchedules(tx, traffics)
+	if err != nil {
+		return false, 0, err
+	}
 
 	var inbound_ids []int
 	var inbounds []*model.Inbound
@@ -496,14 +587,67 @@ func (s *InboundService) autoRenewClients(tx *gorm.DB) (bool, int64, error) {
 		}
 		inbounds = append(inbounds, page...)
 	}
+	renewedEmails := make(map[string]struct{})
+	// Traffic rows are shared across inbounds. Preserve the original disabled
+	// state so every inbound is re-enabled, even after the first one updates
+	// the shared row.
+	wasDisabled := make(map[string]bool, len(traffics))
+	for _, traffic := range traffics {
+		wasDisabled[transferEmailKey(traffic.Email)] = !traffic.Enable
+	}
+	deniedEmails := make(map[string]struct{})
+	quotaTracker := renewalQuotaTracker{tx: tx, accounts: make(map[int]*renewalQuotaSnapshot)}
 	for inbound_index := range inbounds {
 		settings := map[string]any{}
-		json.Unmarshal([]byte(inbounds[inbound_index].Settings), &settings)
-		clients := settings["clients"].([]any)
+		rawSettings := []byte(inbounds[inbound_index].Settings)
+		if !json.Valid(rawSettings) {
+			return false, 0, fmt.Errorf("parse renewal inbound %d: invalid JSON", inbounds[inbound_index].Id)
+		}
+		decoder := json.NewDecoder(strings.NewReader(string(rawSettings)))
+		decoder.UseNumber() // preserve integer byte quotas above 2^53
+		if err := decoder.Decode(&settings); err != nil {
+			return false, 0, fmt.Errorf("parse renewal inbound %d: %w", inbounds[inbound_index].Id, err)
+		}
+		// Decode only the client array as typed records. GetClients historically
+		// ignores decoding errors and can return partial records, which must not
+		// be synced into quota and identity data.
+		var typedSettings struct {
+			Clients []model.Client `json:"clients"`
+		}
+		if err := json.Unmarshal(rawSettings, &typedSettings); err != nil {
+			return false, 0, fmt.Errorf("parse renewal inbound %d clients: %w", inbounds[inbound_index].Id, err)
+		}
+		clients, ok := settings["clients"].([]any)
+		if !ok {
+			return false, 0, fmt.Errorf("renewal inbound %d has invalid clients", inbounds[inbound_index].Id)
+		}
 		for client_index := range clients {
-			c := clients[client_index].(map[string]any)
+			c, ok := clients[client_index].(map[string]any)
+			if !ok {
+				return false, 0, fmt.Errorf("renewal inbound %d has invalid client", inbounds[inbound_index].Id)
+			}
+			email, ok := c["email"].(string)
+			if !ok || transferEmailKey(email) == "" {
+				return false, 0, fmt.Errorf("renewal inbound %d has client without email", inbounds[inbound_index].Id)
+			}
 			for traffic_index, traffic := range traffics {
-				if transferEmailKey(traffic.Email) == transferEmailKey(c["email"].(string)) {
+				if transferEmailKey(traffic.Email) == transferEmailKey(email) {
+					// Reseller reservation uses canonical quota. Never renew a
+					// divergent inbound that could enforce a larger runtime limit.
+					var owners int64
+					key := transferEmailKey(email)
+					if err := tx.Model(&model.ResellerClient{}).Where("LOWER(TRIM(email)) = ?", key).Count(&owners).Error; err != nil {
+						return false, 0, err
+					}
+					if owners > 0 {
+						var canonical []model.ClientRecord
+						if err := tx.Where("LOWER(TRIM(email)) = ?", key).Find(&canonical).Error; err != nil {
+							return false, 0, err
+						}
+						if len(canonical) != 1 || canonical[0].TotalGB != typedSettings.Clients[client_index].TotalGB {
+							return false, 0, fmt.Errorf("reseller renewal quota mismatch for %q; manual reconciliation required", email)
+						}
+					}
 					sched := renewalSchedule{mode: RenewalModeRolling, rollingDays: traffic.Reset}
 					if rs, ok := renewalSchedules[transferEmailKey(traffic.Email)]; ok {
 						sched.mode, sched.day = rs.mode, rs.day
@@ -516,11 +660,29 @@ func (s *InboundService) autoRenewClients(tx *gorm.DB) (bool, int64, error) {
 						// past expiry.
 						break
 					}
+					if _, denied := deniedEmails[key]; denied {
+						break
+					}
+					if _, seen := renewedEmails[key]; !seen {
+						allowed, err := quotaTracker.reserve(traffic.Email)
+						if err != nil {
+							return false, 0, err
+						}
+						if !allowed {
+							deniedEmails[key] = struct{}{}
+							logger.Warning("Automatic renewal skipped: reseller quota or account status prevents renewal for", traffic.Email)
+							break
+						}
+						if err := closeResellerTrafficWindowTx(tx, traffic.Email); err != nil {
+							return false, 0, err
+						}
+						renewedEmails[key] = struct{}{}
+					}
 					c["expiryTime"] = newExpiryTime
 					traffics[traffic_index].ExpiryTime = newExpiryTime
 					traffics[traffic_index].Down = 0
 					traffics[traffic_index].Up = 0
-					if !traffic.Enable {
+					if wasDisabled[key] {
 						traffics[traffic_index].Enable = true
 						c["enable"] = true
 						clientsToAdd = append(clientsToAdd,
@@ -554,13 +716,29 @@ func (s *InboundService) autoRenewClients(tx *gorm.DB) (bool, int64, error) {
 		if ib == nil {
 			continue
 		}
-		cs, gcErr := s.GetClients(ib)
-		if gcErr != nil {
-			logger.Warning("autoRenewClients sync clients: GetClients failed", gcErr)
+		var parsed struct {
+			Clients []model.Client `json:"clients"`
+		}
+		if err := json.Unmarshal([]byte(ib.Settings), &parsed); err != nil {
+			return false, 0, fmt.Errorf("read renewal inbound %d clients: %w", ib.Id, err)
+		}
+		// Rebuild links without copying stale inbound quotas or credentials over
+		// canonical clients after the reseller quota reservation was calculated.
+		if syncErr := s.clientService.SyncInboundPreservingExisting(tx, ib.Id, parsed.Clients); syncErr != nil {
+			return false, 0, fmt.Errorf("sync renewal inbound %d clients: %w", ib.Id, syncErr)
+		}
+	}
+	for _, traffic := range traffics {
+		if _, renewed := renewedEmails[transferEmailKey(traffic.Email)]; !renewed {
 			continue
 		}
-		if syncErr := s.clientService.SyncInbound(tx, ib.Id, cs); syncErr != nil {
-			logger.Warning("autoRenewClients sync clients: SyncInbound failed", syncErr)
+		result := tx.Model(&model.ClientRecord{}).Where("LOWER(TRIM(email)) = ?", transferEmailKey(traffic.Email)).
+			Updates(map[string]any{"expiry_time": traffic.ExpiryTime, "enable": traffic.Enable})
+		if result.Error != nil {
+			return false, 0, result.Error
+		}
+		if result.RowsAffected != 1 {
+			return false, 0, fmt.Errorf("renewal client %q is missing or ambiguous", traffic.Email)
 		}
 	}
 	err = tx.Save(traffics).Error
@@ -569,13 +747,17 @@ func (s *InboundService) autoRenewClients(tx *gorm.DB) (bool, int64, error) {
 	}
 	// A renewed client starts a fresh quota window: drop the cross-panel rows
 	// too, or the stale pushed totals would re-deplete it immediately.
-	if err = clearGlobalTraffic(tx, renewEmails...); err != nil {
+	completedEmails := make([]string, 0, len(renewedEmails))
+	for email := range renewedEmails {
+		completedEmails = append(completedEmails, email)
+	}
+	if err = clearGlobalTraffic(tx, completedEmails...); err != nil {
 		return false, 0, err
 	}
 	if p != nil {
 		err1 = s.xrayApi.Init(p.GetAPIPort())
 		if err1 != nil {
-			return true, int64(len(traffics)), nil
+			return true, int64(len(renewedEmails)), nil
 		}
 		for _, clientToAdd := range clientsToAdd {
 			err1 = s.xrayApi.AddUser(clientToAdd.protocol, clientToAdd.tag, clientToAdd.client)
@@ -585,7 +767,7 @@ func (s *InboundService) autoRenewClients(tx *gorm.DB) (bool, int64, error) {
 		}
 		s.xrayApi.Close()
 	}
-	return needRestart, int64(len(traffics)), nil
+	return needRestart, int64(len(renewedEmails)), nil
 }
 
 // AddClientStat inserts a per-client accounting row, no-op on email
@@ -669,13 +851,17 @@ func (s *InboundService) delClientStatsByEmails(tx *gorm.DB, emails []string) er
 
 func (s *InboundService) ResetClientTrafficByEmail(clientEmail string) error {
 	return submitTrafficWrite(func() error {
-		db := database.GetDB()
-		if err := clearGlobalTraffic(db, clientEmail); err != nil {
-			return err
-		}
-		return db.Model(xray.ClientTraffic{}).
-			Where("LOWER(TRIM(email)) = LOWER(?)", strings.TrimSpace(clientEmail)).
-			Updates(map[string]any{"enable": true, "up": 0, "down": 0}).Error
+		return database.GetDB().Transaction(func(tx *gorm.DB) error {
+			if err := closeResellerTrafficWindowTx(tx, clientEmail); err != nil {
+				return err
+			}
+			if err := clearGlobalTraffic(tx, clientEmail); err != nil {
+				return err
+			}
+			return tx.Model(xray.ClientTraffic{}).
+				Where("LOWER(TRIM(email)) = LOWER(?)", strings.TrimSpace(clientEmail)).
+				Updates(map[string]any{"enable": true, "up": 0, "down": 0}).Error
+		})
 	})
 }
 
@@ -769,11 +955,16 @@ func (s *InboundService) resetClientTrafficLocked(id int, clientEmail string) (b
 	traffic.Enable = true
 
 	db := database.GetDB()
-	err = db.Save(traffic).Error
+	err = db.Transaction(func(tx *gorm.DB) error {
+		if err := closeResellerTrafficWindowTx(tx, clientEmail); err != nil {
+			return err
+		}
+		if err := tx.Save(traffic).Error; err != nil {
+			return err
+		}
+		return clearGlobalTraffic(tx, clientEmail)
+	})
 	if err != nil {
-		return false, err
-	}
-	if err := clearGlobalTraffic(db, clientEmail); err != nil {
 		return false, err
 	}
 
@@ -854,7 +1045,18 @@ func (s *InboundService) ResetInboundTraffic(id int) error {
 	})
 }
 
-func (s *InboundService) DelDepletedClients(id int) (err error) {
+func (s *InboundService) DelDepletedClients(id int) error {
+	unlock, err := LockResellerAllocation()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return submitTrafficWrite(func() error { return s.delDepletedClientsLocked(id) })
+}
+
+// Snapshots, association updates and counter deletion share a transaction.
+// The caller holds both the allocation lock and the traffic writer.
+func (s *InboundService) delDepletedClientsLocked(id int) (err error) {
 	db := database.GetDB()
 	if db == nil {
 		return fmt.Errorf("database is not initialized")
@@ -874,7 +1076,7 @@ func (s *InboundService) DelDepletedClients(id int) (err error) {
 	// deferred until after Commit: a daemon must never be told that a client was
 	// deleted when the corresponding settings/link transaction later rolls back.
 	now := time.Now().UnixMilli()
-	depletedClause := "reset = 0 AND ((total > 0 AND up + down >= total) OR (expiry_time > 0 AND expiry_time <= ?))"
+	depletedClause := "reset = 0 AND " + depletedClientsCond
 	var depletedRows []xray.ClientTraffic
 	if err = tx.Model(xray.ClientTraffic{}).
 		Where(depletedClause, now).
@@ -917,6 +1119,7 @@ func (s *InboundService) DelDepletedClients(id int) (err error) {
 		new model.Inbound
 	}
 	updates := make([]runtimeUpdate, 0, len(inbounds))
+	removedEmails := make(map[string]struct{})
 	for _, inbound := range inbounds {
 		var settings map[string]any
 		if err = json.Unmarshal([]byte(inbound.Settings), &settings); err != nil {
@@ -936,8 +1139,10 @@ func (s *InboundService) DelDepletedClients(id int) (err error) {
 				continue
 			}
 			email, _ := client["email"].(string)
-			if _, isDepleted := depletedEmails[transferEmailKey(email)]; isDepleted {
+			key := transferEmailKey(email)
+			if _, isDepleted := depletedEmails[key]; isDepleted {
 				removed = true
+				removedEmails[key] = struct{}{}
 				continue
 			}
 			newClients = append(newClients, rawClient)
@@ -971,9 +1176,22 @@ func (s *InboundService) DelDepletedClients(id int) (err error) {
 	// Keep a shared client's accounting while another inbound still owns the
 	// canonical association. The link table, rather than a stale
 	// client_traffics.inbound_id or settings substring, is authoritative.
-	emails := make([]string, 0, len(depletedEmails))
-	for email := range depletedEmails {
+	// A scoped cleanup must not delete counters for unrelated orphaned users
+	// merely because they have no current inbound link anywhere.
+	selected := depletedEmails
+	if id >= 0 {
+		selected = removedEmails
+	}
+	emails := make([]string, 0, len(selected))
+	for email := range selected {
 		emails = append(emails, email)
+	}
+	if len(emails) == 0 {
+		if err = tx.Commit().Error; err != nil {
+			return err
+		}
+		committed = true
+		return nil
 	}
 	var toDelete []string
 	if id < 0 {
@@ -998,6 +1216,27 @@ func (s *InboundService) DelDepletedClients(id int) (err error) {
 		}
 	}
 	if len(toDelete) > 0 {
+		// Never discard a mapped client's persisted usage with its counters.
+		// Missing or ambiguous mapped identities must be reconciled instead.
+		for _, email := range toDelete {
+			var mappings int64
+			if err = tx.Model(&model.ResellerClient{}).Where("LOWER(TRIM(email)) = ?", email).Count(&mappings).Error; err != nil {
+				return err
+			}
+			if mappings == 0 {
+				continue
+			}
+			var clients []model.ClientRecord
+			if err = tx.Where("LOWER(TRIM(email)) = ?", email).Find(&clients).Error; err != nil {
+				return err
+			}
+			if len(clients) != 1 {
+				return fmt.Errorf("cannot archive depleted reseller client %q; manual reconciliation required", email)
+			}
+			if err = archiveResellerClientUsageTx(tx, &clients[0], 0); err != nil {
+				return err
+			}
+		}
 		if err = s.delClientStatsByEmails(tx, toDelete); err != nil {
 			return err
 		}
@@ -1276,13 +1515,12 @@ func (s *InboundService) GetClientTrafficByEmailForInbounds(email string, allowe
 }
 
 func (s *InboundService) updateClientTrafficByEmail(email string, upload int64, download int64) error {
-	db := database.GetDB()
-	err := db.Model(xray.ClientTraffic{}).
-		Where("LOWER(TRIM(email)) = LOWER(?)", strings.TrimSpace(email)).
-		Updates(map[string]any{
-			"up":   upload,
-			"down": download,
-		}).Error
+	if upload < 0 || download < 0 {
+		return errors.New("traffic counters cannot be negative")
+	}
+	err := database.GetDB().Transaction(func(tx *gorm.DB) error {
+		return rewriteResellerTrafficCountersTx(tx, email, upload, download)
+	})
 	if err != nil {
 		logger.Warningf("Error updating ClientTraffic with email %s: %v", email, err)
 	}

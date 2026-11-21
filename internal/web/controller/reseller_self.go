@@ -41,6 +41,8 @@ func (a *ResellerSelfController) initRouter(g *gin.RouterGroup) {
 	g.GET("/stats", a.stats)
 	g.GET("/report", a.report)
 	g.GET("/report/export", a.reportExport)
+	g.GET("/sales", a.salesReport)
+	g.GET("/sales/export", a.salesReportExport)
 	g.POST("/password", a.changePassword)
 	g.GET("/tickets", a.listTickets)
 	g.GET("/tickets/:id", a.getTicket)
@@ -177,6 +179,42 @@ func (a *ResellerSelfController) reportExport(c *gin.Context) {
 		return
 	}
 	serveCSV(c, "reseller-"+reseller.Username+"-clients", service.RenderResellerClientsCSV(report))
+}
+
+func (a *ResellerSelfController) salesReport(c *gin.Context) {
+	reseller := a.currentReseller(c)
+	if reseller == nil {
+		return
+	}
+	period, from, to, err := parseResellerSalesQuery(c)
+	if err != nil {
+		jsonMsg(c, "", err)
+		return
+	}
+	report, err := a.resellerService.SalesReport(reseller.Id, period, from, to)
+	if err != nil {
+		jsonMsg(c, "", err)
+		return
+	}
+	jsonObj(c, report, nil)
+}
+
+func (a *ResellerSelfController) salesReportExport(c *gin.Context) {
+	reseller := a.currentReseller(c)
+	if reseller == nil {
+		return
+	}
+	period, from, to, err := parseResellerSalesQuery(c)
+	if err != nil {
+		jsonMsg(c, "", err)
+		return
+	}
+	report, err := a.resellerService.SalesReport(reseller.Id, period, from, to)
+	if err != nil {
+		jsonMsg(c, "", err)
+		return
+	}
+	serveCSV(c, "reseller-"+reseller.Username+"-sales-"+period, service.RenderResellerSalesCSV(report))
 }
 
 func (a *ResellerSelfController) changePassword(c *gin.Context) {

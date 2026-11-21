@@ -286,6 +286,11 @@ func (s *Server) initRouter() (*gin.Engine, error) {
 	return engine, nil
 }
 
+func scheduleXrayTrafficJob(c *cron.Cron) error {
+	_, err := c.AddJob("@every 5s", job.SharedXrayTrafficJob())
+	return err
+}
+
 // startTask schedules background jobs (Xray checks, traffic jobs, cron
 // jobs) which the panel relies on for periodic maintenance and monitoring.
 func (s *Server) startTask(restartXray bool) {
@@ -313,10 +318,12 @@ func (s *Server) startTask(restartXray bool) {
 		}
 	})
 
-	go func() {
-		time.Sleep(time.Second * 5)
-		s.cron.AddJob("@every 5s", job.NewXrayTrafficJob())
-	}()
+	// Register synchronously: @every 5s already delays the first tick, and
+	// a detached registration goroutine can attach to a replacement cron
+	// after a rapid panel restart.
+	if err := scheduleXrayTrafficJob(s.cron); err != nil {
+		logger.Warning("schedule Xray traffic collection failed:", err)
+	}
 
 	// Reconcile mtproto (mtg) sidecars and scrape their traffic
 	mtJob := job.NewMtprotoJob()
@@ -551,10 +558,17 @@ func (s *Server) stop(stopXray bool, stopTgBot bool) error {
 		<-s.cron.Stop().Done()
 	}
 	if stopXray {
+		// Capture a final best-effort Xray batch while the core and traffic
+		// writer are still alive. Active connections can transfer more bytes
+		// until the core actually stops; this is not a lossless barrier.
+		if err := job.SharedXrayTrafficJob().FlushBeforeStop(); err != nil {
+			logger.Warning("persist final Xray traffic on shutdown failed:", err)
+			err2 = common.Combine(err2, err)
+		}
 		tuic.GetManager().StopAll()
 		if err := job.NewTuicJob().FlushStoppedTraffic(); err != nil {
 			logger.Warning("persist final TUIC traffic on shutdown failed:", err)
-			err2 = err
+			err2 = common.Combine(err2, err)
 		}
 		if err := s.xrayService.StopXray(); err != nil && !strings.Contains(err.Error(), "xray is not running") {
 			err2 = common.Combine(err2, err)

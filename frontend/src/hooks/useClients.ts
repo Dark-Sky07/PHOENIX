@@ -319,6 +319,10 @@ export function useClients() {
         queryClient.invalidateQueries({ queryKey: keys.clients.root() }),
         queryClient.invalidateQueries({ queryKey: keys.inbounds.root() }),
         queryClient.invalidateQueries({ queryKey: keys.xray.config() }),
+        // Client creation/update changes reseller allocated traffic and sales
+        // snapshots, but reseller sessions do not receive the admin-only
+        // client_stats websocket event. Refetch their own reports explicitly.
+        queryClient.invalidateQueries({ queryKey: keys.resellers.selfReport() }),
       ]);
     },
     [queryClient],

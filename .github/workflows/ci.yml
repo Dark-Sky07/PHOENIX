@@ -150,9 +150,40 @@ jobs:
       - name: Build
         run: npm run build
         working-directory: frontend
-      - name: Audit production dependencies
-        # Development/build-tool dependencies are not shipped in PHOENIX binaries.
-        # Keep the release gate focused on dependencies included in the product;
-        # known dev-only advisories remain visible through a full local npm audit.
-        run: npm audit --omit=dev --audit-level=moderate
+      - name: Audit all dependencies
+        # Development tooling is part of the build supply chain too.
+        run: npm audit --audit-level=low
         working-directory: frontend
+
+  postgres-traffic-identity:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: phoenix
+          POSTGRES_PASSWORD: phoenix
+          POSTGRES_DB: phoenix_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U phoenix -d phoenix_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Stub internal/web/dist for go:embed
+        run: mkdir -p internal/web/dist && touch internal/web/dist/.gitkeep
+      - name: Test PostgreSQL accounting locks
+        env:
+          PHOENIX_TEST_POSTGRES_DSN: postgres://phoenix:phoenix@localhost:5432/phoenix_test?sslmode=disable
+        run: go test ./internal/web/service -run '^(TestXrayTrafficIdentityLocksExistingRowsPostgres|TestResellerAllocationAdvisoryLockPostgres|TestConcurrentVoucherRedemptionPostgres|TestConcurrentResellerPaymentPostgres|TestEffectiveGlobalTrafficEnforcementPostgres|TestInboundTrafficOverflowPostgres|TestResellerNodeBaselinePostgres|TestCounterIncidentAcrossPostgresProcesses)$' -count=1
+      - name: Test PostgreSQL quota across processes
+        env:
+          PHOENIX_TEST_POSTGRES_DSN: postgres://phoenix:phoenix@localhost:5432/phoenix_test?sslmode=disable
+        run: go test ./internal/web/controller -run '^TestConcurrentResellerCreationAcrossPostgresProcesses$' -count=1

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"net"
 	"net/url"
 	"sort"
@@ -19,6 +20,7 @@ import (
 	moneycurrency "github.com/Dark-Sky07/phoenix/internal/util/currency"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // ResellerService implements the نمایندگی (reseller) feature: panel sub-accounts
@@ -35,19 +37,22 @@ const bytesPerGB = 1024 * 1024 * 1024
 // ResellerStat is one reseller's live usage snapshot. It is what both the
 // admin's reseller table and the reseller's own dashboard render.
 type ResellerStat struct {
-	Reseller         *model.Reseller `json:"reseller"`
-	Currency         string          `json:"currency"` // Currency denomination for reseller financial values.
-	InboundCount     int             `json:"inboundCount"`
-	ClientCount      int             `json:"clientCount"`
-	OnlineCount      int             `json:"onlineCount"`
-	UsedTraffic      int64           `json:"usedTraffic"`
-	AllocatedTraffic int64           `json:"allocatedTraffic"`
-	RemainingTraffic int64           `json:"remainingTraffic"` // TrafficLimit - AllocatedTraffic (0 when unlimited)
-	Cost             float64         `json:"cost"`             // UsedTraffic priced at PricePerGB
-	Balance          float64         `json:"balance"`          // Deposit - Cost (negative = debt)
-	Expired          bool            `json:"expired"`
-	OverQuota        bool            `json:"overQuota"` // Any quota exceeded
-	Disabled         bool            `json:"disabled"`  // Auto-disabled because a quota ran out
+	Reseller           *model.Reseller `json:"reseller"`
+	Currency           string          `json:"currency"` // Currency denomination for reseller financial values.
+	InboundCount       int             `json:"inboundCount"`
+	ClientCount        int             `json:"clientCount"`
+	OnlineCount        int             `json:"onlineCount"`
+	PendingCreations   int64           `json:"pendingCreations"`
+	ProcessingRenewals int64           `json:"processingRenewals"`
+	HasUnlimitedClient bool            `json:"hasUnlimitedClient"`
+	UsedTraffic        int64           `json:"usedTraffic"`
+	AllocatedTraffic   int64           `json:"allocatedTraffic"`
+	RemainingTraffic   int64           `json:"remainingTraffic"` // TrafficLimit - AllocatedTraffic (0 when unlimited)
+	Cost               float64         `json:"cost"`             // UsedTraffic priced at PricePerGB
+	Balance            float64         `json:"balance"`          // Deposit - Cost (negative = debt)
+	Expired            bool            `json:"expired"`
+	OverQuota          bool            `json:"overQuota"` // Any quota exceeded
+	Disabled           bool            `json:"disabled"`  // Auto-disabled because a quota ran out
 }
 
 // ResellerClientRow is a single client inside a reseller report.
@@ -68,9 +73,71 @@ type ResellerClientRow struct {
 
 // ResellerReport is the full billing/usage report for one reseller.
 type ResellerReport struct {
-	Stat         *ResellerStat                `json:"stat"`
-	Clients      []ResellerClientRow          `json:"clients"`
-	Transactions []*model.ResellerTransaction `json:"transactions"`
+	Stat            *ResellerStat                  `json:"stat"`
+	Clients         []ResellerClientRow            `json:"clients"`
+	Transactions    []*model.ResellerTransaction   `json:"transactions"`
+	TrafficArchives []model.ResellerTrafficArchive `json:"trafficArchives"`
+	// Populated by the admin report handler only; self-service never exposes
+	// operational details of potentially unowned client records.
+	CreationIssues []ResellerCreationIssue  `json:"creationIssues,omitempty"`
+	RenewalIssues  []ProcessingRenewalIssue `json:"renewalIssues,omitempty"`
+}
+
+// ResellerSalePrice is a reseller-declared price, in the currency's minor
+// units. It is not a verified payment. Absence means the amount is unknown.
+type ResellerSalePrice struct {
+	AmountMinor int64  `json:"amountMinor"`
+	Currency    string `json:"currency"`
+}
+
+func ValidateResellerSalePrice(price *ResellerSalePrice) error {
+	if price == nil {
+		return nil
+	}
+	if price.AmountMinor < 0 || price.AmountMinor > 9007199254740991 {
+		return errors.New("invalid declared sale amount")
+	}
+	code, ok := moneycurrency.Normalize(price.Currency)
+	if !ok {
+		return errors.New("unsupported sale currency")
+	}
+	price.Currency = code
+	return nil
+}
+
+// addMinorAmount preserves exact totals across int64 and JavaScript number limits.
+func addMinorAmount(existing string, amount int64) string {
+	value := new(big.Int)
+	if existing != "" {
+		value.SetString(existing, 10)
+	}
+	return value.Add(value, big.NewInt(amount)).String()
+}
+
+// ResellerSalesBucket is one UTC day, month, or year of newly created client
+// accounts and the traffic quotas allocated to those accounts at sale time.
+type ResellerSalesBucket struct {
+	Period          string            `json:"period"`
+	StartAt         int64             `json:"startAt"`
+	Sales           int64             `json:"sales"`
+	HistoricalSales int64             `json:"historicalSales"`
+	TrafficBytes    int64             `json:"trafficBytes"`
+	UnknownPrices   int64             `json:"unknownPrices"`
+	AmountsMinor    map[string]string `json:"amountsMinor"`
+}
+
+// ResellerSalesReport reports snapshots and declared prices, not payments.
+type ResellerSalesReport struct {
+	ResellerId        int                   `json:"resellerId"`
+	Period            string                `json:"period"`
+	From              int64                 `json:"from,omitempty"`
+	To                int64                 `json:"to,omitempty"`
+	TotalSales        int64                 `json:"totalSales"`
+	HistoricalSales   int64                 `json:"historicalSales"`
+	TotalTrafficBytes int64                 `json:"totalTrafficBytes"`
+	UnknownPrices     int64                 `json:"unknownPrices"`
+	AmountsMinor      map[string]string     `json:"amountsMinor"`
+	Buckets           []ResellerSalesBucket `json:"buckets"`
 }
 
 // ---------------------------------------------------------------------------
@@ -348,7 +415,10 @@ func (s *ResellerService) UpdateBrandSettings(resellerID int, name, logo, color,
 func (s *ResellerService) Delete(id int) error {
 	db := database.GetDB()
 	return db.Transaction(func(tx *gorm.DB) error {
-		for _, mdl := range []any{&model.Reseller{}, &model.ResellerInbound{}, &model.ResellerClient{}, &model.ResellerTransaction{}} {
+		if err := rejectResellerNodeIncidents(tx, id, nil); err != nil {
+			return err
+		}
+		for _, mdl := range []any{&model.Reseller{}, &model.ResellerInbound{}, &model.ResellerClient{}, &model.ResellerTransaction{}, &model.ResellerSale{}, &model.ResellerHistoricalSale{}, &model.ResellerTrafficArchive{}} {
 			q := tx
 			if _, isReseller := mdl.(*model.Reseller); isReseller {
 				if err := q.Where("id = ?", id).Delete(mdl).Error; err != nil {
@@ -899,6 +969,35 @@ func (s *ResellerService) HasForeignInboundAssociation(resellerId int, email str
 // Inbound ownership is intentionally not consulted: this is the only operation
 // that grants client credentials/stats visibility.
 func (s *ResellerService) AssignClients(resellerId int, emails []string) error {
+	return s.AssignClientsWithSales(resellerId, emails, nil)
+}
+
+// AssignClientsWithSales records immutable account/traffic sale snapshots for
+// newly created reseller clients in the same transaction as their ownership
+// mappings. Manually assigned pre-existing clients are passed only in emails.
+func (s *ResellerService) AssignClientsWithSales(resellerId int, emails, saleEmails []string, declaredPrices ...map[string]*ResellerSalePrice) error {
+	return s.assignClientsWithSales(resellerId, emails, saleEmails, "", declaredPrices...)
+}
+
+// CompleteResellerClientCreation removes the durable intent in the same
+// transaction that creates the mapping and sale snapshot.
+func (s *ResellerService) CompleteResellerClientCreation(resellerId int, email, intentID string, price *ResellerSalePrice) error {
+	return s.assignClientsWithSales(resellerId, []string{email}, []string{email}, intentID, map[string]*ResellerSalePrice{email: price})
+}
+
+func (s *ResellerService) assignClientsWithSales(resellerId int, emails, saleEmails []string, intentID string, declaredPrices ...map[string]*ResellerSalePrice) error {
+	prices := map[string]*ResellerSalePrice{}
+	if len(declaredPrices) > 1 {
+		return errors.New("multiple sale price maps are not allowed")
+	}
+	if len(declaredPrices) == 1 {
+		for email, price := range declaredPrices[0] {
+			if err := ValidateResellerSalePrice(price); err != nil {
+				return err
+			}
+			prices[transferEmailKey(email)] = price
+		}
+	}
 	resellerScopeMutationMu.Lock()
 	defer resellerScopeMutationMu.Unlock()
 	keys := make([]string, 0, len(emails))
@@ -917,6 +1016,31 @@ func (s *ResellerService) AssignClients(resellerId int, emails []string) error {
 	if len(keys) == 0 {
 		return errors.New("at least one email is required")
 	}
+	keySet := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		keySet[key] = struct{}{}
+	}
+	saleKeys := make([]string, 0, len(saleEmails))
+	saleSet := make(map[string]struct{}, len(saleEmails))
+	for _, raw := range saleEmails {
+		key := transferEmailKey(raw)
+		if key == "" {
+			return errors.New("sale email can not be empty")
+		}
+		if _, assigned := keySet[key]; !assigned {
+			return fmt.Errorf("sale client %q is not in the assignment batch", key)
+		}
+		if _, duplicate := saleSet[key]; duplicate {
+			continue
+		}
+		saleSet[key] = struct{}{}
+		saleKeys = append(saleKeys, key)
+	}
+	for key := range prices {
+		if _, ok := saleSet[key]; !ok {
+			return fmt.Errorf("priced client %q is not a sale", key)
+		}
+	}
 	db := database.GetDB()
 	return db.Transaction(func(tx *gorm.DB) error {
 		var reseller model.Reseller
@@ -926,12 +1050,27 @@ func (s *ResellerService) AssignClients(resellerId int, emails []string) error {
 			}
 			return err
 		}
+		var intent model.ResellerCreationIntent
+		if intentID != "" {
+			if len(keys) != 1 || len(saleKeys) != 1 {
+				return errors.New("invalid creation intent batch")
+			}
+			if err := tx.Where("id = ? AND reseller_id = ?", intentID, resellerId).First(&intent).Error; err != nil {
+				return err
+			}
+			if transferEmailKey(intent.Email) != keys[0] {
+				return errors.New("creation intent email changed")
+			}
+		}
 		var clients []model.ClientRecord
 		if err := tx.Where("LOWER(TRIM(email)) IN ?", keys).Find(&clients).Error; err != nil {
 			return err
 		}
 		canonical := make(map[string]string, len(clients))
 		for _, client := range clients {
+			if intentID != "" && (client.SubID != intent.SubID || client.TotalGB != intent.RequestedBytes) {
+				return errors.New("creation intent identity or allocation changed")
+			}
 			canonical[transferEmailKey(client.Email)] = client.Email
 		}
 		for _, key := range keys {
@@ -971,6 +1110,45 @@ func (s *ResellerService) AssignClients(resellerId int, emails []string) error {
 				return err
 			}
 		}
+		if len(saleKeys) > 0 {
+			for _, key := range saleKeys {
+				var client model.ClientRecord
+				if err := tx.Where("LOWER(TRIM(email)) = ?", key).First(&client).Error; err != nil {
+					return err
+				}
+				// Client metadata can be supplied by the reseller. A live sale's
+				// reporting date must instead be the server's recording time;
+				// backdated entries use the audited historical-sale API.
+				createdAt := time.Now().UnixMilli()
+				sale := model.ResellerSale{
+					ResellerId:     resellerId,
+					ClientRecordId: client.Id,
+					Email:          client.Email,
+					TrafficBytes:   max(client.TotalGB, 0),
+					CreatedAt:      createdAt,
+				}
+				if price := prices[key]; price != nil {
+					amount := price.AmountMinor
+					sale.AmountMinor = &amount
+					sale.Currency = price.Currency
+				}
+				if err := tx.Clauses(clause.OnConflict{
+					Columns:   []clause.Column{{Name: "reseller_id"}, {Name: "client_record_id"}},
+					DoNothing: true,
+				}).Create(&sale).Error; err != nil {
+					return err
+				}
+			}
+		}
+		if intentID != "" {
+			result := tx.Where("id = ? AND reseller_id = ?", intentID, resellerId).Delete(&model.ResellerCreationIntent{})
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				return errors.New("creation intent missing during completion")
+			}
+		}
 		return nil
 	})
 }
@@ -1002,17 +1180,41 @@ func (s *ResellerService) UnassignClients(resellerId int, emails []string) error
 	if len(keys) == 0 {
 		return errors.New("at least one email is required")
 	}
-	db := database.GetDB()
-	return db.Transaction(func(tx *gorm.DB) error {
-		var reseller model.Reseller
-		if err := tx.Where("id = ?", resellerId).First(&reseller).Error; err != nil {
-			if database.IsNotFound(err) {
-				return errors.New("reseller not found")
+	return submitTrafficWrite(func() error {
+		return database.GetDB().Transaction(func(tx *gorm.DB) error {
+			var reseller model.Reseller
+			if err := tx.Where("id = ?", resellerId).First(&reseller).Error; err != nil {
+				if database.IsNotFound(err) {
+					return errors.New("reseller not found")
+				}
+				return err
 			}
-			return err
-		}
-		return tx.Where("reseller_id = ? AND LOWER(TRIM(email)) IN ?", resellerId, keys).
-			Delete(&model.ResellerClient{}).Error
+			for _, batch := range chunkStrings(keys, sqlInChunk) {
+				if err := rejectResellerNodeIncidents(tx, resellerId, batch); err != nil {
+					return err
+				}
+				var mappings []model.ResellerClient
+				if err := tx.Where("reseller_id = ? AND LOWER(TRIM(email)) IN ?", resellerId, batch).Find(&mappings).Error; err != nil {
+					return err
+				}
+				for _, mapping := range mappings {
+					var clients []model.ClientRecord
+					if err := tx.Where("LOWER(TRIM(email)) = ?", transferEmailKey(mapping.Email)).Find(&clients).Error; err != nil {
+						return err
+					}
+					if len(clients) != 1 {
+						return errors.New("cannot unassign client without a unique client record for usage accounting")
+					}
+					if err := archiveResellerClientUsageTx(tx, &clients[0], resellerId); err != nil {
+						return err
+					}
+				}
+				if err := tx.Where("reseller_id = ? AND LOWER(TRIM(email)) IN ?", resellerId, batch).Delete(&model.ResellerClient{}).Error; err != nil {
+					return err
+				}
+			}
+			return nil
+		})
 	})
 }
 
@@ -1053,7 +1255,40 @@ func (s *ResellerService) ClientUsage(emails []string) (map[string]*xray.ClientT
 		}
 		rows = append(rows, part...)
 	}
-	overlayGlobalTraffic(db, rows)
+	// Quota decisions must not silently fall back to local counters when a
+	// global overlay query fails. Include global-only rows as well: a partially
+	// missing local traffic row must not make measured usage disappear.
+	globalUp, globalDown := map[string]int64{}, map[string]int64{}
+	for _, batch := range chunkStrings(keys, sqlInChunk) {
+		var globals []model.ClientGlobalTraffic
+		if err := db.Where("LOWER(TRIM(email)) IN ?", batch).Find(&globals).Error; err != nil {
+			return nil, fmt.Errorf("read reseller global traffic: %w", err)
+		}
+		for _, g := range globals {
+			if g.Up < 0 || g.Down < 0 {
+				return nil, errors.New("negative reseller global traffic requires reconciliation")
+			}
+			key := transferEmailKey(g.Email)
+			globalUp[key] = max(globalUp[key], g.Up)
+			globalDown[key] = max(globalDown[key], g.Down)
+		}
+	}
+	// Exact-email uniqueness does not prevent case/whitespace variants. Their
+	// ownership and counter overlap are ambiguous; applying the same global
+	// total to each row would double-charge, while merging could undercount.
+	localSeen := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		if row.Up < 0 || row.Down < 0 {
+			return nil, errors.New("negative reseller client traffic requires reconciliation")
+		}
+		key := transferEmailKey(row.Email)
+		if localSeen[key] {
+			return nil, errors.New("ambiguous client traffic counters require reconciliation")
+		}
+		localSeen[key] = true
+		row.Up = max(row.Up, globalUp[key])
+		row.Down = max(row.Down, globalDown[key])
+	}
 	for _, row := range rows {
 		key := strings.ToLower(strings.TrimSpace(row.Email))
 		agg, ok := usage[key]
@@ -1067,6 +1302,11 @@ func (s *ResellerService) ClientUsage(emails []string) (map[string]*xray.ClientT
 			agg.Enable = true
 		}
 	}
+	for _, key := range keys {
+		if _, exists := usage[key]; !exists && (globalUp[key] > 0 || globalDown[key] > 0) {
+			usage[key] = &xray.ClientTraffic{Email: key, Up: globalUp[key], Down: globalDown[key]}
+		}
+	}
 	return usage, nil
 }
 
@@ -1076,7 +1316,18 @@ func (s *ResellerService) Stat(reseller *model.Reseller) (*ResellerStat, error) 
 		return nil, errors.New("reseller is required")
 	}
 	db := database.GetDB()
+	if err := validateResellerNodeBaselines(db, reseller.Id); err != nil {
+		return nil, err
+	}
 	stat := &ResellerStat{Reseller: reseller, Currency: "USD"}
+	if err := db.Model(&model.ResellerCreationIntent{}).Where("reseller_id = ?", reseller.Id).Count(&stat.PendingCreations).Error; err != nil {
+		return nil, err
+	}
+	var err error
+	stat.ProcessingRenewals, err = countResellerProcessingClientRenewals(db, reseller.Id)
+	if err != nil {
+		return nil, err
+	}
 	var settingSvc SettingService
 	if configured, err := settingSvc.GetCheckoutCurrency(); err == nil && strings.TrimSpace(configured) != "" {
 		if code, ok := moneycurrency.Normalize(configured); ok {
@@ -1112,17 +1363,41 @@ func (s *ResellerService) Stat(reseller *model.Reseller) (*ResellerStat, error) 
 		}
 	}
 
-	if len(emails) > 0 {
-		for _, batch := range chunkStrings(emails, sqlInChunk) {
-			var allocations []int64
-			if err := db.Model(model.ClientRecord{}).
-				Where("LOWER(TRIM(email)) IN ?", batch).
-				Pluck("total_gb", &allocations).Error; err != nil {
+	activeClients := make(map[int]model.ClientRecord)
+	clientKeys := make([]string, 0, len(emails))
+	for _, email := range emails {
+		clientKeys = append(clientKeys, transferEmailKey(email))
+	}
+	seenClients := make(map[string]bool, len(clientKeys))
+	if len(clientKeys) > 0 {
+		for _, batch := range chunkStrings(clientKeys, sqlInChunk) {
+			var records []model.ClientRecord
+			if err := db.Select("id", "email", "total_gb").Where("LOWER(TRIM(email)) IN ?", batch).Find(&records).Error; err != nil {
 				return nil, err
 			}
-			for _, allocation := range allocations {
-				stat.AllocatedTraffic = saturatingAddBytes(stat.AllocatedTraffic, allocation)
+			for _, record := range records {
+				key := transferEmailKey(record.Email)
+				if seenClients[key] {
+					return nil, errors.New("ambiguous reseller client requires reconciliation")
+				}
+				seenClients[key] = true
+				activeClients[record.Id] = record
+				// A zero client limit is unlimited, not a free allocation. Legacy
+				// or administrator-assigned unlimited clients must exhaust a
+				// finite reseller's available allocation until reconciled.
+				if record.TotalGB <= 0 {
+					stat.HasUnlimitedClient = true
+				}
+				stat.AllocatedTraffic = saturatingAddBytes(stat.AllocatedTraffic, record.TotalGB)
 			}
+		}
+	}
+
+	// A dangling ownership mapping can hide an allocation or usage. Do not
+	// treat it as free capacity until an administrator reconciles the record.
+	for _, key := range clientKeys {
+		if !seenClients[key] {
+			return nil, errors.New("reseller client mapping has no client record; reconciliation required")
 		}
 	}
 
@@ -1133,6 +1408,48 @@ func (s *ResellerService) Stat(reseller *model.Reseller) (*ResellerStat, error) 
 	for _, row := range usage {
 		stat.UsedTraffic = saturatingAddBytes(stat.UsedTraffic, row.Up)
 		stat.UsedTraffic = saturatingAddBytes(stat.UsedTraffic, row.Down)
+	}
+	// Reducing a live client's quota must never release traffic already used.
+	// Account for the excess per client rather than comparing only aggregate
+	// totals, since unused allocation on another client cannot offset it.
+	for _, client := range activeClients {
+		liveUsed := int64(0)
+		if row := usage[transferEmailKey(client.Email)]; row != nil {
+			liveUsed = saturatingAddBytes(row.Up, row.Down)
+		}
+		if liveUsed > max(client.TotalGB, 0) {
+			stat.AllocatedTraffic = saturatingAddBytes(stat.AllocatedTraffic, liveUsed-max(client.TotalGB, 0))
+		}
+	}
+	var archived []model.ResellerTrafficArchive
+	if err := db.Where("reseller_id = ?", reseller.Id).Find(&archived).Error; err != nil {
+		return nil, err
+	}
+	for _, entry := range archived {
+		if entry.PriorConsumedBytes < 0 || entry.ConsumedBytes < 0 {
+			return nil, errors.New("negative reseller traffic archive requires reconciliation")
+		}
+		// Completed usage windows are additive to the current window.
+		stat.UsedTraffic = saturatingAddBytes(stat.UsedTraffic, entry.PriorConsumedBytes)
+		stat.AllocatedTraffic = saturatingAddBytes(stat.AllocatedTraffic, entry.PriorConsumedBytes)
+		if client, exists := activeClients[entry.ClientRecordId]; exists {
+			// A failed or retried deletion can leave the same client live.
+			// Count the greater snapshot, not both copies.
+			liveUsed := int64(0)
+			if row := usage[transferEmailKey(client.Email)]; row != nil {
+				liveUsed = saturatingAddBytes(row.Up, row.Down)
+			}
+			if entry.ConsumedBytes > liveUsed {
+				stat.UsedTraffic = saturatingAddBytes(stat.UsedTraffic, entry.ConsumedBytes-liveUsed)
+			}
+			liveAllocation := max(max(client.TotalGB, 0), liveUsed)
+			if entry.ConsumedBytes > liveAllocation {
+				stat.AllocatedTraffic = saturatingAddBytes(stat.AllocatedTraffic, entry.ConsumedBytes-liveAllocation)
+			}
+		} else {
+			stat.UsedTraffic = saturatingAddBytes(stat.UsedTraffic, entry.ConsumedBytes)
+			stat.AllocatedTraffic = saturatingAddBytes(stat.AllocatedTraffic, entry.ConsumedBytes)
+		}
 	}
 
 	online := s.inboundService.GetOnlineClients()
@@ -1154,9 +1471,12 @@ func (s *ResellerService) Stat(reseller *model.Reseller) (*ResellerStat, error) 
 	stat.Expired = IsExpired(reseller.ExpiryTime)
 	if reseller.TrafficLimit > 0 {
 		stat.RemainingTraffic = reseller.TrafficLimit - stat.AllocatedTraffic
+		if stat.HasUnlimitedClient {
+			stat.RemainingTraffic = 0
+		}
 	}
 	stat.OverQuota = stat.Expired || !reseller.Enable ||
-		(reseller.TrafficLimit > 0 && (stat.AllocatedTraffic > reseller.TrafficLimit || stat.UsedTraffic >= reseller.TrafficLimit)) ||
+		(reseller.TrafficLimit > 0 && (stat.HasUnlimitedClient || stat.AllocatedTraffic > reseller.TrafficLimit || stat.UsedTraffic >= reseller.TrafficLimit)) ||
 		(reseller.ClientLimit > 0 && stat.ClientCount > reseller.ClientLimit)
 	stat.Disabled = !reseller.Enable
 	return stat, nil
@@ -1198,8 +1518,12 @@ func (s *ResellerService) Report(resellerId int) (*ResellerReport, error) {
 	}
 
 	db := database.GetDB()
+	clientKeys := make([]string, 0, len(emails))
+	for _, email := range emails {
+		clientKeys = append(clientKeys, transferEmailKey(email))
+	}
 	records := make([]*model.ClientRecord, 0, len(emails))
-	for _, batch := range chunkStrings(emails, sqlInChunk) {
+	for _, batch := range chunkStrings(clientKeys, sqlInChunk) {
 		var part []*model.ClientRecord
 		if err := db.Model(model.ClientRecord{}).Where("LOWER(TRIM(email)) IN ?", batch).Find(&part).Error; err != nil {
 			return nil, err
@@ -1214,7 +1538,7 @@ func (s *ResellerService) Report(resellerId int) (*ResellerReport, error) {
 			InboundId int
 		}
 		rows := make([]row, 0)
-		for _, batch := range chunkStrings(emails, sqlInChunk) {
+		for _, batch := range chunkStrings(clientKeys, sqlInChunk) {
 			var part []row
 			if err := db.Raw(`
 				SELECT c.email AS email, ci.inbound_id AS inbound_id
@@ -1264,7 +1588,11 @@ func (s *ResellerService) Report(resellerId int) (*ResellerReport, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ResellerReport{Stat: stat, Clients: rows, Transactions: transactions}, nil
+	var archives []model.ResellerTrafficArchive
+	if err := db.Where("reseller_id = ?", resellerId).Order("id DESC").Limit(500).Find(&archives).Error; err != nil {
+		return nil, err
+	}
+	return &ResellerReport{Stat: stat, Clients: rows, Transactions: transactions, TrafficArchives: archives}, nil
 }
 
 // Transactions lists a reseller's ledger, newest first.
@@ -1280,6 +1608,108 @@ func (s *ResellerService) Transactions(resellerId int) ([]*model.ResellerTransac
 		return nil, err
 	}
 	return rows, nil
+}
+
+// SalesReport groups immutable client-creation sale snapshots in UTC. The time
+// range is half-open [from, to); zero bounds mean unbounded.
+func (s *ResellerService) SalesReport(resellerId int, period string, from, to int64) (*ResellerSalesReport, error) {
+	period = strings.ToLower(strings.TrimSpace(period))
+	if period != "daily" && period != "monthly" && period != "yearly" {
+		return nil, errors.New("period must be daily, monthly, or yearly")
+	}
+	if resellerId <= 0 {
+		return nil, errors.New("reseller id must be positive")
+	}
+	if from < 0 || to < 0 || (from > 0 && to > 0 && from >= to) {
+		return nil, errors.New("invalid sales report time range")
+	}
+	if _, err := s.Get(resellerId); err != nil {
+		return nil, err
+	}
+	query := database.GetDB().Model(&model.ResellerSale{}).Where("reseller_id = ?", resellerId)
+	if from > 0 {
+		query = query.Where("created_at >= ?", from)
+	}
+	if to > 0 {
+		query = query.Where("created_at < ?", to)
+	}
+	var sales []model.ResellerSale
+	if err := query.Order("created_at ASC, id ASC").Find(&sales).Error; err != nil {
+		return nil, err
+	}
+	historyQuery := database.GetDB().Where("reseller_id = ?", resellerId)
+	if from > 0 {
+		historyQuery = historyQuery.Where("sold_at >= ?", from)
+	}
+	if to > 0 {
+		historyQuery = historyQuery.Where("sold_at < ?", to)
+	}
+	var historical []model.ResellerHistoricalSale
+	if err := historyQuery.Find(&historical).Error; err != nil {
+		return nil, err
+	}
+	type saleEvent struct {
+		model.ResellerSale
+		historical bool
+	}
+	events := make([]saleEvent, 0, len(sales)+len(historical))
+	for _, sale := range sales {
+		events = append(events, saleEvent{ResellerSale: sale})
+	}
+	for _, sale := range historical {
+		events = append(events, saleEvent{ResellerSale: model.ResellerSale{CreatedAt: sale.SoldAt, TrafficBytes: sale.TrafficBytes, AmountMinor: sale.AmountMinor, Currency: sale.Currency}, historical: true})
+	}
+	buckets := make(map[string]*ResellerSalesBucket)
+	report := &ResellerSalesReport{ResellerId: resellerId, Period: period, From: from, To: to, AmountsMinor: map[string]string{}}
+	for _, sale := range events {
+		if sale.CreatedAt <= 0 {
+			continue
+		}
+		at := time.UnixMilli(sale.CreatedAt).UTC()
+		var key string
+		var start time.Time
+		switch period {
+		case "daily":
+			key = at.Format("2006-01-02")
+			start = time.Date(at.Year(), at.Month(), at.Day(), 0, 0, 0, 0, time.UTC)
+		case "monthly":
+			key = at.Format("2006-01")
+			start = time.Date(at.Year(), at.Month(), 1, 0, 0, 0, 0, time.UTC)
+		case "yearly":
+			key = at.Format("2006")
+			start = time.Date(at.Year(), time.January, 1, 0, 0, 0, 0, time.UTC)
+		}
+		bucket := buckets[key]
+		if bucket == nil {
+			bucket = &ResellerSalesBucket{Period: key, StartAt: start.UnixMilli(), AmountsMinor: map[string]string{}}
+			buckets[key] = bucket
+		}
+		bucket.Sales++
+		if sale.historical {
+			bucket.HistoricalSales++
+			report.HistoricalSales++
+		}
+		if sale.AmountMinor == nil || sale.Currency == "" {
+			bucket.UnknownPrices++
+			report.UnknownPrices++
+		} else {
+			bucket.AmountsMinor[sale.Currency] = addMinorAmount(bucket.AmountsMinor[sale.Currency], *sale.AmountMinor)
+			report.AmountsMinor[sale.Currency] = addMinorAmount(report.AmountsMinor[sale.Currency], *sale.AmountMinor)
+		}
+		bucket.TrafficBytes = saturatingAddBytes(bucket.TrafficBytes, sale.TrafficBytes)
+		report.TotalSales++
+		report.TotalTrafficBytes = saturatingAddBytes(report.TotalTrafficBytes, sale.TrafficBytes)
+	}
+	keys := make([]string, 0, len(buckets))
+	for key := range buckets {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	report.Buckets = make([]ResellerSalesBucket, 0, len(keys))
+	for _, key := range keys {
+		report.Buckets = append(report.Buckets, *buckets[key])
+	}
+	return report, nil
 }
 
 // AdjustBalance moves money on a reseller's account and records the movement.
@@ -1307,17 +1737,24 @@ func (s *ResellerService) AdjustBalance(resellerId int, amount float64, comment 
 		return nil, fmt.Errorf("balance can not go below zero (current: %s)", FormatNumber(reseller.Deposit))
 	}
 	newBalance := RoundMoney(reseller.Deposit+amount, currencyCode)
+	if math.IsNaN(newBalance) || math.IsInf(newBalance, 0) {
+		return nil, errors.New("balance exceeds supported range")
+	}
 	txType := "deposit"
 	if amount < 0 {
 		txType = "withdraw"
 	}
 	db := database.GetDB()
 	err = db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(model.Reseller{}).Where("id = ?", resellerId).Updates(map[string]any{
+		result := tx.Model(model.Reseller{}).Where("id = ? AND deposit = ?", resellerId, reseller.Deposit).Updates(map[string]any{
 			"deposit":    newBalance,
 			"updated_at": time.Now().UnixMilli(),
-		}).Error; err != nil {
-			return err
+		})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return errors.New("reseller balance changed concurrently; retry adjustment")
 		}
 		return tx.Create(&model.ResellerTransaction{
 			ResellerId: resellerId,
@@ -1359,8 +1796,17 @@ func (s *ResellerService) CheckTrafficQuota(reseller *model.Reseller, addBytes i
 	if reseller == nil {
 		return errors.New("reseller is required")
 	}
+	if err := CheckPendingResellerCreations(reseller.Id); err != nil {
+		return err
+	}
+	if err := CheckResellerProcessingClientRenewals(reseller.Id); err != nil {
+		return err
+	}
 	if addBytes < 0 {
 		return errors.New("traffic allocation cannot be negative")
+	}
+	if err := validateResellerNodeBaselines(database.GetDB(), reseller.Id); err != nil {
+		return err
 	}
 	if reseller.TrafficLimit <= 0 {
 		return nil
@@ -1379,6 +1825,9 @@ func checkTrafficQuotaSnapshot(reseller *model.Reseller, stat *ResellerStat, add
 	if addBytes < 0 {
 		return errors.New("traffic allocation cannot be negative")
 	}
+	if stat.HasUnlimitedClient {
+		return errors.New("limited reseller has an unlimited client; administrator reconciliation required")
+	}
 	if stat.UsedTraffic >= reseller.TrafficLimit {
 		return fmt.Errorf("traffic quota exhausted: %s of %s used", FormatBytes(stat.UsedTraffic), FormatBytes(reseller.TrafficLimit))
 	}
@@ -1393,11 +1842,32 @@ func checkTrafficQuotaSnapshot(reseller *model.Reseller, stat *ResellerStat, add
 	return nil
 }
 
+// ValidateResellerAllocation rejects an unlimited client under a finite reseller
+// traffic limit. A zero client quota means unlimited, not zero bytes allocated.
+func ValidateResellerAllocation(reseller *model.Reseller, allocation int64) error {
+	if reseller == nil {
+		return errors.New("reseller is required")
+	}
+	if allocation < 0 {
+		return errors.New("client traffic quota cannot be negative")
+	}
+	if reseller.TrafficLimit > 0 && allocation == 0 {
+		return errors.New("unlimited client traffic is not allowed for a limited reseller")
+	}
+	return nil
+}
+
 // CheckClientQuota verifies that adding `adding` clients is allowed and that
 // their quota fits into the traffic volume.
 func (s *ResellerService) CheckClientQuota(reseller *model.Reseller, adding int, addBytes int64) error {
 	if reseller == nil {
 		return errors.New("reseller is required")
+	}
+	if err := CheckPendingResellerCreations(reseller.Id); err != nil {
+		return err
+	}
+	if err := CheckResellerProcessingClientRenewals(reseller.Id); err != nil {
+		return err
 	}
 	if adding < 0 {
 		return errors.New("client count increment cannot be negative")

@@ -99,6 +99,13 @@ func (s *ResellerDepositCheckoutService) CreateOrder(token string, amount float6
 	if math.IsNaN(amount) || math.IsInf(amount, 0) || amount <= 0 || amount > resellerDepositMaxAmount {
 		return nil, common.NewError("amount must be greater than 0 and no more than ", resellerDepositMaxAmount)
 	}
+	// Serialize the pending-order count and insertion with other participating
+	// checkouts, payments and reseller mutations, including across processes.
+	unlock, err := LockResellerAllocation()
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	reseller, err := s.resolveReseller(token, secret, now)
 	if err != nil {
 		return nil, err
@@ -106,6 +113,9 @@ func (s *ResellerDepositCheckoutService) CreateOrder(token string, amount float6
 	cfg, err := loadCheckoutConfig()
 	if err != nil {
 		return nil, err
+	}
+	if _, ok := currency.Normalize(cfg.currency); !ok {
+		return nil, common.NewError("checkout currency is invalid")
 	}
 	amount = RoundMoney(amount, cfg.currency)
 	if amount <= 0 {
@@ -127,6 +137,7 @@ func (s *ResellerDepositCheckoutService) CreateOrder(token string, amount float6
 		TargetType: "reseller_deposit",
 		TargetRef:  reseller.Username,
 		Amount:     amount,
+		Currency:   cfg.currency,
 		Status:     "pending",
 	}
 	if err := db.Create(order).Error; err != nil {
