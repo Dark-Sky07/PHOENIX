@@ -405,3 +405,12 @@ retain and investigate them rather than deleting them blindly. The dashboard
 includes local journal presence or inspection failure in its warning. This
 covers only the configured local journal folder: an older, unmarked journal on
 another host with an independent folder is not visible to this guard.
+
+Recovery can automatically clear an interrupted poll marker when its matching
+Xray receipt proves that the traffic transaction committed. It retains the
+receipt because a journal for that batch could still exist on another host;
+a later replay must not charge it twice. Markers without a matching receipt are
+not cleared by this recovery and still require their journal or documented
+manual investigation. Orphan receipts may accumulate until an operator can
+confirm no copy of their corresponding journal can be replayed; do not remove
+them merely to reduce table size.

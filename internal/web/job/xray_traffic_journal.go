@@ -126,10 +126,7 @@ func (j *XrayTrafficJob) replayXrayJournal() error {
 	}
 	defer unlock()
 	entries, err := os.ReadDir(xrayJournalDir())
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
+	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	for _, entry := range entries {
@@ -159,5 +156,8 @@ func (j *XrayTrafficJob) replayXrayJournal() error {
 			j.xrayService.SetToNeedRestart()
 		}
 	}
-	return nil
+	// A crash can occur after a committed batch and journal cleanup but
+	// before its poll marker is removed. The receipt proves that batch was
+	// applied; retain the receipt in case another host has the journal.
+	return service.RecoverCommittedXrayPollMarkers()
 }

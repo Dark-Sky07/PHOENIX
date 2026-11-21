@@ -513,3 +513,70 @@ func TestUnexpectedXrayJournalFilesBlockRecoveryAndAllocation(t *testing.T) {
 		t.Fatalf("unexpected journal evidence removed: %v", err)
 	}
 }
+
+func TestCommittedOrphanPollMarkerRecoversWithoutForgettingReceipt(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XUI_DB_FOLDER", dir)
+	if err := database.InitDB(filepath.Join(dir, "test.db")); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.CloseDB() })
+	db := database.GetDB()
+	client := model.ClientRecord{Email: "committed-orphan@example.test", Enable: true}
+	counter := xray.ClientTraffic{Email: client.Email, Enable: true}
+	for _, v := range []any{&client, &counter} {
+		if err := db.Create(v).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	j := NewXrayTrafficJob()
+	t.Cleanup(func() {
+		if j.captureUnlock != nil {
+			j.captureUnlock()
+			j.captureUnlock = nil
+		}
+	})
+	if err := j.prepareXrayBatch(func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
+		return nil, []*xray.ClientTraffic{{Email: client.Email, Up: 123}}, nil
+	}, j.inboundService.CaptureXrayTrafficIdentities); err != nil {
+		t.Fatal(err)
+	}
+	batch := j.pending
+	if _, _, err := j.inboundService.AddCheckedXrayTrafficBatchUnderAllocationLock(batch.id, batch.traffic, batch.clients, batch.identities); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(xrayJournalDir(), batch.id+".json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncJournalDir(xrayJournalDir()); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate the process dying after journal removal but before marker cleanup.
+	j.captureUnlock()
+	j.captureUnlock = nil
+	j.pending = nil
+	uncommittedID := uuid.NewString()
+	if err := db.Create(&model.XrayTrafficInFlight{ID: uncommittedID}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := NewXrayTrafficJob().replayXrayJournal(); err != nil {
+		t.Fatal(err)
+	}
+	var count int64
+	if err := db.Model(&model.XrayTrafficInFlight{}).Where("id = ?", batch.id).Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("committed marker not recovered: %d %v", count, err)
+	}
+	if err := db.Model(&model.XrayTrafficInFlight{}).Where("id = ?", uncommittedID).Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("uncommitted marker was removed: %d %v", count, err)
+	}
+	if err := db.Model(&model.XrayTrafficReceipt{}).Where("id = ?", batch.id).Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("receipt not retained for remote retry: %d %v", count, err)
+	}
+	if err := db.First(&counter, counter.Id).Error; err != nil || counter.Up != 123 {
+		t.Fatalf("committed traffic lost or duplicated: %+v %v", counter, err)
+	}
+	if unlock, err := service.LockResellerAllocation(); err == nil {
+		unlock()
+		t.Fatal("uncommitted orphan did not block allocation")
+	}
+}

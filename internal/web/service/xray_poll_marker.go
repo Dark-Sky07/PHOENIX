@@ -24,3 +24,17 @@ func FinishXrayPoll(id string) error {
 	}
 	return database.GetDB().Where("id = ?", id).Delete(&model.XrayTrafficInFlight{}).Error
 }
+
+// RecoverCommittedXrayPollMarkers clears only markers whose receipt proves
+// that the batch transaction committed. Call under the allocation recovery
+// lock. Receipts are deliberately retained: another host may still hold a
+// journal and must be able to replay it without charging the batch twice.
+// Markers without receipts remain for journal recovery or manual review.
+func RecoverCommittedXrayPollMarkers() error {
+	db := database.GetDB()
+	if db == nil {
+		return errors.New("database unavailable while recovering Xray poll markers")
+	}
+	receipts := db.Model(&model.XrayTrafficReceipt{}).Select("id")
+	return db.Where("id IN (?)", receipts).Delete(&model.XrayTrafficInFlight{}).Error
+}
