@@ -60,8 +60,8 @@ func TestXrayJournalSurvivesDatabaseFailureAndReplaysOnce(t *testing.T) {
 		t.Fatalf("journal not removed: %v", err)
 	}
 	var count int64
-	if err := db.Model(&model.XrayTrafficReceipt{}).Count(&count).Error; err != nil || count != 0 {
-		t.Fatalf("receipt cleanup = %d, %v", count, err)
+	if err := db.Model(&model.XrayTrafficReceipt{}).Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("receipt not retained = %d, %v", count, err)
 	}
 }
 
@@ -578,5 +578,53 @@ func TestCommittedOrphanPollMarkerRecoversWithoutForgettingReceipt(t *testing.T)
 	if unlock, err := service.LockResellerAllocation(); err == nil {
 		unlock()
 		t.Fatal("uncommitted orphan did not block allocation")
+	}
+}
+
+func TestCopiedXrayJournalCannotApplyCommittedTrafficTwice(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XUI_DB_FOLDER", dir)
+	if err := database.InitDB(filepath.Join(dir, "test.db")); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.CloseDB() })
+	db := database.GetDB()
+	client := model.ClientRecord{Email: "copied-journal@example.test", Enable: true}
+	counter := xray.ClientTraffic{Email: client.Email, Enable: true}
+	for _, v := range []any{&client, &counter} {
+		if err := db.Create(v).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	batch := &xrayTrafficBatch{id: uuid.NewString(), clients: []*xray.ClientTraffic{{Email: client.Email, Up: 123, Down: 45}}}
+	var err error
+	batch.identities, err = (&service.InboundService{}).CaptureXrayTrafficIdentities(batch.clients)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := storeXrayBatch(batch); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(xrayJournalDir(), batch.id+".json")
+	copy, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := NewXrayTrafficJob().replayXrayJournal(); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a journal copy restored after the first host removed its file.
+	if err := os.WriteFile(path, copy, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewXrayTrafficJob().replayXrayJournal(); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.First(&counter, counter.Id).Error; err != nil || counter.Up != 123 || counter.Down != 45 {
+		t.Fatalf("copied journal duplicated traffic: %+v %v", counter, err)
+	}
+	var count int64
+	if err := db.Model(&model.XrayTrafficReceipt{}).Where("id = ?", batch.id).Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("receipt was discarded: %d %v", count, err)
 	}
 }

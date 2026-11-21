@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/Dark-Sky07/phoenix/internal/logger"
 	"github.com/Dark-Sky07/phoenix/internal/web/service"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
 	"github.com/google/uuid"
@@ -75,8 +74,8 @@ func storeXrayBatch(batch *xrayTrafficBatch) error {
 	return syncJournalDir(dir)
 }
 
-// applyJournaledXrayBatch retains the receipt until the removal of its journal
-// file is durable. Otherwise a crash could replay a committed batch twice.
+// applyJournaledXrayBatch retains the transaction receipt even after journal
+// removal. An independent host or restored backup may still hold a copy.
 func (j *XrayTrafficJob) applyJournaledXrayBatch(batch *xrayTrafficBatch) (bool, bool, error) {
 	if batch.identities == nil {
 		identities, err := j.inboundService.CaptureXrayTrafficIdentities(batch.clients)
@@ -110,12 +109,8 @@ func (j *XrayTrafficJob) applyJournaledXrayBatch(batch *xrayTrafficBatch) (bool,
 	if err := service.FinishXrayPoll(batch.id); err != nil {
 		return restart, disabled, fmt.Errorf("clear Xray poll marker: %w", err)
 	}
-	// An orphan receipt after a cleanup failure is harmless and cannot cause a
-	// duplicate charge. A UUID is never reused for a different poll.
-	if err := j.inboundService.ForgetXrayTrafficBatch(batch.id); err != nil {
-		// No retry is needed: the corresponding journal removal is durable.
-		logger.Warning("clean Xray traffic receipt failed:", err)
-	}
+	// Do not discard the receipt just because this host removed its journal:
+	// another host or backup can still replay the same UUID.
 	return restart, disabled, nil
 }
 

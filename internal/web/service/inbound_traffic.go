@@ -62,16 +62,6 @@ func (s *InboundService) AddCheckedXrayTrafficBatchUnderAllocationLock(id string
 	return s.addTrafficBatch(id, inbounds, clients, identities, true)
 }
 
-// ForgetXrayTrafficBatch is safe only after the caller has discarded the
-// corresponding retry batch. It prevents a receipt on every poll accumulating
-// indefinitely; leftovers after a crash are harmless.
-func (s *InboundService) ForgetXrayTrafficBatch(id string) error {
-	if id == "" {
-		return errors.New("Xray traffic batch has no ID")
-	}
-	return database.GetDB().Where("id = ?", id).Delete(&model.XrayTrafficReceipt{}).Error
-}
-
 func (s *InboundService) addTrafficBatch(id string, inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic, identities []XrayTrafficIdentity, allocationHeld bool) (needRestart bool, clientsDisabled bool, err error) {
 	var disabledNodeIDs []int
 	err = submitTrafficWrite(func() error {

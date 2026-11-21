@@ -45,10 +45,7 @@ func TestXrayTrafficBatchRetryIsAtomicAndIdempotent(t *testing.T) {
 	if row.Up != 123 || row.Down != 456 {
 		t.Fatalf("batch replay double counted or lost traffic: %d/%d", row.Up, row.Down)
 	}
-	if err := svc.ForgetXrayTrafficBatch("batch-1"); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Model(&model.XrayTrafficReceipt{}).Count(&count).Error; err != nil || count != 0 {
-		t.Fatalf("receipt cleanup: %d, %v", count, err)
+	if err := db.Model(&model.XrayTrafficReceipt{}).Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("receipt not retained for future replay: %d, %v", count, err)
 	}
 }

@@ -414,3 +414,14 @@ not cleared by this recovery and still require their journal or documented
 manual investigation. Orphan receipts may accumulate until an operator can
 confirm no copy of their corresponding journal can be replayed; do not remove
 them merely to reduce table size.
+
+Xray batch receipts are no longer automatically deleted after a local journal
+is removed. That removal cannot prove that another host or backup lacks a copy;
+retaining the receipt prevents that copy from charging the same committed UUID
+again. This change is prospective: previously deleted receipts cannot be
+reconstructed reliably without evidence, and restoring a database backup that
+predates a receipt can still permit a duplicate replay. Retention grows the
+receipt table for every committed batch, including empty polls; monitor database
+size and back up receipts with the counters. Do not prune receipts unless every
+possible journal copy and backup replay has been accounted for under a verified
+retention policy.
