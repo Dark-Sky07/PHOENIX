@@ -1805,6 +1805,9 @@ func (s *ResellerService) CheckTrafficQuota(reseller *model.Reseller, addBytes i
 	if addBytes < 0 {
 		return errors.New("traffic allocation cannot be negative")
 	}
+	if err := pendingXrayPollError(database.GetDB()); err != nil {
+		return err
+	}
 	if err := validateResellerNodeBaselines(database.GetDB(), reseller.Id); err != nil {
 		return err
 	}

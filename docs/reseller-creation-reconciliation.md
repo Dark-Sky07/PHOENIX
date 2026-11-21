@@ -369,3 +369,29 @@ trying to reacquire it. An unresolved disk, database or reconciliation error
 can therefore block participating allocation operations. This does not fence a
 lost lock session, protect other hosts' independent journals, or eliminate the
 crash window before the journal is durable.
+
+### Interrupted local Xray poll
+
+Before querying Xray, the collector now commits a database in-flight marker
+while holding the shared allocation lock. The marker is global because client
+identities and byte counts are not known yet. Participating allocation,
+ownership and removal operations, quota checks, and automatic renewal without
+the already-held lock fail closed while any marker exists. A successfully
+journaled batch is replayed under the recovery lock and its marker is removed
+only after the database application and durable journal removal. The dashboard
+includes in-flight markers in its incident count; an active poll may briefly
+appear and then disappear.
+
+A marker without a corresponding journal may mean the panel crashed during
+the poll, during identity capture, before journal sync, or after the journal
+was removed but before marker deletion. It is not evidence of how many bytes
+were lost. Back up the database and every host's journal directory; inspect the
+marker ID, receipt, counters, runtime and operator records before any manual
+reconciliation. Do not blindly delete a marker or receipt. In particular,
+receipt and journal cleanup ordering protects against double application.
+Journals are still local to each host: recovery must run on the host holding
+the matching journal. The database marker can block participating processes
+sharing that database but not a disconnected host, a lost advisory-lock
+session, or non-participating writers. Traffic between polls, failures before
+marker creation, panel/core crashes and traffic after a final poll are not
+reconstructed or proven complete by this mechanism.

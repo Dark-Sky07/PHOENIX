@@ -141,7 +141,7 @@
     "index": {
       "title": "Overview",
       "counterIncidentTitle": "Traffic accounting needs administrator review",
-      "counterIncidentDescription": "Detected {{count}} database incident(s), a local fallback, or a pending observation. Stop and investigate before clearing any marker; saved totals may be incomplete.",
+      "counterIncidentDescription": "Detected {{count}} database incident or in-flight Xray poll marker(s), a local fallback, or a pending observation. Active polls may clear shortly. Investigate persistent markers before clearing them; saved totals may be incomplete.",
       "counterIncidentUnavailable": "Incident status is unavailable. Do not assume traffic accounting is complete; investigate the database and fallback storage.",
       "resellerTrafficWarningTitle": "Reseller traffic requires verification before removal",
       "resellerTrafficWarningDescription": "Reseller client deletion, detachment and quota reduction are blocked. Administrators must verify final usage across runtimes and nodes before making these changes; unpolled traffic can be missing from stored totals.",

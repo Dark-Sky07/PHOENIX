@@ -335,3 +335,107 @@ func TestXrayJournalRejectsUnchangedAmbiguousResellerIdentity(t *testing.T) {
 		})
 	}
 }
+
+func TestInterruptedXrayPollMarkerBlocksQuotaUntilJournalReplay(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XUI_DB_FOLDER", dir)
+	if err := database.InitDB(filepath.Join(dir, "test.db")); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.CloseDB() })
+	db := database.GetDB()
+	reseller := model.Reseller{Username: "poll-marker", Password: "hash", Enable: true, TrafficLimit: 1000}
+	client := model.ClientRecord{Email: "poll-marker@example.test", Enable: true, TotalGB: 100}
+	counter := xray.ClientTraffic{Email: client.Email, Enable: true}
+	for _, v := range []any{&reseller, &client, &counter} {
+		if err := db.Create(v).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Create(&model.ResellerClient{ResellerId: reseller.Id, Email: client.Email}).Error; err != nil {
+		t.Fatal(err)
+	}
+	id := uuid.NewString()
+	if err := service.BeginXrayPoll(id); err != nil {
+		t.Fatal(err)
+	}
+	if unlock, err := service.LockResellerAllocation(); err == nil {
+		unlock()
+		t.Fatal("orphan poll marker allowed allocation")
+	}
+	if err := (&service.ResellerService{}).CheckTrafficQuota(&reseller, 1); err == nil {
+		t.Fatal("orphan poll marker allowed quota check")
+	}
+	batch := &xrayTrafficBatch{id: id, clients: []*xray.ClientTraffic{{Email: client.Email, Up: 123}}}
+	var err error
+	batch.identities, err = (&service.InboundService{}).CaptureXrayTrafficIdentities(batch.clients)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := storeXrayBatch(batch); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewXrayTrafficJob().replayXrayJournal(); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.First(&counter, counter.Id).Error; err != nil || counter.Up != 123 {
+		t.Fatalf("recovered usage missing: %+v %v", counter, err)
+	}
+	unlock, err := service.LockResellerAllocation()
+	if err != nil {
+		t.Fatalf("replayed marker still blocks allocation: %v", err)
+	}
+	unlock()
+}
+
+func TestPollMarkerDeleteFailureRetainsReceiptAndRetriesOnce(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XUI_DB_FOLDER", dir)
+	if err := database.InitDB(filepath.Join(dir, "test.db")); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.CloseDB() })
+	db := database.GetDB()
+	client := model.ClientRecord{Email: "marker-retry@example.test", Enable: true}
+	counter := xray.ClientTraffic{Email: client.Email, Enable: true}
+	for _, row := range []any{&client, &counter} {
+		if err := db.Create(row).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	j := NewXrayTrafficJob()
+	t.Cleanup(func() {
+		if j.captureUnlock != nil {
+			j.captureUnlock()
+			j.captureUnlock = nil
+		}
+	})
+	if err := j.prepareXrayBatch(func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
+		return nil, []*xray.ClientTraffic{{Email: client.Email, Up: 123}}, nil
+	}, j.inboundService.CaptureXrayTrafficIdentities); err != nil {
+		t.Fatal(err)
+	}
+	id := j.pending.id
+	if err := db.Exec("CREATE TRIGGER reject_poll_marker_delete BEFORE DELETE ON xray_traffic_in_flights BEGIN SELECT RAISE(ABORT, 'injected failure'); END").Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := j.applyPending(j.applyJournaledXrayBatch); err == nil || j.pending == nil || j.captureUnlock == nil {
+		t.Fatal("failed marker deletion lost the pending batch or lock")
+	}
+	var count int64
+	if err := db.Model(&model.XrayTrafficReceipt{}).Where("id = ?", id).Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("idempotency receipt was not retained: %d %v", count, err)
+	}
+	if err := db.Exec("DROP TRIGGER reject_poll_marker_delete").Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := j.applyPending(j.applyJournaledXrayBatch); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.First(&counter, counter.Id).Error; err != nil || counter.Up != 123 {
+		t.Fatalf("retry duplicated or lost traffic: %+v %v", counter, err)
+	}
+	if err := db.Model(&model.XrayTrafficInFlight{}).Where("id = ?", id).Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("poll marker remained after retry: %d %v", count, err)
+	}
+}

@@ -62,3 +62,21 @@ func TestCounterIncidentStatusStorageErrorsAreUnavailable(t *testing.T) {
 		t.Fatalf("failed database query reported available: %+v", got)
 	}
 }
+
+func TestCounterIncidentStatusIncludesXrayPollMarkers(t *testing.T) {
+	setupConflictDB(t)
+	db := database.GetDB()
+	if err := db.Create(&model.XrayTrafficInFlight{ID: "interrupted-poll"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	got := readCounterIncidentStatus(db)
+	if !got.Available || got.DatabaseCount != 1 {
+		t.Fatalf("poll marker not visible: %+v", got)
+	}
+	if err := db.Migrator().DropTable(&model.XrayTrafficInFlight{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readCounterIncidentStatus(db); got.Available {
+		t.Fatalf("poll-marker query failure reported available: %+v", got)
+	}
+}

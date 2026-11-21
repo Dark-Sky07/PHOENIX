@@ -34,6 +34,11 @@ func readCounterIncidentStatus(db *gorm.DB) CounterIncidentStatus {
 	if err := db.WithContext(ctx).Model(&model.ResellerNodeCounterIncident{}).Count(&status.DatabaseCount).Error; err != nil {
 		return status
 	}
+	var polls int64
+	if err := db.WithContext(ctx).Model(&model.XrayTrafficInFlight{}).Count(&polls).Error; err != nil {
+		return status
+	}
+	status.DatabaseCount += polls
 	status.Available = true
 	return status
 }

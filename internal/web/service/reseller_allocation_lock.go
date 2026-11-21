@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Dark-Sky07/phoenix/internal/database"
+	"github.com/Dark-Sky07/phoenix/internal/database/model"
 	"github.com/Dark-Sky07/phoenix/internal/logger"
 	"gorm.io/gorm"
 )
@@ -71,6 +72,16 @@ func releasePostgresAllocationLock(conn *sql.Conn) {
 // a sidecar file lock and PostgreSQL uses a session advisory lock. Neither is
 // a substitute for atomic creation or fencing a lost database connection.
 func LockResellerAllocation() (func(), error) {
+	return lockResellerAllocation(false)
+}
+
+// LockResellerAllocationForXrayRecovery is reserved for replaying Xray
+// journals while in-flight markers deliberately block normal mutations.
+func LockResellerAllocationForXrayRecovery() (func(), error) {
+	return lockResellerAllocation(true)
+}
+
+func lockResellerAllocation(recovery bool) (func(), error) {
 	resellerAllocationMu.Lock()
 	db := database.GetDB()
 	if db == nil {
@@ -95,7 +106,30 @@ func LockResellerAllocation() (func(), error) {
 		}
 		return nil, fmt.Errorf("acquire reseller allocation lock: %w", err)
 	}
+	if !recovery {
+		if err := pendingXrayPollError(db); err != nil {
+			unlock()
+			resellerAllocationMu.Unlock()
+			return nil, err
+		}
+	}
 	return func() { unlock(); resellerAllocationMu.Unlock() }, nil
+}
+
+// pendingXrayPollError must be checked after acquiring the shared allocation
+// lock. It is global because the affected identities may not yet be captured.
+func pendingXrayPollError(db *gorm.DB) error {
+	if db == nil {
+		return errors.New("database unavailable while checking Xray poll markers")
+	}
+	var count int64
+	if err := db.Model(&model.XrayTrafficInFlight{}).Count(&count).Error; err != nil {
+		return fmt.Errorf("check Xray poll markers: %w", err)
+	}
+	if count != 0 {
+		return errors.New("Xray traffic poll requires journal recovery or manual reconciliation")
+	}
+	return nil
 }
 
 // tryLockResellerAllocation never waits on another allocation while the
@@ -123,6 +157,11 @@ func tryLockResellerAllocation(tx *gorm.DB) (func(), error) {
 		err = errors.New("unsupported database for reseller allocation locking")
 	}
 	if err != nil || !ok {
+		resellerAllocationMu.Unlock()
+		return nil, err
+	}
+	if err := pendingXrayPollError(tx); err != nil {
+		unlock()
 		resellerAllocationMu.Unlock()
 		return nil, err
 	}

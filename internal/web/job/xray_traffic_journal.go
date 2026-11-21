@@ -105,6 +105,12 @@ func (j *XrayTrafficJob) applyJournaledXrayBatch(batch *xrayTrafficBatch) (bool,
 	if err := syncJournalDir(xrayJournalDir()); err != nil {
 		return restart, disabled, err
 	}
+	// Keep the idempotency receipt until the durable poll marker is gone.
+	// If marker deletion fails, a retry can recreate the journal without
+	// charging the same batch again.
+	if err := service.FinishXrayPoll(batch.id); err != nil {
+		return restart, disabled, fmt.Errorf("clear Xray poll marker: %w", err)
+	}
 	// An orphan receipt after a cleanup failure is harmless and cannot cause a
 	// duplicate charge. A UUID is never reused for a different poll.
 	if err := j.inboundService.ForgetXrayTrafficBatch(batch.id); err != nil {
@@ -115,6 +121,11 @@ func (j *XrayTrafficJob) applyJournaledXrayBatch(batch *xrayTrafficBatch) (bool,
 }
 
 func (j *XrayTrafficJob) replayXrayJournal() error {
+	unlock, err := service.LockResellerAllocationForXrayRecovery()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	entries, err := os.ReadDir(xrayJournalDir())
 	if os.IsNotExist(err) {
 		return nil

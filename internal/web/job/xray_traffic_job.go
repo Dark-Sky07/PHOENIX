@@ -145,12 +145,23 @@ func (j *XrayTrafficJob) prepareXrayBatch(
 		if err != nil {
 			return err
 		}
+		id := uuid.NewString()
+		if err := service.BeginXrayPoll(id); err != nil {
+			unlock()
+			return fmt.Errorf("create Xray poll marker: %w", err)
+		}
 		traffic, clients, err := poll()
 		if err != nil {
+			// GetXrayTraffic does not advance its baseline on an error. If
+			// clearing the marker fails, leave it to block future mutations.
+			clearErr := service.FinishXrayPoll(id)
 			unlock()
+			if clearErr != nil {
+				return fmt.Errorf("Xray poll failed: %v; clear poll marker: %w", err, clearErr)
+			}
 			return err
 		}
-		j.pending = &xrayTrafficBatch{id: uuid.NewString(), traffic: traffic, clients: clients}
+		j.pending = &xrayTrafficBatch{id: id, traffic: traffic, clients: clients}
 		j.captureUnlock = unlock
 	}
 	if j.pending.identities == nil {
