@@ -101,25 +101,39 @@ func (s *InboundService) AcceptGlobalTraffic(masterGuid string, traffics []*xray
 			// usage before overwriting it, then transfer the lost effective
 			// difference to the prior-usage ledger in the same transaction.
 			previous := make(map[string]model.ClientGlobalTraffic, len(rows))
-			for _, batch := range chunkStrings(known, sqlInChunk) {
+			keys := make([]string, 0, len(rows))
+			for _, row := range rows {
+				keys = append(keys, transferEmailKey(row.Email))
+			}
+			for _, batch := range chunkStrings(keys, sqlInChunk) {
 				var oldRows []model.ClientGlobalTraffic
-				if err := tx.Where("master_guid = ? AND email IN ?", masterGuid, batch).Find(&oldRows).Error; err != nil {
+				if err := tx.Where("master_guid = ? AND LOWER(TRIM(email)) IN ?", masterGuid, batch).Find(&oldRows).Error; err != nil {
 					return err
 				}
 				for _, old := range oldRows {
 					if old.Up < 0 || old.Down < 0 {
 						return errors.New("negative stored global traffic requires reconciliation")
 					}
-					previous[old.Email] = old
+					key := transferEmailKey(old.Email)
+					if _, exists := previous[key]; exists {
+						return errors.New("ambiguous stored global traffic requires reconciliation")
+					}
+					previous[key] = old
 				}
 			}
 			changed := make([]string, 0)
-			for _, row := range rows {
-				old, exists := previous[row.Email]
+			for i := range rows {
+				row := &rows[i]
+				key := transferEmailKey(row.Email)
+				old, exists := previous[key]
+				if exists {
+					// Preserve the existing unique-index key. Creating a second row
+					// for a spelling variant would leave stale usage behind.
+					row.Email = old.Email
+				}
 				if !exists || (row.Up >= old.Up && row.Down >= old.Down) {
 					continue
 				}
-				key := transferEmailKey(row.Email)
 				var mappings int64
 				if err := tx.Model(&model.ResellerClient{}).Where("LOWER(TRIM(email)) = ?", key).Count(&mappings).Error; err != nil {
 					return err

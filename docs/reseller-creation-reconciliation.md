@@ -319,3 +319,11 @@ serializes participating quota/ownership operations and other participating
 pushes using the same database, including across cooperating panel processes.
 It does not authenticate the source, order old snapshots, fence a lost lock
 connection or recover bytes that a master has not reported.
+
+Global snapshot replacement now matches each master's previous row using the
+same trimmed, case-insensitive client identity used for accounting. A single
+older spelling variant is updated in place; duplicate normalized rows or a
+negative previous counter are rejected rather than silently creating a second
+row or skipping a reset. Existing duplicates require evidence-based manual
+reconciliation. This does not resolve snapshot ordering or authenticate the
+claimed master identity.
