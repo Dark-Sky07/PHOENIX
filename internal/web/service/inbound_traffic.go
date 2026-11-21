@@ -31,7 +31,7 @@ func (s *InboundService) DeletePPPTrafficCheckpoints(sessionIDs []string) error 
 }
 
 func (s *InboundService) AddTraffic(inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic) (needRestart bool, clientsDisabled bool, err error) {
-	return s.addTrafficBatch("", inboundTraffics, clientTraffics, nil)
+	return s.addTrafficBatch("", inboundTraffics, clientTraffics, nil, false)
 }
 
 // AddXrayTrafficBatch makes retries after an uncertain database commit
@@ -40,7 +40,7 @@ func (s *InboundService) AddXrayTrafficBatch(id string, inboundTraffics []*xray.
 	if id == "" {
 		return false, false, errors.New("Xray traffic batch has no ID")
 	}
-	return s.addTrafficBatch(id, inboundTraffics, clientTraffics, nil)
+	return s.addTrafficBatch(id, inboundTraffics, clientTraffics, nil, false)
 }
 
 // AddCheckedXrayTrafficBatch rejects a stale journal when its client or
@@ -49,7 +49,17 @@ func (s *InboundService) AddCheckedXrayTrafficBatch(id string, inbounds []*xray.
 	if id == "" || identities == nil {
 		return false, false, errors.New("Xray batch identity snapshot is required")
 	}
-	return s.addTrafficBatch(id, inbounds, clients, identities)
+	return s.addTrafficBatch(id, inbounds, clients, identities, false)
+}
+
+// AddCheckedXrayTrafficBatchUnderAllocationLock is for a collector already
+// holding LockResellerAllocation through its database commit. The caller must
+// retain that lock until this method returns, including on error.
+func (s *InboundService) AddCheckedXrayTrafficBatchUnderAllocationLock(id string, inbounds []*xray.Traffic, clients []*xray.ClientTraffic, identities []XrayTrafficIdentity) (bool, bool, error) {
+	if id == "" || identities == nil {
+		return false, false, errors.New("Xray batch identity snapshot is required")
+	}
+	return s.addTrafficBatch(id, inbounds, clients, identities, true)
 }
 
 // ForgetXrayTrafficBatch is safe only after the caller has discarded the
@@ -62,11 +72,11 @@ func (s *InboundService) ForgetXrayTrafficBatch(id string) error {
 	return database.GetDB().Where("id = ?", id).Delete(&model.XrayTrafficReceipt{}).Error
 }
 
-func (s *InboundService) addTrafficBatch(id string, inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic, identities []XrayTrafficIdentity) (needRestart bool, clientsDisabled bool, err error) {
+func (s *InboundService) addTrafficBatch(id string, inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic, identities []XrayTrafficIdentity, allocationHeld bool) (needRestart bool, clientsDisabled bool, err error) {
 	var disabledNodeIDs []int
 	err = submitTrafficWrite(func() error {
 		var inner error
-		needRestart, clientsDisabled, disabledNodeIDs, inner = s.addTrafficLocked(id, inboundTraffics, clientTraffics, identities)
+		needRestart, clientsDisabled, disabledNodeIDs, inner = s.addTrafficLocked(id, inboundTraffics, clientTraffics, identities, allocationHeld)
 		return inner
 	})
 	if err == nil && len(disabledNodeIDs) > 0 {
@@ -75,7 +85,7 @@ func (s *InboundService) addTrafficBatch(id string, inboundTraffics []*xray.Traf
 	return
 }
 
-func (s *InboundService) addTrafficLocked(id string, inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic, identities []XrayTrafficIdentity) (needRestart bool, clientsDisabled bool, disabledNodeIDs []int, err error) {
+func (s *InboundService) addTrafficLocked(id string, inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic, identities []XrayTrafficIdentity, allocationHeld bool) (needRestart bool, clientsDisabled bool, disabledNodeIDs []int, err error) {
 	db := database.GetDB()
 	tx := db.Begin()
 	if tx.Error != nil {
@@ -129,8 +139,10 @@ func (s *InboundService) addTrafficLocked(id string, inboundTraffics []*xray.Tra
 	var renewErr error
 	// Allocation paths can submit work to this writer while holding the quota
 	// lock. Never block on that lock here: postpone renewal to the next tick.
-	unlockRenewalQuota, renewErr = tryLockResellerAllocation(tx)
-	if renewErr == nil && unlockRenewalQuota != nil {
+	if !allocationHeld {
+		unlockRenewalQuota, renewErr = tryLockResellerAllocation(tx)
+	}
+	if renewErr == nil && (allocationHeld || unlockRenewalQuota != nil) {
 		needRestart0, count, renewErr = s.autoRenewClients(tx)
 	}
 	if renewErr != nil {

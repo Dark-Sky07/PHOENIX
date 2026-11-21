@@ -359,3 +359,13 @@ reduces that concurrency window; it does not recover a crash during the poll
 or before the journal is durable, account for unpolled bytes, or fence writers
 that do not use the shared lock. A prolonged disk failure can block participating
 allocation operations until storage is repaired or the process stops.
+
+The Xray collector now holds that allocation lock beyond journal sync, until
+its batch has been applied to the database and the journal cleanup succeeds.
+Otherwise a quota check could see the old database counters despite a durable
+but unapplied batch. Failed database application keeps the lock and batch for
+retry; automatic renewals in this path use the already-held lock rather than
+trying to reacquire it. An unresolved disk, database or reconciliation error
+can therefore block participating allocation operations. This does not fence a
+lost lock session, protect other hosts' independent journals, or eliminate the
+crash window before the journal is durable.

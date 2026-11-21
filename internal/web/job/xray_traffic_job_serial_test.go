@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Dark-Sky07/phoenix/internal/database"
+	"github.com/Dark-Sky07/phoenix/internal/database/model"
 	"github.com/Dark-Sky07/phoenix/internal/web/service"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
 	"sync/atomic"
@@ -79,8 +80,11 @@ func TestXrayPollKeepsAllocationLockUntilIdentityCapture(t *testing.T) {
 	err = j.prepareXrayBatch(poll, func(rows []*xray.ClientTraffic) ([]service.XrayTrafficIdentity, error) {
 		return []service.XrayTrafficIdentity{{Email: rows[0].Email, ClientIDs: []int{1}}}, nil
 	})
-	if err != nil || pollCount != 1 || j.pending.identities == nil || j.captureUnlock != nil {
+	if err != nil || pollCount != 1 || j.pending.identities == nil || j.captureUnlock == nil {
 		t.Fatalf("capture retry = %v, poll count = %d", err, pollCount)
+	}
+	if _, _, err := j.applyPending(func(*xrayTrafficBatch) (bool, bool, error) { return false, false, nil }); err != nil {
+		t.Fatal(err)
 	}
 	select {
 	case unlock := <-gotLock:
@@ -89,7 +93,7 @@ func TestXrayPollKeepsAllocationLockUntilIdentityCapture(t *testing.T) {
 		}
 		unlock()
 	case <-time.After(3 * time.Second):
-		t.Fatal("mutation remained blocked after capture")
+		t.Fatal("mutation remained blocked after application")
 	}
 }
 
@@ -152,7 +156,7 @@ func TestSharedXrayTrafficJobRetainsUncapturedBatchAcrossSchedulerReplacement(t 
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if polls != 1 || replacement.pending.clients[0].Up != 31 || replacement.captureUnlock != nil {
+	if polls != 1 || replacement.pending.clients[0].Up != 31 || replacement.captureUnlock == nil {
 		t.Fatalf("batch changed or repolled: polls=%d batch=%+v", polls, replacement.pending)
 	}
 }
@@ -212,11 +216,14 @@ func TestXrayPollKeepsAllocationLockUntilJournalIsDurable(t *testing.T) {
 	if err := j.prepareXrayBatch(poll, capture); err != nil {
 		t.Fatal(err)
 	}
-	if polls != 1 || captures != 1 || j.captureUnlock != nil {
+	if polls != 1 || captures != 1 || j.captureUnlock == nil {
 		t.Fatalf("retry repolled or lost snapshot: polls=%d captures=%d", polls, captures)
 	}
 	if _, err := os.Stat(filepath.Join(xrayJournalDir(), j.pending.id+".json")); err != nil {
-		t.Fatalf("lock released without journal: %v", err)
+		t.Fatalf("journal missing: %v", err)
+	}
+	if _, _, err := j.applyPending(func(*xrayTrafficBatch) (bool, bool, error) { return false, false, nil }); err != nil {
+		t.Fatal(err)
 	}
 	select {
 	case unlock := <-gotLock:
@@ -226,5 +233,77 @@ func TestXrayPollKeepsAllocationLockUntilJournalIsDurable(t *testing.T) {
 		unlock()
 	case <-time.After(3 * time.Second):
 		t.Fatal("allocation lock not released after durable journal")
+	}
+}
+
+func TestJournaledXrayBatchKeepsAllocationLockedUntilDatabaseCommit(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XUI_DB_FOLDER", dir)
+	if err := database.InitDB(filepath.Join(dir, "test.db")); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.CloseDB() })
+	db := database.GetDB()
+	client := model.ClientRecord{Email: "pending-quota@example.test", Enable: true}
+	counter := xray.ClientTraffic{Email: client.Email, Enable: true}
+	if err := db.Create(&client).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&counter).Error; err != nil {
+		t.Fatal(err)
+	}
+	j := NewXrayTrafficJob()
+	t.Cleanup(func() {
+		if j.captureUnlock != nil {
+			j.captureUnlock()
+			j.captureUnlock = nil
+		}
+	})
+	poll := func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
+		return nil, []*xray.ClientTraffic{{Email: client.Email, Up: 123}}, nil
+	}
+	if err := j.prepareXrayBatch(poll, j.inboundService.CaptureXrayTrafficIdentities); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("CREATE TRIGGER reject_pending_xray BEFORE UPDATE ON client_traffics BEGIN SELECT RAISE(ABORT, 'injected failure'); END").Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := j.applyPending(j.applyJournaledXrayBatch); err == nil || j.pending == nil || j.captureUnlock == nil {
+		t.Fatalf("failed application lost batch or allocation lock: %v", err)
+	}
+	gotLock := make(chan func(), 1)
+	go func() {
+		unlock, err := service.LockResellerAllocation()
+		if err != nil {
+			gotLock <- nil
+			return
+		}
+		gotLock <- unlock
+	}()
+	select {
+	case unlock := <-gotLock:
+		if unlock != nil {
+			unlock()
+		}
+		t.Fatal("allocation proceeded with unapplied journal")
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := db.Exec("DROP TRIGGER reject_pending_xray").Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := j.applyPending(j.applyJournaledXrayBatch); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case unlock := <-gotLock:
+		if unlock == nil {
+			t.Fatal("allocation lock acquisition failed")
+		}
+		defer unlock()
+	case <-time.After(3 * time.Second):
+		t.Fatal("allocation remained locked after commit")
+	}
+	if err := db.First(&counter, counter.Id).Error; err != nil || counter.Up != 123 {
+		t.Fatalf("allocation resumed without committed usage: %+v %v", counter, err)
 	}
 }

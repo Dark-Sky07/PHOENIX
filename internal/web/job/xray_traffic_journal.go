@@ -89,7 +89,13 @@ func (j *XrayTrafficJob) applyJournaledXrayBatch(batch *xrayTrafficBatch) (bool,
 	if err := storeXrayBatch(batch); err != nil {
 		return false, false, fmt.Errorf("journal Xray traffic: %w", err)
 	}
-	restart, disabled, err := j.inboundService.AddCheckedXrayTrafficBatch(batch.id, batch.traffic, batch.clients, batch.identities)
+	var restart, disabled bool
+	var err error
+	if j.captureUnlock != nil {
+		restart, disabled, err = j.inboundService.AddCheckedXrayTrafficBatchUnderAllocationLock(batch.id, batch.traffic, batch.clients, batch.identities)
+	} else {
+		restart, disabled, err = j.inboundService.AddCheckedXrayTrafficBatch(batch.id, batch.traffic, batch.clients, batch.identities)
+	}
 	if err != nil {
 		return restart, disabled, err
 	}

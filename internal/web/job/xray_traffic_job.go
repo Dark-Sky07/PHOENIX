@@ -121,15 +121,21 @@ func (j *XrayTrafficJob) applyPending(apply func(*xrayTrafficBatch) (bool, bool,
 	restart, disabled, err := apply(j.pending)
 	if err == nil {
 		j.pending = nil
+		if j.captureUnlock != nil {
+			j.captureUnlock()
+			j.captureUnlock = nil
+		}
 	}
 	return restart, disabled, err
 }
 
-// Poll, identity capture and journal persistence must be ordered with
-// participating client and reseller mutations. After a poll advances the
-// baseline, retain the batch and lock until both capture and durable journal
-// storage succeed. This coordinates only participating paths; it does not
-// fence lost database sessions or make the runtime poll itself atomic.
+// Poll, identity capture, journal persistence and database application must
+// be ordered with participating client and reseller mutations. After a poll
+// advances the baseline, retain the batch and allocation lock until it has
+// been durably journaled and applied. A durable but unapplied journal alone
+// does not make the new usage visible to quota checks. This coordinates only
+// participating paths; it cannot fence lost database sessions or make the
+// runtime poll itself atomic.
 func (j *XrayTrafficJob) prepareXrayBatch(
 	poll func() ([]*xray.Traffic, []*xray.ClientTraffic, error),
 	capture func([]*xray.ClientTraffic) ([]service.XrayTrafficIdentity, error),
@@ -158,14 +164,12 @@ func (j *XrayTrafficJob) prepareXrayBatch(
 		j.pending.identities = identities
 	}
 	if j.captureUnlock != nil {
-		// The journal must be durable before another participant can change
-		// ownership or rely on a snapshot that has not yet been recorded.
-		// On failure keep both the captured batch and the allocation lock.
+		// On failure keep the captured batch and the allocation lock. After
+		// journaling the lock remains held until the batch is applied, so a
+		// quota check cannot observe counters older than this snapshot.
 		if err := storeXrayBatch(j.pending); err != nil {
-			return fmt.Errorf("journal Xray traffic before releasing allocation lock: %w", err)
+			return fmt.Errorf("journal Xray traffic before application: %w", err)
 		}
-		j.captureUnlock()
-		j.captureUnlock = nil
 	}
 	return nil
 }

@@ -288,3 +288,31 @@ func TestRenewalRejectsMalformedTypedClientWithoutReset(t *testing.T) {
 		t.Fatalf("traffic reset: %+v", row)
 	}
 }
+
+func TestCheckedXrayBatchRenewsWhileCallerHoldsAllocationLock(t *testing.T) {
+	r, client := seedResellerRenewal(t)
+	svc := &InboundService{}
+	unlock, err := LockResellerAllocation()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	identities, err := svc.CaptureXrayTrafficIdentities(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.AddCheckedXrayTrafficBatchUnderAllocationLock("test-locked-renewal", nil, nil, identities); err != nil {
+		t.Fatal(err)
+	}
+	var row xray.ClientTraffic
+	if err := database.GetDB().Where("email = ?", client.Email).First(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.Up != 0 || row.Down != 0 || row.ExpiryTime <= time.Now().UnixMilli() {
+		t.Fatalf("renewal did not run under held allocation lock: %+v", row)
+	}
+	stat, err := (&ResellerService{}).Stat(&r)
+	if err != nil || stat.UsedTraffic != 300 || stat.AllocatedTraffic != 800 {
+		t.Fatalf("renewal usage not preserved: %+v %v", stat, err)
+	}
+}
