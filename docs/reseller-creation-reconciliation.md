@@ -425,3 +425,28 @@ receipt table for every committed batch, including empty polls; monitor database
 size and back up receipts with the counters. Do not prune receipts unless every
 possible journal copy and backup replay has been accounted for under a verified
 retention policy.
+
+### Ordered authenticated snapshots: implementation in progress
+
+`internal/web/trafficprotocol` contains an envelope primitive only. It is not
+connected to the existing node or global traffic endpoints and does not yet
+protect production traffic or block legacy nodes. It authenticates exact
+snapshot bytes, registered sender and generation, and a monotonically
+increasing sequence using HMAC-SHA256. Provision a unique random secret per
+sender/receiver relationship; TLS, secure key management and explicit
+registration/revocation are also required. Never trust a sender-provided
+identity or generation as registration. A generation transition must be
+operator-authorized and reconciled, not automatically accepted.
+
+Before enabling this protocol, the sender must durably reserve sequences;
+the receiver must lock its persisted trusted state and atomically verify,
+apply and advance the accepted sequence in the same database transaction.
+Network retries, concurrent receivers, disconnects, crashes and restored
+backups need integration tests. A database rollback can restore an old
+sequence and invalidate replay protection unless an external monotonic anchor
+or explicit recovery procedure is used. A verified envelope also does not
+prove that a runtime observed or reported all traffic. The agreed rollout
+requires rejecting legacy snapshots for affected reseller accounting and
+showing actionable warnings without shutting down the node; those guards and
+UI are not implemented yet. Do not treat the presence of this package as a
+protocol rollout or as permission to clear existing incident markers.
