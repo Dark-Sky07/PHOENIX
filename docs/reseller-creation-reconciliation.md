@@ -570,8 +570,11 @@ missing receipts mean no old batches exist.
 
 On PostgreSQL import, clearing and copying destination rows now commit in one
 transaction; a copy error rolls the row changes back. Schema changes precede
-that transaction. SQLite export still replaces the destination file and can
-leave an incomplete file on failure; use a new path and verify it before use.
+that transaction. SQLite export now copies into a private temporary file,
+closes and syncs it, then replaces the destination; a copy failure leaves an
+existing destination intact. Existing destination WAL, shared-memory or journal
+sidecars block replacement. Directory-sync errors can be reported after the
+replacement has happened; inspect the destination before retrying.
 The copy is not an online consistency or runtime fencing protocol. Stop writes
 and runtimes, preserve and reconcile on-disk journals/fallbacks separately,
 and take consistent backups before migration; an incomplete copy, concurrent

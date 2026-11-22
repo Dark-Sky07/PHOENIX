@@ -1,6 +1,7 @@
 package database
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -133,5 +134,84 @@ func closeGorm(db *gorm.DB) {
 	}
 	if s, err := db.DB(); err == nil {
 		s.Close()
+	}
+}
+
+func TestAtomicSQLiteExportPreservesExistingFileOnCopyFailure(t *testing.T) {
+	dir := t.TempDir()
+	src, err := gorm.Open(sqlite.Open(filepath.Join(dir, "src.db")), &gorm.Config{Logger: logger.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeGorm(src)
+	for _, m := range migrationModels() {
+		if err := src.AutoMigrate(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dst := filepath.Join(dir, "export.db")
+	original := []byte("previous-export")
+	if err := os.WriteFile(dst, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := src.Callback().Query().Before("gorm:query").Register("test:fail-user-copy", func(tx *gorm.DB) {
+		if tx.Statement.Table == "users" {
+			tx.AddError(errors.New("injected source read failure"))
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := exportSQLiteAtomic(src, dst); err == nil {
+		t.Fatal("injected error ignored")
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil || string(got) != string(original) {
+		t.Fatalf("original export changed: %q %v", got, err)
+	}
+	files, err := filepath.Glob(filepath.Join(dir, ".phoenix-export-*"))
+	if err != nil || len(files) != 0 {
+		t.Fatalf("temporary export remains: %v %v", files, err)
+	}
+}
+
+func TestAtomicSQLiteExportRefusesDestinationSidecars(t *testing.T) {
+	dir := t.TempDir()
+	src, err := gorm.Open(sqlite.Open(filepath.Join(dir, "src.db")), &gorm.Config{Logger: logger.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeGorm(src)
+	for _, m := range migrationModels() {
+		if err := src.AutoMigrate(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dst := filepath.Join(dir, "export.db")
+	if err := os.WriteFile(dst, []byte("existing"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dst+"-wal", []byte("pending"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := exportSQLiteAtomic(src, dst); err == nil {
+		t.Fatal("sidecar ignored")
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil || string(got) != "existing" {
+		t.Fatalf("existing export changed: %q %v", got, err)
+	}
+	if err := os.Remove(dst + "-wal"); err != nil {
+		t.Fatal(err)
+	}
+	if err := exportSQLiteAtomic(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	exported, err := gorm.Open(sqlite.Open(dst), &gorm.Config{Logger: logger.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeGorm(exported)
+	if err := validateTrafficEvidenceTables(exported); err != nil {
+		t.Fatal(err)
 	}
 }

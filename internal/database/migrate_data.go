@@ -7,7 +7,9 @@ import (
 	"log"
 	"os"
 	"path"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"time"
 
@@ -205,26 +207,95 @@ func ExportPostgresToSQLite(srcDSN, dstPath string) error {
 		return err
 	}
 	defer srcSQL.Close()
+	return exportSQLiteAtomic(src, dstPath)
+
+}
+
+// exportSQLiteAtomic does not replace an existing export until the copy is
+// closed and synced. The caller must fence writers and keep the destination
+// offline; sidecar inspection cannot prevent a concurrent opener or writer.
+func exportSQLiteAtomic(src *gorm.DB, dstPath string) error {
 	if err := validateTrafficEvidenceTables(src); err != nil {
 		return err
 	}
-	// Never overwrite an existing export before source safety checks pass.
-	if err := os.Remove(dstPath); err != nil && !os.IsNotExist(err) {
+	if err := rejectSQLiteExportSidecars(dstPath); err != nil {
 		return err
 	}
-
-	// No WAL: keep all data in the main file so it is complete once closed.
-	dst, err := gorm.Open(sqlite.Open(dstPath+"?_busy_timeout=10000"), &gorm.Config{Logger: logger.Discard})
+	dir := filepath.Dir(dstPath)
+	f, err := os.CreateTemp(dir, ".phoenix-export-*.sqlite")
 	if err != nil {
-		return fmt.Errorf("open sqlite destination: %w", err)
+		return fmt.Errorf("create temporary export: %w", err)
+	}
+	tmp := f.Name()
+	defer func() {
+		for _, suffix := range []string{"", "-journal", "-wal", "-shm"} {
+			_ = os.Remove(tmp + suffix)
+		}
+	}()
+	if err := f.Close(); err != nil {
+		return err
+	}
+	dst, err := gorm.Open(sqlite.Open(tmp+"?_busy_timeout=10000&_journal_mode=DELETE"), &gorm.Config{Logger: logger.Discard})
+	if err != nil {
+		return fmt.Errorf("open temporary SQLite destination: %w", err)
 	}
 	dstSQL, err := dst.DB()
 	if err != nil {
 		return err
 	}
-	defer dstSQL.Close()
+	copyErr := copyAllModels(src, dst)
+	closeErr := dstSQL.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close temporary export: %w", closeErr)
+	}
+	f, err = os.OpenFile(tmp, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	syncErr := f.Sync()
+	closeErr = f.Close()
+	if syncErr != nil {
+		return fmt.Errorf("sync temporary export: %w", syncErr)
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if err := rejectSQLiteExportSidecars(dstPath); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, dstPath); err != nil {
+		return fmt.Errorf("replace SQLite export: %w", err)
+	}
+	// Windows does not support syncing directory handles in the same way.
+	if runtime.GOOS != "windows" {
+		d, err := os.Open(dir)
+		if err != nil {
+			return fmt.Errorf("export replaced, open directory for sync: %w", err)
+		}
+		err = d.Sync()
+		closeErr = d.Close()
+		if err != nil {
+			return fmt.Errorf("export replaced, sync directory: %w", err)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("export replaced, close directory: %w", closeErr)
+		}
+	}
+	return nil
+}
 
-	return copyAllModels(src, dst)
+func rejectSQLiteExportSidecars(dstPath string) error {
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+		if _, err := os.Lstat(dstPath + suffix); err == nil {
+			return fmt.Errorf("SQLite export destination has sidecar %s; stop all users and investigate", suffix)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("inspect SQLite export sidecar: %w", err)
+		}
+	}
+	return nil
 }
 
 // copyAllModels (re)creates the schema on dst and copies every migrated table
