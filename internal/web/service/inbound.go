@@ -1382,6 +1382,16 @@ func (s *InboundService) SetInboundEnable(id int, enable bool) (bool, error) {
 		return false, perr
 	}
 	db := database.GetDB()
+	var daemonPayload *model.Inbound
+	if inbound.NodeID == nil && push && enable && (inbound.Protocol == model.OpenVPN || inbound.Protocol == model.L2TP || inbound.Protocol == model.SSTP || inbound.Protocol == model.PPTP) {
+		// Do this before persisting the toggle: failing open to unfiltered
+		// settings can re-enable credentials disabled by quota or expiry.
+		daemonPayload, err = s.buildRuntimeInboundForAPI(db, inbound)
+		if err != nil {
+			return false, fmt.Errorf("build filtered daemon settings: %w", err)
+		}
+		daemonPayload.Enable = true
+	}
 	if err := db.Model(model.Inbound{}).Where("id = ?", id).
 		Update("enable", enable).Error; err != nil {
 		return false, err
@@ -1422,10 +1432,8 @@ func (s *InboundService) SetInboundEnable(id int, enable bool) (bool, error) {
 
 	if inbound.Protocol == model.OpenVPN || inbound.Protocol == model.L2TP || inbound.Protocol == model.SSTP || inbound.Protocol == model.PPTP {
 		payload := inbound
-		if enable {
-			if built, bErr := s.buildRuntimeInboundForAPI(db, inbound); bErr == nil {
-				payload = built
-			}
+		if daemonPayload != nil {
+			payload = daemonPayload
 		}
 		if err := rt.UpdateInbound(context.Background(), inbound, payload); err != nil {
 			logger.Debug("SetInboundEnable: UpdateInbound on", rt.Name(), "failed:", err)

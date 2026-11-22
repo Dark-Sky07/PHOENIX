@@ -775,3 +775,13 @@ absent tag or an inconclusive node response requires separate reconciliation.
 This deliberately favors safety over automatic upsert and can leave a node
 pending until the missing configuration is investigated. Dirty state does not
 prove the remote add was undone or the accounting history reconciled.
+
+Synchronous local L2TP/SSTP/PPTP client reconciliation now constructs its
+credentials from the traffic-filtered runtime settings instead of raw inbound
+JSON. If the filter cannot be read, it returns an error without applying raw
+credentials. Enabling local OpenVPN/L2TP/SSTP/PPTP through `SetInboundEnable`
+also prepares the filtered payload before persisting the enabled state when a
+runtime is available; a filter failure leaves the inbound disabled. These
+changes prevent a failed filter from reinstalling quota-disabled credentials,
+but a failed apply can leave the prior runtime running. They do not prove
+session termination, final PPP traffic accounting, or complete recovery.

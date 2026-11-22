@@ -37,6 +37,15 @@ func reconcilePPPVPNRuntime(inbound *model.Inbound) error {
 	if inbound == nil || inbound.NodeID != nil {
 		return nil
 	}
+	if inbound.Enable && (inbound.Protocol == model.L2TP || inbound.Protocol == model.SSTP || inbound.Protocol == model.PPTP) {
+		// The settings array can still contain quota-disabled credentials.
+		// Never install it raw when the authoritative traffic filter fails.
+		filtered, err := (&InboundService{}).buildRuntimeInboundForAPI(database.GetDB(), inbound)
+		if err != nil {
+			return fmt.Errorf("build filtered PPP VPN runtime settings: %w", err)
+		}
+		inbound = filtered
+	}
 	if inbound.Protocol == model.L2TP {
 		if !inbound.Enable {
 			l2tp.GetManager().Remove(inbound.Id)
