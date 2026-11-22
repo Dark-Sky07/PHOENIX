@@ -116,3 +116,16 @@ func KeyFromAPIToken(token string) ([]byte, error) {
 	_, _ = m.Write([]byte("PHOENIX/traffic-snapshot/api-token-key/v1\x00"))
 	return m.Sum(nil), nil
 }
+
+// NodeSnapshotKeyFromAPIToken separates signed node-to-master snapshots from
+// master-to-node global snapshots even when both use the same bearer token.
+// It is not an independent credential and requires verified TLS.
+func NodeSnapshotKeyFromAPIToken(token string) ([]byte, error) {
+	key, err := KeyFromAPIToken(token)
+	if err != nil {
+		return nil, err
+	}
+	m := hmac.New(sha256.New, key)
+	_, _ = m.Write([]byte("PHOENIX/node-inbound-snapshot/key/v1\x00"))
+	return m.Sum(nil), nil
+}

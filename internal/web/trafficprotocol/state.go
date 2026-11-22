@@ -66,23 +66,42 @@ func ApplyVerified(db *gorm.DB, id string, key []byte, envelope Envelope, apply 
 	envelope.Snapshot = append([]byte(nil), envelope.Snapshot...)
 	envelope.MAC = append([]byte(nil), envelope.MAC...)
 	return db.Transaction(func(tx *gorm.DB) error {
-		var state model.TrafficSnapshotReceiver
-		if err := tx.First(&state, "id = ?", id).Error; err != nil {
-			return err
-		}
-		if state.LastSequence < 0 {
-			return errors.New("invalid stored traffic sequence")
-		}
-		if err := Verify(envelope, key, Expected{Sender: state.Sender, Generation: state.Generation, LastSequence: uint64(state.LastSequence)}); err != nil {
-			return err
-		}
-		updated := tx.Model(&model.TrafficSnapshotReceiver{}).Where("id = ? AND sender = ? AND generation = ? AND last_sequence = ?", id, state.Sender, state.Generation, state.LastSequence).Update("last_sequence", int64(envelope.Sequence))
-		if updated.Error != nil {
-			return updated.Error
-		}
-		if updated.RowsAffected != 1 {
-			return errors.New("concurrent traffic snapshot update")
-		}
-		return apply(tx, envelope.Snapshot)
+		return ApplyVerifiedInTransaction(tx, id, key, envelope, apply)
 	})
+}
+
+// ApplyVerifiedInTransaction verifies and advances a receiver inside an
+// existing transaction. The caller must roll back on any error and must only
+// publish non-database side effects after commit. Snapshot and MAC are copied
+// so the callback sees exactly the authenticated bytes.
+func ApplyVerifiedInTransaction(tx *gorm.DB, id string, key []byte, envelope Envelope, apply func(*gorm.DB, []byte) error) error {
+	if tx == nil || id == "" || apply == nil {
+		return errors.New("missing traffic receiver state or apply function")
+	}
+	if envelope.Sequence > math.MaxInt64 {
+		return errors.New("traffic sequence exceeds persistent range")
+	}
+	if err := validate(envelope, key); err != nil {
+		return err
+	}
+	envelope.Snapshot = append([]byte(nil), envelope.Snapshot...)
+	envelope.MAC = append([]byte(nil), envelope.MAC...)
+	var state model.TrafficSnapshotReceiver
+	if err := tx.First(&state, "id = ?", id).Error; err != nil {
+		return err
+	}
+	if state.LastSequence < 0 {
+		return errors.New("invalid stored traffic sequence")
+	}
+	if err := Verify(envelope, key, Expected{Sender: state.Sender, Generation: state.Generation, LastSequence: uint64(state.LastSequence)}); err != nil {
+		return err
+	}
+	updated := tx.Model(&model.TrafficSnapshotReceiver{}).Where("id = ? AND sender = ? AND generation = ? AND last_sequence = ?", id, state.Sender, state.Generation, state.LastSequence).Update("last_sequence", int64(envelope.Sequence))
+	if updated.Error != nil {
+		return updated.Error
+	}
+	if updated.RowsAffected != 1 {
+		return errors.New("concurrent traffic snapshot update")
+	}
+	return apply(tx, envelope.Snapshot)
 }

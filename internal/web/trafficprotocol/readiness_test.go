@@ -63,3 +63,25 @@ func TestReadinessCopiesRequestAndRejectsReflection(t *testing.T) {
 		t.Fatal("request MAC reflected as response")
 	}
 }
+
+func TestNodeSnapshotKeyIsSeparatedFromGlobalKey(t *testing.T) {
+	token := "0123456789012345678901234567890123456789"
+	global, err := KeyFromAPIToken(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := NodeSnapshotKeyFromAPIToken(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(global, node) {
+		t.Fatal("directional keys are equal")
+	}
+	e, err := Sign(Envelope{Version: Version, Sender: "node", Generation: "epoch", Sequence: 1, Snapshot: []byte("snapshot")}, global)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Verify(e, node, Expected{Sender: "node", Generation: "epoch"}); err == nil {
+		t.Fatal("global signature accepted as node snapshot")
+	}
+}

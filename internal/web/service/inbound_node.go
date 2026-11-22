@@ -209,6 +209,12 @@ func (s *InboundService) SetRemoteTraffic(nodeID int, snap *runtime.TrafficSnaps
 }
 
 func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.TrafficSnapshot, dirty bool) (bool, error) {
+	return s.setRemoteTrafficTransaction(nodeID, snap, dirty, nil)
+}
+
+// beforeMerge is used by the authenticated path to advance its sequence in
+// the same transaction as the accounting writes. A failure rolls back both.
+func (s *InboundService) setRemoteTrafficTransaction(nodeID int, snap *runtime.TrafficSnapshot, dirty bool, beforeMerge func(*gorm.DB) error) (bool, error) {
 	if snap == nil || nodeID <= 0 {
 		return false, nil
 	}
@@ -225,6 +231,11 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 			tx.Rollback()
 		}
 	}()
+	if beforeMerge != nil {
+		if err := beforeMerge(tx); err != nil {
+			return false, err
+		}
+	}
 	now := time.Now().UnixMilli()
 	// Validate the whole snapshot before any baseline or database mutation.
 	// A malformed counter must not turn into a reset or partially advance a
@@ -434,10 +445,16 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 			}
 			chosenTag, err := pickFreeTag()
 			if err != nil {
+				if beforeMerge != nil {
+					return false, err
+				}
 				logger.Warningf("setRemoteTraffic: check tag %q failed: %v", snapIb.Tag, err)
 				continue
 			}
 			if chosenTag == "" {
+				if beforeMerge != nil {
+					return false, fmt.Errorf("node inbound tag %q conflicts", snapIb.Tag)
+				}
 				key := fmt.Sprintf("%d:%s", nodeID, snapIb.Tag)
 				if _, seen := reportedRemoteTagConflict.LoadOrStore(key, struct{}{}); !seen {
 					logger.Warningf(
@@ -470,6 +487,9 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 				ShareAddrStrategy:    "node",
 			}
 			if err := tx.Create(&newIb).Error; err != nil {
+				if beforeMerge != nil {
+					return false, err
+				}
 				logger.Warningf("setRemoteTraffic: create central inbound for tag %q failed: %v", snapIb.Tag, err)
 				continue
 			}
@@ -752,10 +772,15 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 				}
 			}
 			perInboundOld = append(perInboundOld, oldSet{inboundID: c.Id, emails: oldEmails})
+		} else if beforeMerge != nil {
+			return false, err
 		}
 
 		clients, gcErr := s.GetClients(snapIb)
 		if gcErr != nil {
+			if beforeMerge != nil {
+				return false, gcErr
+			}
 			logger.Warningf("setRemoteTraffic: parse clients for tag %q failed: %v", snapIb.Tag, gcErr)
 			continue
 		}
@@ -797,6 +822,8 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 						filtered[i].Comment = cmt
 					}
 				}
+			} else if beforeMerge != nil {
+				return false, err
 			}
 		}
 		if err := s.clientService.syncNodeInbound(tx, c.Id, filtered); err != nil {
@@ -810,6 +837,9 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 			Joins("JOIN client_inbounds ON client_inbounds.client_id = clients.id").
 			Where("client_inbounds.inbound_id = ?", old.inboundID).
 			Pluck("email", &stillAttached).Error; err != nil {
+			if beforeMerge != nil {
+				return false, err
+			}
 			continue
 		}
 		stillSet := make(map[string]struct{}, len(stillAttached))
@@ -827,18 +857,30 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 				Joins("JOIN clients ON clients.id = client_inbounds.client_id").
 				Where("LOWER(TRIM(clients.email)) = LOWER(?)", email).
 				Count(&attachmentCount).Error; err != nil {
+				if beforeMerge != nil {
+					return false, err
+				}
 				continue
 			}
 			if attachmentCount > 0 {
 				continue
 			}
 			if err := tx.Where("LOWER(TRIM(email)) = LOWER(?)", email).Delete(&model.ClientRecord{}).Error; err != nil {
+				if beforeMerge != nil {
+					return false, err
+				}
 				logger.Warningf("setRemoteTraffic: delete ClientRecord %q failed: %v", email, err)
 			}
 			if err := tx.Where("LOWER(TRIM(email)) = LOWER(?)", email).Delete(&xray.ClientTraffic{}).Error; err != nil {
+				if beforeMerge != nil {
+					return false, err
+				}
 				logger.Warningf("setRemoteTraffic: delete ClientTraffic %q failed: %v", email, err)
 			}
 			if err := tx.Where("LOWER(TRIM(email)) = LOWER(?)", email).Delete(&model.NodeClientTraffic{}).Error; err != nil {
+				if beforeMerge != nil {
+					return false, err
+				}
 				logger.Warningf("setRemoteTraffic: delete NodeClientTraffic %q failed: %v", email, err)
 			}
 			structuralChange = true
