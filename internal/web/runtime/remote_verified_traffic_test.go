@@ -93,3 +93,25 @@ func TestTrafficReadinessVerifiesRemoteProofAndRequiresTLS(t *testing.T) {
 		t.Fatal("insecure TLS used")
 	}
 }
+
+func TestTrafficReadinessRejectsRedirectAndOversizedResponse(t *testing.T) {
+	old := remoteHTTPClient
+	calls := 0
+	redirect := true
+	remoteHTTPClient = &http.Client{Transport: verifiedTestTransport(func(req *http.Request) (*http.Response, error) {
+		calls++
+		if redirect {
+			return &http.Response{StatusCode: http.StatusFound, Header: http.Header{"Location": []string{"http://example.com/other"}}, Body: io.NopCloser(strings.NewReader(""))}, nil
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(strings.Repeat("x", 8193)))}, nil
+	})}
+	t.Cleanup(func() { remoteHTTPClient = old })
+	r := NewRemote(&model.Node{Scheme: "https", Address: "example.com", Port: 443, ApiToken: "0123456789012345678901234567890123456789"})
+	if err := r.CheckTrafficReadiness(context.Background(), "master", "epoch", 0); err == nil || calls != 1 {
+		t.Fatal("redirect followed or accepted")
+	}
+	redirect = false
+	if err := r.CheckTrafficReadiness(context.Background(), "master", "epoch", 0); err == nil || calls != 2 {
+		t.Fatal("oversized response accepted")
+	}
+}

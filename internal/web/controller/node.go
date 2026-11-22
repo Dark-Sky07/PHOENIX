@@ -45,6 +45,7 @@ func (a *NodeController) initRouter(g *gin.RouterGroup) {
 	g.POST("/probe/:id", a.probe)
 	g.POST("/trafficSnapshot/receiver", a.registerTrafficReceiver)
 	g.POST("/trafficSnapshot/sender/:id", a.registerTrafficSender)
+	g.POST("/trafficSnapshot/sender/:id/activate", a.activateTrafficSender)
 	g.GET("/trafficSnapshot/sender/:id", a.getTrafficSender)
 	g.POST("/updatePanel", a.updatePanel)
 	g.GET("/history/:id/:metric/:bucket", a.history)
@@ -105,6 +106,30 @@ func (a *NodeController) registerTrafficSender(c *gin.Context) {
 		return
 	}
 	jsonObj(c, gin.H{"sender": state.Sender, "generation": state.Generation, "lastSequence": state.LastSequence}, nil)
+}
+
+func (a *NodeController) activateTrafficSender(c *gin.Context) {
+	if !canProvisionTrafficPeers(c) {
+		return
+	}
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		c.AbortWithStatus(http.StatusBadRequest)
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 4096)
+	var req struct {
+		Reconciled bool `json:"reconciled"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		jsonMsg(c, "invalid sender activation", err)
+		return
+	}
+	if err := service.ActivateVerifiedTrafficSender(c.Request.Context(), id, req.Reconciled); err != nil {
+		jsonMsg(c, "verified traffic activation failed", err)
+		return
+	}
+	jsonMsg(c, "verified traffic sender activated", nil)
 }
 
 func (a *NodeController) getTrafficSender(c *gin.Context) {

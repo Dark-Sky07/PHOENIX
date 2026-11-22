@@ -90,6 +90,11 @@ func (r *Remote) baseURL() (string, error) {
 }
 
 func (r *Remote) do(ctx context.Context, method, path string, body any) (*envelope, error) {
+	return r.doWithClient(ctx, method, path, body, remoteHTTPClient, 0)
+}
+
+// maxResponse bounds sensitive small protocol responses before JSON decoding.
+func (r *Remote) doWithClient(ctx context.Context, method, path string, body any, client *http.Client, maxResponse int64) (*envelope, error) {
 	if r.node.ApiToken == "" {
 		return nil, errors.New("node has no API token configured")
 	}
@@ -130,15 +135,22 @@ func (r *Remote) do(ctx context.Context, method, path string, body any) (*envelo
 		req.Header.Set("Content-Type", contentType)
 	}
 
-	resp, err := remoteHTTPClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("%s %s: %w", method, path, err)
 	}
 	defer resp.Body.Close()
 
-	raw, err := io.ReadAll(resp.Body)
+	reader := io.Reader(resp.Body)
+	if maxResponse > 0 {
+		reader = io.LimitReader(resp.Body, maxResponse+1)
+	}
+	raw, err := io.ReadAll(reader)
 	if err != nil {
 		return nil, fmt.Errorf("read body: %w", err)
+	}
+	if maxResponse > 0 && int64(len(raw)) > maxResponse {
+		return nil, errors.New("remote response too large")
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%s %s: HTTP %d", method, path, resp.StatusCode)
@@ -502,7 +514,11 @@ func (r *Remote) CheckTrafficReadiness(ctx context.Context, sender, generation s
 	if err != nil {
 		return err
 	}
-	env, err := r.do(ctx, http.MethodPost, "panel/api/inbounds/trafficReadiness", challenge)
+	// Redirects could change the peer or downgrade TLS, leaking the bearer
+	// token or accepting a proof from a different endpoint.
+	client := *remoteHTTPClient
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	env, err := r.doWithClient(ctx, http.MethodPost, "panel/api/inbounds/trafficReadiness", challenge, &client, 8192)
 	if err != nil {
 		return err
 	}
@@ -531,7 +547,9 @@ func (r *Remote) PushVerifiedGlobalClientTraffics(ctx context.Context, snapshot 
 	if err := trafficprotocol.Verify(*snapshot, key, trafficprotocol.Expected{Sender: snapshot.Sender, Generation: snapshot.Generation, LastSequence: snapshot.Sequence - 1}); err != nil {
 		return err
 	}
-	_, err = r.do(ctx, http.MethodPost, "panel/api/inbounds/pushVerifiedClientTraffics", snapshot)
+	client := *remoteHTTPClient
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	_, err = r.doWithClient(ctx, http.MethodPost, "panel/api/inbounds/pushVerifiedClientTraffics", snapshot, &client, 8192)
 	return err
 }
 

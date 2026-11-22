@@ -946,9 +946,18 @@ export const sections: readonly Section[] = [
       {
         method: 'POST',
         path: '/panel/api/nodes/trafficSnapshot/sender/:id',
-        summary: 'Experimental: register a new verified snapshot sender for a node. Interactive superadmin session only; reconciled must be true. This enables verified mode immediately without attesting that the peer is ready; it never resets an existing sequence.',
+        summary: 'Experimental: register a new verified snapshot sender for a node. Interactive superadmin session only; reconciled must be true. This stages the identity without enabling verified mode; it never resets an existing sequence.',
         params: [
           { name: 'id', in: 'path', type: 'integer', desc: 'Local node ID; must use HTTPS with standard TLS verification.' },
+          { name: 'reconciled', in: 'body (json)', type: 'boolean', desc: 'Confirm manual accounting and rollout review.' },
+        ],
+      },
+      {
+        method: 'POST',
+        path: '/panel/api/nodes/trafficSnapshot/sender/:id/activate',
+        summary: 'Activate a staged sender after a fresh authenticated receiver readiness check. Interactive superadmin only; readiness does not establish accounting completeness or secure incoming snapshots.',
+        params: [
+          { name: 'id', in: 'path', type: 'integer', desc: 'Local node ID.' },
           { name: 'reconciled', in: 'body (json)', type: 'boolean', desc: 'Confirm manual accounting and rollout review.' },
         ],
       },

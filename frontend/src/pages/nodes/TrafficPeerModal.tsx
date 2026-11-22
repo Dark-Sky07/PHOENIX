@@ -34,6 +34,16 @@ export default function TrafficPeerModal({ open, nodes, onClose, onChanged }: Pr
     } finally { setBusy(false); }
   };
 
+  const activateSender = async () => {
+    if (!selectedNode || !senderAcknowledged) return;
+    setBusy(true); setError('');
+    try {
+      const msg = await HttpUtil.post(`/panel/api/nodes/trafficSnapshot/sender/${selectedNode}/activate`, { reconciled: true }, { silent: true });
+      if (!msg.success) { setError(msg.msg || t('somethingWentWrong')); return; }
+      senderForm.setFieldValue('reconciled', false); onChanged(); message.success(t('pages.nodes.trafficPeers.senderActivated'));
+    } finally { setBusy(false); }
+  };
+
   const readSender = async () => {
     if (!selectedNode) return;
     setBusy(true); setError(''); setSenderState(null);
@@ -75,6 +85,7 @@ export default function TrafficPeerModal({ open, nodes, onClose, onChanged }: Pr
               <Space wrap>
                 <Button htmlType="submit" type="primary" disabled={!senderAcknowledged} loading={busy}>{t('pages.nodes.trafficPeers.registerSender')}</Button>
                 <Button onClick={readSender} disabled={!selectedNode || busy}>{t('pages.nodes.trafficPeers.readSender')}</Button>
+                <Button onClick={activateSender} disabled={!selectedNode || !senderAcknowledged || busy}>{t('pages.nodes.trafficPeers.activateSender')}</Button>
               </Space>
               {senderState && <Alert style={{ marginTop: 16 }} type="info" showIcon title={t('pages.nodes.trafficPeers.transferTitle')} description={(
                 <Space orientation="vertical" size="small">

@@ -1,6 +1,8 @@
 package service
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
@@ -49,8 +51,27 @@ func TestVerifiedTrafficPeerRegistrationIsExplicitAndNeverResets(t *testing.T) {
 	if state.Sender == "" || state.Generation == "" {
 		t.Fatalf("invalid state: %+v", state)
 	}
+	if err := db.First(&node, node.Id).Error; err != nil || node.VerifiedGlobalPush {
+		t.Fatalf("sender activated before readiness: %+v %v", node, err)
+	}
+	fail := func(context.Context, *model.Node, model.TrafficSnapshotSender) error {
+		return errors.New("receiver unavailable")
+	}
+	if err := activateVerifiedTrafficSender(context.Background(), node.Id, true, fail); err == nil {
+		t.Fatal("unready receiver activated")
+	}
+	if err := db.First(&node, node.Id).Error; err != nil || node.VerifiedGlobalPush {
+		t.Fatalf("failed probe activated: %+v %v", node, err)
+	}
+	ok := func(context.Context, *model.Node, model.TrafficSnapshotSender) error { return nil }
+	if err := activateVerifiedTrafficSender(context.Background(), node.Id, false, ok); err == nil {
+		t.Fatal("activation without reconciliation accepted")
+	}
+	if err := activateVerifiedTrafficSender(context.Background(), node.Id, true, ok); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.First(&node, node.Id).Error; err != nil || !node.VerifiedGlobalPush {
-		t.Fatalf("verified mode not enabled: %+v %v", node, err)
+		t.Fatalf("ready receiver not activated: %+v %v", node, err)
 	}
 	if err := db.Model(&model.TrafficSnapshotSender{}).Where("id = ?", state.ID).Update("last_sequence", 8).Error; err != nil {
 		t.Fatal(err)
@@ -86,5 +107,25 @@ func TestVerifiedTrafficRegistrationRejectsInvalidCredentials(t *testing.T) {
 	var count int64
 	if err := db.Model(&model.TrafficSnapshotSender{}).Count(&count).Error; err != nil || count != 0 {
 		t.Fatalf("unexpected sender state: %d %v", count, err)
+	}
+}
+
+func TestVerifiedSenderActivationRejectsConfigurationChangedDuringProbe(t *testing.T) {
+	db := initTrafficTestDB(t)
+	node := model.Node{Name: "race", Address: "example.com", Port: 443, Scheme: "https", TlsVerifyMode: "verify", ApiToken: "0123456789012345678901234567890123456789", Enable: true}
+	if err := db.Create(&node).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RegisterVerifiedTrafficSender(node.Id, true); err != nil {
+		t.Fatal(err)
+	}
+	probe := func(_ context.Context, _ *model.Node, _ model.TrafficSnapshotSender) error {
+		return db.Model(&model.Node{}).Where("id = ?", node.Id).Update("address", "changed.example.com").Error
+	}
+	if err := activateVerifiedTrafficSender(context.Background(), node.Id, true, probe); err == nil {
+		t.Fatal("changed node activated")
+	}
+	if err := db.First(&node, node.Id).Error; err != nil || node.VerifiedGlobalPush {
+		t.Fatalf("node activated after race: %+v %v", node, err)
 	}
 }

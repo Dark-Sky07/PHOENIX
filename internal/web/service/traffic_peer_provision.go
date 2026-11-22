@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
+	"github.com/Dark-Sky07/phoenix/internal/web/runtime"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -52,11 +54,9 @@ func RegisterVerifiedTrafficReceiver(tokenID int, sender, generation string, rec
 	})
 }
 
-// RegisterVerifiedTrafficSender creates a fresh sequence and enables verified
-// mode atomically. It never resets existing state. The confirmation indicates
-// that an operator has reconciled existing usage and understands that the
-// receiver must be registered separately; it is not a remote attestation.
-// A generated generation is returned for secure out-of-band registration.
+// RegisterVerifiedTrafficSender stages a new durable sequence but does not
+// enable verified sends. The operator registers the receiver separately and
+// then explicitly activates after an authenticated readiness probe.
 func RegisterVerifiedTrafficSender(nodeID int, reconciled bool) (*model.TrafficSnapshotSender, error) {
 	if nodeID <= 0 || !reconciled {
 		return nil, errors.New("verified sender requires a node and reconciliation confirmation")
@@ -100,17 +100,70 @@ func RegisterVerifiedTrafficSender(nodeID int, reconciled bool) (*model.TrafficS
 		if err := tx.Create(&state).Error; err != nil {
 			return err
 		}
-		result := tx.Model(&model.Node{}).Where("id = ? AND verified_global_push = ?", nodeID, false).Update("verified_global_push", true)
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected != 1 {
-			return errors.New("node verification mode changed concurrently")
-		}
+
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 	return &state, nil
+}
+
+// ActivateVerifiedTrafficSender probes the exact configured receiver before
+// enabling verified outbound mode. This is not reconciliation, a promise of
+// future availability, nor validation of incoming node snapshots.
+func ActivateVerifiedTrafficSender(ctx context.Context, nodeID int, reconciled bool) error {
+	return activateVerifiedTrafficSender(ctx, nodeID, reconciled, func(ctx context.Context, node *model.Node, state model.TrafficSnapshotSender) error {
+		return runtime.NewRemote(node).CheckTrafficReadiness(ctx, state.Sender, state.Generation, uint64(state.LastSequence))
+	})
+}
+
+func activateVerifiedTrafficSender(ctx context.Context, nodeID int, reconciled bool, probe func(context.Context, *model.Node, model.TrafficSnapshotSender) error) error {
+	if nodeID <= 0 || !reconciled || probe == nil {
+		return errors.New("sender activation requires reconciliation confirmation")
+	}
+	unlock, err := LockResellerAllocation()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	db := database.GetDB()
+	var node model.Node
+	if err := db.First(&node, "id = ?", nodeID).Error; err != nil {
+		return err
+	}
+	if node.VerifiedGlobalPush {
+		return errors.New("verified sender already active")
+	}
+	if node.Scheme != "https" || (node.TlsVerifyMode != "" && node.TlsVerifyMode != "verify") || len(node.ApiToken) < 32 {
+		return errors.New("verified sender requires HTTPS, standard TLS verification, and a valid node token")
+	}
+	var state model.TrafficSnapshotSender
+	if err := db.First(&state, "id = ?", fmt.Sprintf("node:%d", nodeID)).Error; err != nil {
+		return err
+	}
+	if state.LastSequence < 0 || !validTrafficPeerIdentity(state.Sender) || !validTrafficPeerIdentity(state.Generation) {
+		return errors.New("invalid sender state")
+	}
+	// No database transaction remains open during the bounded network probe.
+	if err := probe(ctx, &node, state); err != nil {
+		return err
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
+		var current model.TrafficSnapshotSender
+		if err := tx.First(&current, "id = ?", state.ID).Error; err != nil {
+			return err
+		}
+		if current != state {
+			return errors.New("traffic sender state changed during readiness probe")
+		}
+		result := tx.Model(&model.Node{}).Where("id = ? AND verified_global_push = ? AND scheme = ? AND address = ? AND port = ? AND base_path = ? AND api_token = ? AND tls_verify_mode = ? AND allow_private_address = ?", node.Id, false, node.Scheme, node.Address, node.Port, node.BasePath, node.ApiToken, node.TlsVerifyMode, node.AllowPrivateAddress).Where("EXISTS (SELECT 1 FROM traffic_snapshot_senders s WHERE s.id = ? AND s.sender = ? AND s.generation = ? AND s.last_sequence = ?)", state.ID, state.Sender, state.Generation, state.LastSequence).Update("verified_global_push", true)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return errors.New("node configuration changed during readiness probe")
+		}
+		return nil
+	})
 }

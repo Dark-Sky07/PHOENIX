@@ -8290,7 +8290,7 @@
         "tags": [
           "Nodes"
         ],
-        "summary": "Experimental: register a new verified snapshot sender for a node. Interactive superadmin session only; reconciled must be true. This enables verified mode immediately without attesting that the peer is ready; it never resets an existing sequence.",
+        "summary": "Experimental: register a new verified snapshot sender for a node. Interactive superadmin session only; reconciled must be true. This stages the identity without enabling verified mode; it never resets an existing sequence.",
         "operationId": "post_panel_api_nodes_trafficSnapshot_sender_id",
         "parameters": [
           {
@@ -8298,6 +8298,66 @@
             "in": "path",
             "required": true,
             "description": "Local node ID; must use HTTPS with standard TLS verification.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "reconciled": {
+                    "type": "boolean",
+                    "description": "Confirm manual accounting and rollout review."
+                  }
+                },
+                "required": [
+                  "reconciled"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/nodes/trafficSnapshot/sender/{id}/activate": {
+      "post": {
+        "tags": [
+          "Nodes"
+        ],
+        "summary": "Activate a staged sender after a fresh authenticated receiver readiness check. Interactive superadmin only; readiness does not establish accounting completeness or secure incoming snapshots.",
+        "operationId": "post_panel_api_nodes_trafficSnapshot_sender_id_activate",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Local node ID.",
             "schema": {
               "type": "integer"
             }

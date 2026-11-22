@@ -456,9 +456,9 @@ Verified mode is not automatically provisioned. The Nodes page provides an
 experimental interactive superadmin setup dialog. Do not enable it until both peers, their identities, generations, sequence
 state and token are configured and reconciled under a reviewed procedure.
 
-The agreed rollout is **not complete**: legacy snapshots for reseller
-accounting are not blocked, no dashboard warning identifies old nodes, and
-cross-process failover/integration testing remains necessary. These mechanisms
+The agreed rollout is **not complete**: inbound node snapshots remain legacy;
+the dashboard and limited reseller guard described below do not cover all write
+paths. Cross-process failover/integration testing remains necessary. These mechanisms
 do not prove that a runtime observed or reported all traffic. The lock cannot
 fence a lost PostgreSQL session or nonparticipating writers. Database rollback
 can restore an old sequence and invalidate replay protection unless there is an
@@ -476,17 +476,22 @@ path or prove snapshot freshness.
 
 Experimental peer registration is available through interactive superadmin
 sessions only: `POST /panel/api/nodes/trafficSnapshot/sender/:id` creates a
-fresh sender generation and enables verified mode, and
+fresh sender generation without enabling verified mode, and
 `POST /panel/api/nodes/trafficSnapshot/receiver` binds a full-scope API token
 ID to that sender and generation. Both require `reconciled: true`; this is an
 operator confirmation, **not** proof that accounting is complete or the other
 peer is ready. The sender endpoint returns the sender GUID and generation for
-secure out-of-band transfer to the receiver. Prepare for verified sends to fail
-until the receiver is registered. Neither endpoint overwrites existing state or
+secure out-of-band transfer to the receiver. Then use
+`POST /panel/api/nodes/trafficSnapshot/sender/:id/activate` with a fresh manual
+confirmation: it authenticates a nonce-bound receiver readiness response before
+activating. Legacy pushes continue until activation and may fail once the
+receiver blocks that registered legacy identity. Readiness is a point-in-time
+check, not proof of accounting completeness or future availability. Existing
+senders enabled by an older version are not automatically rechecked. Neither endpoint overwrites existing state or
 resets a sequence; token rotation, generation changes, backup rollback, existing
 usage and incidents require manual reconciliation. The Nodes page exposes
 these registration operations and can reread an existing sender identity and
-generation, but it does not implement a remote-readiness handshake. Unregistered peers still use legacy paths.
+generation, and can activate after the readiness check. Unregistered peers still use legacy paths.
 
 The administrator dashboard now warns about every registered node, including
 disabled nodes and nodes with verified outgoing global pushes, because incoming
