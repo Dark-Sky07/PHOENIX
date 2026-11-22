@@ -118,6 +118,7 @@ jobs:
       - name: Build and race-test experimental pinned Xray
         env:
           PHOENIX_XRAY_RUN_TESTS: '1'
+          PHOENIX_XRAY_RACE_BINARY: '1'
         shell: bash
         run: |
           set -o pipefail
@@ -133,6 +134,7 @@ jobs:
         env:
           XRAY_E2E_BINARY: /tmp/phoenix-xray-experimental
           XRAY_EXPECT_EXPERIMENTAL_DRAIN: '1'
+          GORACE: 'halt_on_error=1'
         shell: bash
         run: |
           set -o pipefail

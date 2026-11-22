@@ -34,4 +34,8 @@ patch --batch --forward --fuzz=0 -p1 < "$root/patches/xray/experimental-shadowso
 if [ "${PHOENIX_XRAY_RUN_TESTS:-0}" = 1 ]; then
   GOWORK=off go test -mod=mod -race ./proxy/vless/inbound ./proxy/trojan ./proxy/vmess/inbound ./proxy/shadowsocks ./proxy/shadowsocks_2022 ./app/proxyman/inbound -run '^TestPhoenix(Vless|Trojan|Vmess|Shadowsocks|SS2022|UDP)' -count=1
 fi
-GOWORK=off go build -mod=mod -o "$output" ./main
+if [ "${PHOENIX_XRAY_RACE_BINARY:-0}" = 1 ]; then
+  GOWORK=off go build -race -mod=mod -o "$output" ./main
+else
+  GOWORK=off go build -mod=mod -o "$output" ./main
+fi
