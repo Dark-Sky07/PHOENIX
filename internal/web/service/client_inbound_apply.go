@@ -564,7 +564,7 @@ func (s *ClientService) addInboundClient(inboundSvc *InboundService, data *model
 	return needRestart, nil
 }
 
-func (s *ClientService) UpdateInboundClient(inboundSvc *InboundService, data *model.Inbound, oldEmail string) (bool, error) {
+func (s *ClientService) UpdateInboundClient(inboundSvc *InboundService, data *model.Inbound, oldEmail string) (needRestart bool, err error) {
 	defer lockInbound(data.Id).Unlock()
 
 	clients, err := inboundSvc.GetClients(data)
@@ -777,14 +777,35 @@ func (s *ClientService) UpdateInboundClient(inboundSvc *InboundService, data *mo
 	oldInbound.Settings = string(newSettings)
 	db := database.GetDB()
 	tx := db.Begin()
+	if tx.Error != nil {
+		return false, tx.Error
+	}
 
 	markDirty := false
+	localRuntimeAttempted := false
+	remoteRuntimeAttempted := false
 	defer func() {
+		if recovered := recover(); recovered != nil {
+			tx.Rollback()
+			panic(recovered)
+		}
 		if err != nil {
 			tx.Rollback()
+		} else if commitErr := tx.Commit().Error; commitErr != nil {
+			err = fmt.Errorf("commit inbound client update: %w", commitErr)
+		}
+		if err != nil {
+			// A failed transaction cannot undo a runtime call, and a commit
+			// error can have an uncertain outcome. Request recovery against
+			// the eventual DB state; neither flag proves quiescence.
+			needRestart = needRestart || localRuntimeAttempted
+			if remoteRuntimeAttempted && oldInbound.NodeID != nil {
+				if dErr := (&NodeService{}).MarkNodeDirty(*oldInbound.NodeID); dErr != nil {
+					logger.Warning("mark node dirty after failed update:", dErr)
+				}
+			}
 			return
 		}
-		tx.Commit()
 		if oldInbound.Protocol == model.TUIC && oldInbound.NodeID == nil {
 			inboundSvc.applyLocalTuic(oldInbound.Id)
 		}
@@ -849,7 +870,7 @@ func (s *ClientService) UpdateInboundClient(inboundSvc *InboundService, data *mo
 			}
 		}
 	}
-	needRestart := false
+	needRestart = false
 	if len(oldEmail) > 0 {
 		rt, push, dirty, perr := inboundSvc.nodePushPlan(oldInbound)
 		if perr != nil {
@@ -864,6 +885,7 @@ func (s *ClientService) UpdateInboundClient(inboundSvc *InboundService, data *mo
 				needRestart = true
 			} else {
 				if oldClients[clientIndex].Enable {
+					localRuntimeAttempted = true
 					err1 := rt.RemoveUser(context.Background(), oldInbound, oldEmail)
 					if err1 == nil {
 						logger.Debug("Old client deleted on", rt.Name(), ":", oldEmail)
@@ -876,6 +898,7 @@ func (s *ClientService) UpdateInboundClient(inboundSvc *InboundService, data *mo
 				// still active (including a retry returning not-found after a
 				// timeout). Do not install a new credential before recovery.
 				if clients[0].Enable && !needRestart {
+					localRuntimeAttempted = true
 					cipher := ""
 					if oldInbound.Protocol == "shadowsocks" {
 						cipher = oldSettings["method"].(string)
@@ -898,6 +921,7 @@ func (s *ClientService) UpdateInboundClient(inboundSvc *InboundService, data *mo
 				}
 			}
 		} else if push {
+			remoteRuntimeAttempted = true
 			if err1 := rt.UpdateUser(context.Background(), oldInbound, oldEmail, clients[0]); err1 != nil {
 				logger.Warning("Error in updating client on", rt.Name(), ":", err1)
 				markDirty = true
@@ -909,6 +933,9 @@ func (s *ClientService) UpdateInboundClient(inboundSvc *InboundService, data *mo
 	}
 	if err = tx.Save(oldInbound).Error; err != nil {
 		return false, err
+	}
+	if oldInbound.NodeID == nil && (oldInbound.Protocol == model.L2TP || oldInbound.Protocol == model.SSTP || oldInbound.Protocol == model.PPTP) {
+		localRuntimeAttempted = true
 	}
 	if err := reconcilePPPVPNRuntime(oldInbound); err != nil {
 		logger.Warning("PPP VPN: synchronous client reconcile failed:", err)
@@ -923,6 +950,7 @@ func (s *ClientService) UpdateInboundClient(inboundSvc *InboundService, data *mo
 		return false, err
 	}
 	if oldInbound.Protocol == model.AmneziaWG && oldInbound.NodeID == nil {
+		localRuntimeAttempted = true
 		inboundSvc.applyLocalAmneziaWG(oldInbound.Id)
 	}
 	return needRestart, nil
@@ -1288,10 +1316,10 @@ func (s *ClientService) applyClientFieldByEmail(inboundSvc *InboundService, clie
 		}
 		inbound.Settings = string(modifiedSettings)
 		nr, uErr := s.UpdateInboundClient(inboundSvc, inbound, clientEmail)
+		needRestart = needRestart || nr
 		if uErr != nil {
 			return needRestart, uErr
 		}
-		needRestart = needRestart || nr
 	}
 
 	if !found {

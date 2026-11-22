@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"net"
+	"strings"
 	"testing"
 
 	"github.com/Dark-Sky07/phoenix/internal/database"
@@ -324,5 +325,115 @@ func TestUpdateInboundClientDoesNotReaddAfterUncertainRemoval(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestInboundUpdateSaveFailureReportsRuntimeDivergence(t *testing.T) {
+	for _, mode := range []string{"direct", "client-update", "field-update"} {
+		t.Run(mode, func(t *testing.T) {
+			setupConflictDB(t)
+			db := database.GetDB()
+			original := []model.Client{{Email: "update-save@example.test", ID: "a17e367c-2074-4d3e-aaeb-fbef5dfde7e7", Enable: true}}
+			settings := clientsSettings(t, original)
+			ib := mkInbound(t, 22214, model.VLESS, settings)
+			svc := &ClientService{}
+			if err := svc.SyncInbound(nil, ib.Id, original); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Exec("CREATE TRIGGER reject_update_save BEFORE UPDATE ON inbounds BEGIN SELECT RAISE(ABORT, 'injected failure'); END").Error; err != nil {
+				t.Fatal(err)
+			}
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			server := grpc.NewServer()
+			recorder := &recordingRemovalServer{requests: make(chan *command.AlterInboundRequest, 3)}
+			command.RegisterHandlerServiceServer(server, recorder)
+			go func() { _ = server.Serve(listener) }()
+			defer server.Stop()
+			old := runtime.GetManager()
+			runtime.SetManager(runtime.NewManager(runtime.LocalDeps{APIPort: func() int { return listener.Addr().(*net.TCPAddr).Port }}))
+			t.Cleanup(func() { runtime.SetManager(old) })
+			updated := original[0]
+			updated.ID = "c2a615fe-086d-4fc8-9d5f-97cda3dceee0"
+			var restart bool
+			switch mode {
+			case "direct":
+				restart, err = svc.UpdateInboundClient(&InboundService{}, &model.Inbound{Id: ib.Id, Settings: clientsSettings(t, []model.Client{updated})}, original[0].Email)
+			case "client-update":
+				rec, recErr := svc.GetRecordByEmail(nil, original[0].Email)
+				if recErr != nil {
+					t.Fatal(recErr)
+				}
+				restart, err = svc.Update(&InboundService{}, rec.Id, updated)
+			case "field-update":
+				restart, err = svc.ResetClientIpLimitByEmail(&InboundService{}, original[0].Email, 2)
+			}
+			if err == nil || !restart {
+				t.Fatalf("expected error and restart after runtime mutation: restart=%v err=%v", restart, err)
+			}
+			if len(recorder.requests) != 2 {
+				t.Fatalf("expected remove and add before failed save, got %d calls", len(recorder.requests))
+			}
+			var persisted model.Inbound
+			if err := db.First(&persisted, ib.Id).Error; err != nil {
+				t.Fatal(err)
+			}
+			if persisted.Settings != settings {
+				t.Fatal("failed update did not preserve inbound settings")
+			}
+		})
+	}
+}
+
+func TestInboundUpdateCommitFailureIsReported(t *testing.T) {
+	setupConflictDB(t)
+	db := database.GetDB()
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// SQLite foreign key enforcement is per connection. A single connection
+	// ensures the deferred constraint fails at commit, not during Save.
+	sqlDB.SetMaxOpenConns(1)
+	for _, statement := range []string{
+		"PRAGMA foreign_keys = ON",
+		"CREATE TABLE commit_parent (id INTEGER PRIMARY KEY)",
+		"CREATE TABLE commit_child (parent_id INTEGER REFERENCES commit_parent(id) DEFERRABLE INITIALLY DEFERRED)",
+		"CREATE TRIGGER reject_update_commit AFTER UPDATE ON inbounds BEGIN INSERT INTO commit_child(parent_id) VALUES (99); END",
+	} {
+		if err := db.Exec(statement).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	original := []model.Client{{Email: "update-commit@example.test", ID: "a17e367c-2074-4d3e-aaeb-fbef5dfde7e7", Enable: true}}
+	ib := mkInbound(t, 22215, model.VLESS, clientsSettings(t, original))
+	svc := &ClientService{}
+	if err := svc.SyncInbound(nil, ib.Id, original); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	server := grpc.NewServer()
+	recorder := &recordingRemovalServer{requests: make(chan *command.AlterInboundRequest, 3)}
+	command.RegisterHandlerServiceServer(server, recorder)
+	go func() { _ = server.Serve(listener) }()
+	defer server.Stop()
+	old := runtime.GetManager()
+	runtime.SetManager(runtime.NewManager(runtime.LocalDeps{APIPort: func() int { return listener.Addr().(*net.TCPAddr).Port }}))
+	t.Cleanup(func() { runtime.SetManager(old) })
+	updated := original[0]
+	updated.ID = "c2a615fe-086d-4fc8-9d5f-97cda3dceee0"
+	restart, err := svc.UpdateInboundClient(&InboundService{}, &model.Inbound{Id: ib.Id, Settings: clientsSettings(t, []model.Client{updated})}, original[0].Email)
+	if err == nil || !strings.Contains(err.Error(), "commit inbound client update") || !restart {
+		t.Fatalf("commit failure hidden or recovery lost: restart=%v err=%v", restart, err)
+	}
+	if len(recorder.requests) != 2 {
+		t.Fatalf("expected runtime update before commit failure, got %d calls", len(recorder.requests))
 	}
 }

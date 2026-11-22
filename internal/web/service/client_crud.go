@@ -393,11 +393,9 @@ func (s *ClientService) Update(inboundSvc *InboundService, id int, updated model
 			Id:       ibId,
 			Settings: string(settingsPayload),
 		}, existing.Email)
+		needRestart = needRestart || nr
 		if upErr != nil {
 			return needRestart, upErr
-		}
-		if nr {
-			needRestart = true
 		}
 		if ips, ok := updated.AllowedIPsByInbound[ibId]; ok &&
 			(inbound.Protocol == model.WireGuard || inbound.Protocol == model.AmneziaWG) {
