@@ -2,15 +2,27 @@
 +++ b/proxy/vless/inbound/inbound.go
 @@ -11,0 +12 @@
 +	"sync"
-@@ -76,0 +78,4 @@
+@@ -76,0 +78,6 @@
 +	// Experimental per-user active connection tracking. This is not a
 +	// cross-process fence or an accounting/quiescence certificate.
 +	userSessionMu          sync.Mutex
 +	userSessions           map[*protocol.MemoryUser]map[*trackedUserConnection]struct{}
-@@ -240,0 +246,2 @@
++	retiringEmails         map[string]struct{}
++	retiringIDs            map[[16]byte]struct{}
+@@ -240,0 +248,12 @@
 +	h.userSessionMu.Lock()
 +	defer h.userSessionMu.Unlock()
-@@ -246,2 +253,32 @@
++	if _, blocked := h.retiringEmails[strings.ToLower(u.Email)]; blocked {
++		return errors.New("VLESS user is being removed or removal failed: ", u.Email)
++	}
++	account, ok := u.Account.(*vless.MemoryAccount)
++	if !ok || account.ID == nil {
++		return errors.New("invalid VLESS account")
++	}
++	if _, blocked := h.retiringIDs[vless.ProcessUUID(account.ID.UUID())]; blocked {
++		return errors.New("VLESS credential is being removed or removal failed")
++	}
+@@ -246,2 +265,48 @@
 -	h.RemoveReverse(h.validator.GetByEmail(e))
 -	return h.validator.Del(e)
 +	h.userSessionMu.Lock()
@@ -20,6 +32,18 @@
 +		h.userSessionMu.Unlock()
 +		return err
 +	}
++	// Keep an email fence while the detached handlers drain. On any failure it
++	// remains in place; no failed removal can be mistaken for safe reuse.
++	if h.retiringEmails == nil {
++		h.retiringEmails = make(map[string]struct{})
++	}
++	key := strings.ToLower(e)
++	id := vless.ProcessUUID(u.Account.(*vless.MemoryAccount).ID.UUID())
++	if h.retiringIDs == nil {
++		h.retiringIDs = make(map[[16]byte]struct{})
++	}
++	h.retiringEmails[key] = struct{}{}
++	h.retiringIDs[id] = struct{}{}
 +	connections := make([]*trackedUserConnection, 0, len(h.userSessions[u]))
 +	for c := range h.userSessions[u] {
 +		connections = append(connections, c)
@@ -44,8 +68,12 @@
 +			return errors.New("timed out waiting for removed VLESS handlers").Base(ctx.Err())
 +		}
 +	}
++	h.userSessionMu.Lock()
++	delete(h.retiringEmails, key)
++	delete(h.retiringIDs, id)
++	h.userSessionMu.Unlock()
 +	return nil
-@@ -525,0 +563,8 @@
+@@ -525,0 +591,8 @@
 +
 +	// Reject a request authenticated before a concurrent removal or credential
 +	// replacement. Track before dispatch so removal cannot miss this connection.
@@ -110,7 +138,7 @@
 +}
 --- /dev/null
 +++ b/proxy/vless/inbound/phoenix_user_sessions_test.go
-@@ -0,0 +1,146 @@
+@@ -0,0 +1,161 @@
 +package inbound
 +
 +import (
@@ -171,6 +199,14 @@
 +	_ = secondPeer.SetReadDeadline(time.Now().Add(time.Second))
 +	if _, err := secondPeer.Read(buf[:]); err != io.EOF {
 +		t.Fatalf("second removed session remains open: %v", err)
++	}
++	// Re-adding the same normalized email while the old handler is still
++	// tracked must be rejected, even with a new credential.
++	if err := h.AddUser(context.Background(), testPhoenixUser("A@TEST")); err == nil {
++		t.Fatal("re-add succeeded during removal")
++	}
++	if err := h.AddUser(context.Background(), &protocol.MemoryUser{Email: "different@test", Account: a.Account}); err == nil {
++		t.Fatal("same credential was re-added under another email")
 +	}
 +	// Closing transports alone must not complete the handler-scope barrier.
 +	select {
@@ -255,5 +291,12 @@
 +	}
 +	if h.validator.GetByEmail(u.Email) != nil {
 +		t.Fatal("user was re-enabled after timeout")
++	}
++	done()
++	if err := h.AddUser(context.Background(), testPhoenixUser("TIMEOUT@TEST")); err == nil {
++		t.Fatal("failed removal allowed re-addition after handler completion")
++	}
++	if err := h.AddUser(context.Background(), &protocol.MemoryUser{Email: "different@test", Account: u.Account}); err == nil {
++		t.Fatal("failed removal allowed credential re-addition under another email")
 +	}
 +}

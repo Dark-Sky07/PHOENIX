@@ -709,3 +709,11 @@ inbound handler. `TestXrayTaskRunMayReturnBeforeSiblingCompletes` characterizes
 that behavior. Do not treat handler exit or a stable-looking counter as proof
 that no subsequent counter writes are possible. Other protocols do not have this
 experimental handler wait.
+
+The VLESS prototype also rejects re-adding the same normalized email or VLESS
+credential while removal waits for handler cleanup. If removal times out or a
+close fails, its in-memory fence remains in place for that handler. A successful
+wait clears the fence and does not prevent a later re-add; restart, other
+inbounds, other nodes, direct writers and untracked asynchronous traffic are
+outside this mechanism. This is neither a durable reconciliation fence nor an
+operator recovery mechanism and cannot authorize final quota release.
