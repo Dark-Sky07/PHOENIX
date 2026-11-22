@@ -494,6 +494,17 @@ links to the existing node inventory conceptually (all registered nodes are
 affected); it does not list credentials or client identities. If node status
 cannot be read, the dashboard warns rather than treating it as clear. A zero
 node count is not proof that all historical or unpolled traffic is complete.
-This is visibility only: the broader legacy-node accounting guard is not yet
-implemented, and the experimental verified push is not a proof of safe incoming
-node accounting.
+The dashboard itself is visibility only. The scoped quota/renewal guard below
+does not cover every write path, and an experimental verified outbound push is
+not proof of safe incoming node accounting.
+
+As an interim fail-closed measure, participating reseller traffic/client quota
+checks and automatic renewal reservations reject accounts assigned a remote
+inbound or owning a client attached to one. This applies to unlimited accounts
+and to nodes with verified outbound pushes: incoming node snapshots are still
+unverified. Normal quota/accounting mutation callers must hold the allocation
+lock. The rule can block otherwise healthy resellers until an incoming protocol
+and an evidence-based migration exist; it does not shut down the node. It is
+not a complete perimeter: direct administrator/runtime/database writes,
+unrepresented or lost associations, upstream global-only traffic and other
+nonparticipating paths may bypass it. Existing totals can still be incomplete.

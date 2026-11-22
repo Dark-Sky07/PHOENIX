@@ -1814,6 +1814,9 @@ func (s *ResellerService) CheckTrafficQuota(reseller *model.Reseller, addBytes i
 	if err := validateResellerNodeBaselines(database.GetDB(), reseller.Id); err != nil {
 		return err
 	}
+	if err := rejectResellerUnverifiedNodes(database.GetDB(), reseller.Id); err != nil {
+		return err
+	}
 	if reseller.TrafficLimit <= 0 {
 		return nil
 	}
@@ -1880,6 +1883,9 @@ func (s *ResellerService) CheckClientQuota(reseller *model.Reseller, adding int,
 	}
 	if addBytes < 0 {
 		return errors.New("traffic allocation cannot be negative")
+	}
+	if err := rejectResellerUnverifiedNodes(database.GetDB(), reseller.Id); err != nil {
+		return err
 	}
 	if reseller.ClientLimit <= 0 && reseller.TrafficLimit <= 0 {
 		return nil

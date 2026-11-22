@@ -59,7 +59,7 @@ func TestResellerAllocationBlockedByUnknownNodeBaseline(t *testing.T) {
 	}
 }
 
-func TestRestoredNodeBaselineAllowsResellerQuotaChecks(t *testing.T) {
+func TestRestoredNodeBaselineStillRequiresVerifiedRemoteSnapshots(t *testing.T) {
 	reseller, client := seedResellerRenewal(t)
 	db := database.GetDB()
 	var link model.ClientInbound
@@ -79,20 +79,14 @@ func TestRestoredNodeBaselineAllowsResellerQuotaChecks(t *testing.T) {
 	if err != nil || stat.UsedTraffic != 300 || stat.AllocatedTraffic != 500 {
 		t.Fatalf("stat=%+v err=%v", stat, err)
 	}
-	if err := svc.CheckTrafficQuota(&reseller, 1); err != nil {
-		t.Fatal(err)
+	if err := svc.CheckTrafficQuota(&reseller, 1); err == nil {
+		t.Fatal("restored baseline must not authenticate remote snapshots")
 	}
 	if err := db.Transaction(func(tx *gorm.DB) error {
 		tracker := renewalQuotaTracker{tx: tx, accounts: map[int]*renewalQuotaSnapshot{}}
-		allowed, err := tracker.reserve(client.Email)
-		if err != nil {
-			return err
-		}
-		if !allowed {
-			t.Fatal("renewal should be allowed")
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
+		_, err := tracker.reserve(client.Email)
+		return err
+	}); err == nil {
+		t.Fatal("renewal accepted without authenticated remote snapshots")
 	}
 }
