@@ -640,3 +640,23 @@ API, and tests whether that existing stream still carries data. It characterizes
 one pinned core and protocol, not all release binaries or protocols. In
 particular, it is a regression warning against assuming RemoveUser drains
 sessions; it is not a quiescence implementation.
+
+### Experimental VLESS connection termination
+
+An **experimental, test-only** patch for the pinned Xray source is available at
+`patches/xray/experimental-vless-disconnect.patch`. It tracks authenticated
+VLESS transport connections per user object, removes authentication and closes
+tracked connections when that user is removed, and rejects a request that
+finished authenticating against an already removed/replaced user. It serializes
+registration and removal on the inbound handler. The build script applies it
+only to the exact pinned module version in a temporary copy; it does not replace
+release binaries or configure nodes. CI exercises an established TCP connection
+and races registration against removal.
+
+This is not a production disconnect or reconciliation guarantee: other
+protocols, multiplexed and encrypted transports, UDP, reverse sessions, process
+crashes, remote nodes, handler replacement and nonparticipating writers need
+separate investigation. `Close` does not prove final counters were polled or
+committed, and removal cannot retract traffic already accepted in a race. Do
+not use this patch to lift quota blocks, delete reseller accounting evidence, or
+claim safe final consumption; release and upgrade flows still use upstream Xray.

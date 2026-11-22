@@ -56,12 +56,13 @@ func TestXrayRemoveUserDoesNotDrainEstablishedVLESS(t *testing.T) {
 		userPort = freePort(t)
 	}
 	userID := uuid.MustParse("a17e367c-2074-4d3e-aaeb-fbef5dfde7e7")
+	otherID := uuid.MustParse("9b7e367c-2074-4d3e-aaeb-fbef5dfde7e7")
 	cfg := map[string]any{
 		"log": map[string]any{"loglevel": "warning"},
 		"api": map[string]any{"services": []string{"HandlerService", "StatsService"}, "tag": "api"},
 		"inbounds": []any{
 			map[string]any{"listen": "127.0.0.1", "port": apiPort, "protocol": "tunnel", "settings": map[string]any{"rewriteAddress": "127.0.0.1"}, "tag": "api"},
-			map[string]any{"listen": "127.0.0.1", "port": userPort, "protocol": "vless", "settings": map[string]any{"clients": []any{map[string]any{"id": userID.String(), "email": "quiescence@example.test"}}, "decryption": "none"}, "tag": "user-in"},
+			map[string]any{"listen": "127.0.0.1", "port": userPort, "protocol": "vless", "settings": map[string]any{"clients": []any{map[string]any{"id": userID.String(), "email": "quiescence@example.test"}, map[string]any{"id": otherID.String(), "email": "other@example.test"}}, "decryption": "none"}, "tag": "user-in"},
 		},
 		// The pinned Xray core blocks private destinations by default for
 		// VLESS. Allow only the local test echo port, not general private access.
@@ -113,8 +114,47 @@ func TestXrayRemoveUserDoesNotDrainEstablishedVLESS(t *testing.T) {
 	if binary.BigEndian.Uint16(response[:2]) != 0 || string(response[2:]) != "before" {
 		t.Fatalf("unexpected VLESS response %x", response)
 	}
+	// A second user's live stream must survive removing the first user.
+	other, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(userPort)), 3*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	if err := other.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	otherHeader := append([]byte{0}, otherID[:]...)
+	otherHeader = append(otherHeader, 0, 1, byte(echoPort>>8), byte(echoPort), 1, 127, 0, 0, 1)
+	if _, err := other.Write(append(otherHeader, []byte("other")...)); err != nil {
+		t.Fatal(err)
+	}
+	otherResp := make([]byte, 2+len("other"))
+	if _, err := io.ReadFull(other, otherResp); err != nil || string(otherResp[2:]) != "other" {
+		t.Fatalf("second stream failed: %x %v", otherResp, err)
+	}
 	if err := api.RemoveUser("user-in", "quiescence@example.test"); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := other.Write([]byte("alive")); err != nil {
+		t.Fatal(err)
+	}
+	alive := make([]byte, len("alive"))
+	if _, err := io.ReadFull(other, alive); err != nil || string(alive) != "alive" {
+		t.Fatalf("unrelated user disconnected: %q %v", alive, err)
+	}
+	if os.Getenv("XRAY_EXPECT_EXPERIMENTAL_DRAIN") == "1" {
+		if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		var b [1]byte
+		_, err := conn.Read(b[:])
+		if err == nil {
+			t.Fatal("experimental core did not close the deleted user's connection")
+		}
+		if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
+			t.Fatalf("experimental core left the deleted user's connection open: %v", err)
+		}
+		return
 	}
 	if _, err := conn.Write([]byte("after")); err != nil {
 		t.Fatal(err)

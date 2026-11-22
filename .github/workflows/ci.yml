@@ -107,6 +107,44 @@ jobs:
           PYLOG
           exit 1
 
+  experimental-xray-vless-disconnect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build and race-test experimental pinned Xray
+        env:
+          PHOENIX_XRAY_RUN_TESTS: '1'
+        shell: bash
+        run: |
+          set -o pipefail
+          if bash scripts/build-experimental-xray.sh /tmp/phoenix-xray-experimental 2>&1 | tee /tmp/experimental-xray-build.log; then exit 0; fi
+          python3 - <<'PYLOG'
+          from pathlib import Path
+          output = Path('/tmp/experimental-xray-build.log').read_text(errors='replace')[-4000:]
+          output = output.replace('%', '%25').replace(chr(13), '%0D').replace(chr(10), '%0A')
+          print(f'::error title=experimental-xray-build-output::{output}')
+          PYLOG
+          exit 1
+      - name: Test VLESS connection closes on user removal
+        env:
+          XRAY_E2E_BINARY: /tmp/phoenix-xray-experimental
+          XRAY_EXPECT_EXPERIMENTAL_DRAIN: '1'
+        shell: bash
+        run: |
+          set -o pipefail
+          if go test -mod=mod ./internal/xray -run '^TestXrayRemoveUserDoesNotDrainEstablishedVLESS$' -count=1 -v 2>&1 | tee /tmp/experimental-xray-test.log; then exit 0; fi
+          python3 - <<'PYLOG'
+          from pathlib import Path
+          output = Path('/tmp/experimental-xray-test.log').read_text(errors='replace')[-4000:]
+          output = output.replace('%', '%25').replace(chr(13), '%0D').replace(chr(10), '%0A')
+          print(f'::error title=experimental-xray-test-output::{output}')
+          PYLOG
+          exit 1
+
   codegen:
     runs-on: ubuntu-latest
     steps:
