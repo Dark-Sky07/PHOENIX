@@ -58,6 +58,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - name: Test sandbox Go cache integrity checks
+        run: PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_sandbox_go_setup.py
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
