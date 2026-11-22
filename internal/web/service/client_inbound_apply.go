@@ -467,24 +467,52 @@ func (s *ClientService) addInboundClient(inboundSvc *InboundService, data *model
 	}
 
 	markDirty := false
+	remoteRuntimeAttempted := false
+	markRemoteDirty := func() {
+		if oldInbound.NodeID != nil {
+			if dErr := (&NodeService{}).MarkNodeDirty(*oldInbound.NodeID); dErr != nil {
+				logger.Warning("mark node dirty after client add:", dErr)
+			}
+		}
+	}
 	defer func() {
+		if recovered := recover(); recovered != nil {
+			tx.Rollback()
+			if remoteRuntimeAttempted {
+				markRemoteDirty()
+			}
+			panic(recovered)
+		}
 		if err != nil {
 			needRestart = true // runtime may have been touched before rollback
 			tx.Rollback()
+			if remoteRuntimeAttempted {
+				markRemoteDirty()
+			}
 			return
 		}
 		if commitErr := tx.Commit().Error; commitErr != nil {
-			err = commitErr
+			err = fmt.Errorf("commit inbound client add: %w", commitErr)
 			needRestart = true
+			if remoteRuntimeAttempted {
+				markRemoteDirty()
+			}
 			return
 		}
-		if oldInbound.Protocol == model.TUIC && oldInbound.NodeID == nil {
-			inboundSvc.applyLocalTuic(oldInbound.Id)
-		}
-		if markDirty && oldInbound.NodeID != nil {
-			if dErr := (&NodeService{}).MarkNodeDirty(*oldInbound.NodeID); dErr != nil {
-				logger.Warning("mark node dirty failed:", dErr)
+		if oldInbound.NodeID == nil {
+			if pppErr := reconcilePPPVPNRuntime(oldInbound); pppErr != nil {
+				logger.Warning("PPP VPN: synchronous client reconcile failed:", pppErr)
+				needRestart = true
 			}
+			switch oldInbound.Protocol {
+			case model.TUIC:
+				inboundSvc.applyLocalTuic(oldInbound.Id)
+			case model.AmneziaWG:
+				inboundSvc.applyLocalAmneziaWG(oldInbound.Id)
+			}
+		}
+		if markDirty {
+			markRemoteDirty()
 		}
 	}()
 
@@ -547,6 +575,7 @@ func (s *ClientService) addInboundClient(inboundSvc *InboundService, data *model
 				}
 			}
 			if push {
+				remoteRuntimeAttempted = true
 				if err1 := rt.AddClient(context.Background(), oldInbound, client); err1 != nil {
 					logger.Warning("Error in adding client on", rt.Name(), ":", err1)
 					markDirty = true
@@ -559,10 +588,6 @@ func (s *ClientService) addInboundClient(inboundSvc *InboundService, data *model
 	if err = tx.Save(oldInbound).Error; err != nil {
 		return false, err
 	}
-	if err := reconcilePPPVPNRuntime(oldInbound); err != nil {
-		logger.Warning("PPP VPN: synchronous client reconcile failed:", err)
-		needRestart = true
-	}
 	finalClients, gcErr := inboundSvc.GetClients(oldInbound)
 	if gcErr != nil {
 		err = gcErr
@@ -570,9 +595,6 @@ func (s *ClientService) addInboundClient(inboundSvc *InboundService, data *model
 	}
 	if err = s.SyncInbound(tx, oldInbound.Id, finalClients); err != nil {
 		return false, err
-	}
-	if oldInbound.Protocol == model.AmneziaWG && oldInbound.NodeID == nil {
-		inboundSvc.applyLocalAmneziaWG(oldInbound.Id)
 	}
 	return needRestart, nil
 }

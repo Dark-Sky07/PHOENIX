@@ -15,7 +15,7 @@ import (
 )
 
 func TestLocalAWGClientChangesApplyCommittedPeerSet(t *testing.T) {
-	for _, mode := range []string{"update", "detach", "delete"} {
+	for _, mode := range []string{"update", "detach", "delete", "add"} {
 		t.Run(mode, func(t *testing.T) {
 			setupConflictDB(t)
 			db := database.GetDB()
@@ -68,7 +68,20 @@ func TestLocalAWGClientChangesApplyCommittedPeerSet(t *testing.T) {
 			if _, found := peers.Lookup(netip.MustParseAddr("10.8.1.2")); !found {
 				t.Fatal("initial peer absent")
 			}
-			if mode == "update" {
+			if mode == "add" {
+				priv, pub, err := wgutil.GenerateWireguardKeypair()
+				if err != nil {
+					t.Fatal(err)
+				}
+				added := model.Client{Email: "added-awg@example.test", Enable: true, PrivateKey: priv, PublicKey: pub, AllowedIPs: []string{"10.8.1.4/32"}}
+				payload, err := json.Marshal(map[string]any{"clients": []model.Client{added}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := clientSvc.AddInboundClient(&InboundService{}, &model.Inbound{Id: ib.Id, Settings: string(payload)}); err != nil {
+					t.Fatal(err)
+				}
+			} else if mode == "update" {
 				updated := clients[0]
 				updated.Enable = false
 				payload, err := json.Marshal(map[string]any{"clients": []model.Client{updated}})
@@ -98,8 +111,13 @@ func TestLocalAWGClientChangesApplyCommittedPeerSet(t *testing.T) {
 			if !ok {
 				t.Fatal("remaining peer interface stopped")
 			}
-			if _, found := peers.Lookup(netip.MustParseAddr("10.8.1.2")); found {
-				t.Fatal("removed peer still active")
+			if _, found := peers.Lookup(netip.MustParseAddr("10.8.1.2")); found != (mode == "add") {
+				t.Fatalf("initial peer presence = %v, mode = %s", found, mode)
+			}
+			if mode == "add" {
+				if _, found := peers.Lookup(netip.MustParseAddr("10.8.1.4")); !found {
+					t.Fatal("new peer not applied after commit")
+				}
 			}
 			if _, found := peers.Lookup(netip.MustParseAddr("10.8.1.3")); !found {
 				t.Fatal("unrelated peer removed")

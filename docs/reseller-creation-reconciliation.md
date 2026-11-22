@@ -762,3 +762,12 @@ accounting has drained. TUIC and AmneziaWG immediate-apply helpers still log
 and suppress application failures, leaving periodic reconciliation as their
 backstop; PPP shutdown and residual child/session lifetime likewise need further
 verification. These paths must not be treated as quota-release barriers.
+
+The client-add transaction now applies local PPP and AmneziaWG changes after
+commit, and marks a remote node dirty if its add was attempted but the local
+transaction fails or has an uncertain commit. A remote inbound update no longer
+implicitly creates a new inbound when resolving the original tag fails: an
+absent tag or an inconclusive node response requires separate reconciliation.
+This deliberately favors safety over automatic upsert and can leave a node
+pending until the missing configuration is investigated. Dirty state does not
+prove the remote add was undone or the accounting history reconciled.

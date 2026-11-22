@@ -12,7 +12,7 @@ import (
 )
 
 func TestRemoteRemovalDoesNotHideResolutionErrors(t *testing.T) {
-	for _, op := range []string{"user", "inbound"} {
+	for _, op := range []string{"user", "inbound", "update"} {
 		for _, scenario := range []string{"transport", "http", "missing", "canceled"} {
 			t.Run(op+"/"+scenario, func(t *testing.T) {
 				old := remoteHTTPClient
@@ -34,13 +34,16 @@ func TestRemoteRemovalDoesNotHideResolutionErrors(t *testing.T) {
 				r := NewRemote(&model.Node{Id: 1, Name: "node", Scheme: "https", Address: "example.com", Port: 443, ApiToken: "token"})
 				ib := &model.Inbound{Tag: "missing"}
 				var err error
-				if op == "user" {
+				switch op {
+				case "user":
 					err = r.DeleteUser(context.Background(), ib, "user@example.test")
-				} else {
+				case "inbound":
 					err = r.DelInbound(context.Background(), ib)
+				case "update":
+					err = r.UpdateInbound(context.Background(), ib, ib)
 				}
 				if err == nil {
-					t.Fatal("unresolved remote removal reported success")
+					t.Fatal("unresolved remote mutation reported success")
 				}
 				if scenario == "canceled" && !errors.Is(err, context.Canceled) {
 					t.Fatalf("cancellation lost: %v", err)

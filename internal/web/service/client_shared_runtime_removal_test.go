@@ -734,3 +734,56 @@ func TestSetInboundEnablePlanFailurePreservesPersistedState(t *testing.T) {
 		t.Fatalf("failed toggle changed persisted state: %+v err=%v", persisted, err)
 	}
 }
+
+func TestRemoteClientAddSaveFailureMarksNodeDirty(t *testing.T) {
+	setupConflictDB(t)
+	db := database.GetDB()
+	requests := make(chan string, 2)
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		requests <- req.URL.Path
+		if req.URL.Path == "/panel/api/inbounds/list" {
+			_, _ = w.Write([]byte(`{"success":true,"obj":[{"id":7,"tag":"remote-add"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"success":true}`))
+	}))
+	defer remote.Close()
+	host, portText, err := net.SplitHostPort(remote.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := model.Node{Name: "remote-add", Scheme: "http", Address: host, Port: port, ApiToken: "test-token", Enable: true, Status: "online", AllowPrivateAddress: true}
+	if err := db.Create(&node).Error; err != nil {
+		t.Fatal(err)
+	}
+	ib := model.Inbound{UserId: 1, Port: 19189, Protocol: model.VLESS, Tag: "remote-add", NodeID: &node.Id, Settings: `{"clients":[]}`}
+	if err := db.Create(&ib).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("CREATE TRIGGER reject_remote_add BEFORE UPDATE ON inbounds BEGIN SELECT RAISE(ABORT, 'injected failure'); END").Error; err != nil {
+		t.Fatal(err)
+	}
+	old := runtime.GetManager()
+	runtime.SetManager(runtime.NewManager(runtime.LocalDeps{APIPort: func() int { return 0 }}))
+	t.Cleanup(func() { runtime.SetManager(old) })
+	payload := &model.Inbound{Id: ib.Id, Settings: `{"clients":[{"email":"remote-add@example.test","id":"a17e367c-2074-4d3e-aaeb-fbef5dfde7e7","enable":true}]}`}
+	_, err = (&ClientService{}).AddInboundClient(&InboundService{}, payload)
+	if err == nil {
+		t.Fatal("failed save reported success")
+	}
+	if len(requests) != 2 || <-requests != "/panel/api/inbounds/list" || <-requests != "/panel/api/clients/add" {
+		t.Fatal("remote add was not attempted")
+	}
+	var savedNode model.Node
+	if err := db.First(&savedNode, node.Id).Error; err != nil || !savedNode.ConfigDirty {
+		t.Fatalf("remote divergence not marked dirty: node=%+v err=%v", savedNode, err)
+	}
+	var saved model.Inbound
+	if err := db.First(&saved, ib.Id).Error; err != nil || saved.Settings != ib.Settings {
+		t.Fatalf("inbound not rolled back: %+v err=%v", saved, err)
+	}
+}

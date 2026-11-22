@@ -299,7 +299,10 @@ func (r *Remote) DelInbound(ctx context.Context, ib *model.Inbound) error {
 func (r *Remote) UpdateInbound(ctx context.Context, oldIb, newIb *model.Inbound) error {
 	id, err := r.resolveRemoteID(ctx, oldIb.Tag)
 	if err != nil {
-		return r.AddInbound(ctx, newIb)
+		// Resolution may fail because of authorization, network failures or
+		// a stale/incomplete list. Never turn an uncertain update into a new
+		// inbound with potentially duplicated credentials and accounting.
+		return fmt.Errorf("remote UpdateInbound: resolve tag %q: %w", oldIb.Tag, err)
 	}
 	payload := wireInbound(newIb)
 	if _, err := r.do(ctx, http.MethodPost, "panel/api/inbounds/update/"+strconv.Itoa(id), payload); err != nil {
