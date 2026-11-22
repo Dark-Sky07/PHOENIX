@@ -58,6 +58,40 @@ func TestVerifiedGlobalEndpointBindsBearerTokenAndRegisteredSender(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+	challenge, err := trafficprotocol.NewReadinessChallenge("sender-one", "g", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	challengeBody, err := json.Marshal(challenge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readiness := func(token string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/panel/api/inbounds/trafficReadiness", bytes.NewReader(challengeBody))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w
+	}
+	if w := readiness(two.Token); w.Code != http.StatusForbidden {
+		t.Fatalf("wrong peer status %d", w.Code)
+	}
+	w := readiness(one.Token)
+	var ready struct {
+		Success bool                              `json:"success"`
+		Obj     trafficprotocol.ReadinessResponse `json:"obj"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &ready); err != nil || w.Code != http.StatusOK || !ready.Success {
+		t.Fatalf("readiness failed: %d %s %v", w.Code, w.Body.String(), err)
+	}
+	if err := trafficprotocol.VerifyReadiness(challenge, ready.Obj, key, 0); err != nil {
+		t.Fatal(err)
+	}
+	var before model.TrafficSnapshotReceiver
+	if err := db.First(&before, "id = ?", fmt.Sprintf("api-token:%d", one.Id)).Error; err != nil || before.LastSequence != 0 {
+		t.Fatalf("readiness mutated state: %+v %v", before, err)
+	}
 	e, err := trafficprotocol.Sign(trafficprotocol.Envelope{Version: trafficprotocol.Version, Sender: "sender-one", Generation: "g", Sequence: 1, Snapshot: payload}, key)
 	if err != nil {
 		t.Fatal(err)

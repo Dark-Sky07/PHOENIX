@@ -3878,6 +3878,83 @@
         }
       }
     },
+    "/panel/api/inbounds/trafficReadiness": {
+      "post": {
+        "tags": [
+          "Inbounds"
+        ],
+        "summary": "Experimental authenticated readiness challenge for an already registered global snapshot receiver. Does not activate a sender or attest reconciliation.",
+        "operationId": "post_panel_api_inbounds_trafficReadiness",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "version": {
+                    "type": "integer",
+                    "description": "Protocol version, currently 1."
+                  },
+                  "sender": {
+                    "type": "string",
+                    "description": "Registered sender identity."
+                  },
+                  "generation": {
+                    "type": "string",
+                    "description": "Registered generation."
+                  },
+                  "nonce": {
+                    "type": "string",
+                    "description": "Base64 unpredictable 32-byte challenge."
+                  },
+                  "mac": {
+                    "type": "string",
+                    "description": "Base64 token-derived challenge HMAC."
+                  }
+                },
+                "required": [
+                  "version",
+                  "sender",
+                  "generation",
+                  "nonce",
+                  "mac"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                },
+                "example": {
+                  "success": true,
+                  "obj": {
+                    "challenge": {},
+                    "lastSequence": 0,
+                    "mac": "base64"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/panel/api/inbounds/pushVerifiedClientTraffics": {
       "post": {
         "tags": [

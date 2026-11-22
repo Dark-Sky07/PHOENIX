@@ -487,6 +487,32 @@ func (r *Remote) PushGlobalClientTraffics(ctx context.Context, masterGuid string
 	return err
 }
 
+// CheckTrafficReadiness verifies an online proof for a separately provisioned
+// sender and receiver. It has no side effects and does not switch modes or
+// attest reconciliation. Callers must retain their own durable sender state.
+func (r *Remote) CheckTrafficReadiness(ctx context.Context, sender, generation string, senderSequence uint64) error {
+	if r.node.Scheme != "https" || (r.node.TlsVerifyMode != "" && r.node.TlsVerifyMode != "verify") {
+		return errors.New("traffic readiness requires HTTPS with standard certificate verification")
+	}
+	key, err := trafficprotocol.KeyFromAPIToken(r.node.ApiToken)
+	if err != nil {
+		return err
+	}
+	challenge, err := trafficprotocol.NewReadinessChallenge(sender, generation, key)
+	if err != nil {
+		return err
+	}
+	env, err := r.do(ctx, http.MethodPost, "panel/api/inbounds/trafficReadiness", challenge)
+	if err != nil {
+		return err
+	}
+	var response trafficprotocol.ReadinessResponse
+	if err := json.Unmarshal(env.Obj, &response); err != nil {
+		return err
+	}
+	return trafficprotocol.VerifyReadiness(challenge, response, key, senderSequence)
+}
+
 // PushVerifiedGlobalClientTraffics sends an already captured and reserved
 // snapshot without falling back to the legacy endpoint. The remote transport
 // uses standard certificate verification; HTTP and insecure/custom TLS modes

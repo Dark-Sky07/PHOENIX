@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -49,5 +50,46 @@ func TestVerifiedTrafficSenderNeverFallsBack(t *testing.T) {
 	r.node.TlsVerifyMode = "skip"
 	if err := r.PushVerifiedGlobalClientTraffics(context.Background(), &envelope); err == nil || calls != 1 {
 		t.Fatal("unverified TLS was used")
+	}
+}
+
+func TestTrafficReadinessVerifiesRemoteProofAndRequiresTLS(t *testing.T) {
+	token := "0123456789012345678901234567890123456789"
+	key, err := trafficprotocol.KeyFromAPIToken(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	old := remoteHTTPClient
+	remoteHTTPClient = &http.Client{Transport: verifiedTestTransport(func(req *http.Request) (*http.Response, error) {
+		calls++
+		if req.URL.Path != "/panel/api/inbounds/trafficReadiness" || req.Header.Get("Authorization") != "Bearer "+token {
+			t.Errorf("unexpected request %s", req.URL.Path)
+		}
+		var challenge trafficprotocol.ReadinessChallenge
+		if err := json.NewDecoder(req.Body).Decode(&challenge); err != nil {
+			t.Fatal(err)
+		}
+		proof, err := trafficprotocol.AnswerReadiness(challenge, key, trafficprotocol.Expected{Sender: "master", Generation: "epoch", LastSequence: 3})
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := json.Marshal(map[string]any{"success": true, "obj": proof})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(string(body))), Header: make(http.Header)}, nil
+	})}
+	t.Cleanup(func() { remoteHTTPClient = old })
+	r := NewRemote(&model.Node{Scheme: "https", Address: "example.com", Port: 443, ApiToken: token, TlsVerifyMode: "verify"})
+	if err := r.CheckTrafficReadiness(context.Background(), "master", "epoch", 3); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.CheckTrafficReadiness(context.Background(), "master", "epoch", 2); err == nil {
+		t.Fatal("receiver ahead accepted")
+	}
+	r.node.TlsVerifyMode = "skip"
+	if err := r.CheckTrafficReadiness(context.Background(), "master", "epoch", 3); err == nil || calls != 2 {
+		t.Fatal("insecure TLS used")
 	}
 }

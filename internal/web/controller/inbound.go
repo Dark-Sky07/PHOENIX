@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
 	"github.com/Dark-Sky07/phoenix/internal/web/middleware"
 	"github.com/Dark-Sky07/phoenix/internal/web/service"
@@ -98,6 +99,7 @@ func (a *InboundController) initRouter(g *gin.RouterGroup) {
 	g.POST("/:id/fallbacks", a.setFallbacks)
 	g.POST("/pushClientTraffics", a.pushClientTraffics)
 	g.POST("/pushVerifiedClientTraffics", a.pushVerifiedClientTraffics)
+	g.POST("/trafficReadiness", a.trafficReadiness)
 }
 
 // getInbounds retrieves the list of inbounds for the logged-in user.
@@ -449,6 +451,47 @@ func (a *InboundController) pushClientTraffics(c *gin.Context) {
 		return
 	}
 	jsonMsg(c, "success", nil)
+}
+
+// trafficReadiness proves that the bearer token is bound to the requested
+// receiver stream. This is diagnostic, not proof of reconciliation or a lock
+// on the receiver state; it never changes accounting or activates a sender.
+func (a *InboundController) trafficReadiness(c *gin.Context) {
+	if !rejectResellerInboundWrite(c) {
+		return
+	}
+	if !c.GetBool("api_authed") {
+		c.AbortWithStatus(http.StatusForbidden)
+		return
+	}
+	tokenID := c.GetInt("api_token_id")
+	token, ok := strings.CutPrefix(c.GetHeader("Authorization"), "Bearer ")
+	if !ok || tokenID <= 0 {
+		c.AbortWithStatus(http.StatusForbidden)
+		return
+	}
+	key, err := trafficprotocol.KeyFromAPIToken(token)
+	if err != nil {
+		c.AbortWithStatus(http.StatusForbidden)
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 4096)
+	var challenge trafficprotocol.ReadinessChallenge
+	if err := c.ShouldBindJSON(&challenge); err != nil {
+		c.AbortWithStatus(http.StatusBadRequest)
+		return
+	}
+	var state model.TrafficSnapshotReceiver
+	if err := database.GetDB().First(&state, "id = ?", "api-token:"+strconv.Itoa(tokenID)).Error; err != nil || state.LastSequence < 0 {
+		c.AbortWithStatus(http.StatusForbidden)
+		return
+	}
+	response, err := trafficprotocol.AnswerReadiness(challenge, key, trafficprotocol.Expected{Sender: state.Sender, Generation: state.Generation, LastSequence: uint64(state.LastSequence)})
+	if err != nil {
+		c.AbortWithStatus(http.StatusForbidden)
+		return
+	}
+	jsonObj(c, response, nil)
 }
 
 // pushVerifiedClientTraffics accepts only bearer-authenticated peers whose

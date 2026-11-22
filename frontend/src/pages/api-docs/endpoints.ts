@@ -208,6 +208,19 @@ export const sections: readonly Section[] = [
       },
       {
         method: 'POST',
+        path: '/panel/api/inbounds/trafficReadiness',
+        summary: 'Experimental authenticated readiness challenge for an already registered global snapshot receiver. Does not activate a sender or attest reconciliation.',
+        params: [
+          { name: 'version', in: 'body (json)', type: 'integer', desc: 'Protocol version, currently 1.' },
+          { name: 'sender', in: 'body (json)', type: 'string', desc: 'Registered sender identity.' },
+          { name: 'generation', in: 'body (json)', type: 'string', desc: 'Registered generation.' },
+          { name: 'nonce', in: 'body (json)', type: 'string', desc: 'Base64 unpredictable 32-byte challenge.' },
+          { name: 'mac', in: 'body (json)', type: 'string', desc: 'Base64 token-derived challenge HMAC.' },
+        ],
+        response: '{\n  "success": true,\n  "obj": { "challenge": {}, "lastSequence": 0, "mac": "base64" }\n}',
+      },
+      {
+        method: 'POST',
         path: '/panel/api/inbounds/pushVerifiedClientTraffics',
         summary: 'Experimental ordered global snapshot receiver. Requires a bearer token bound to a pre-provisioned sender and generation; the current legacy endpoint is not protected by this route.',
         params: [
