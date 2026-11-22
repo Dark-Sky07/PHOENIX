@@ -63,7 +63,9 @@ func TestXrayRemoveUserDoesNotDrainEstablishedVLESS(t *testing.T) {
 			map[string]any{"listen": "127.0.0.1", "port": apiPort, "protocol": "tunnel", "settings": map[string]any{"rewriteAddress": "127.0.0.1"}, "tag": "api"},
 			map[string]any{"listen": "127.0.0.1", "port": userPort, "protocol": "vless", "settings": map[string]any{"clients": []any{map[string]any{"id": userID.String(), "email": "quiescence@example.test"}}, "decryption": "none"}, "tag": "user-in"},
 		},
-		"outbounds": []any{map[string]any{"protocol": "freedom", "settings": map[string]any{}, "tag": "direct"}},
+		// The pinned Xray core blocks private destinations by default for
+		// VLESS. Allow only the local test echo port, not general private access.
+		"outbounds": []any{map[string]any{"protocol": "freedom", "settings": map[string]any{"finalRules": []any{map[string]any{"action": "allow", "network": "tcp", "ip": []string{"127.0.0.1/32"}, "port": strconv.Itoa(echo.Addr().(*net.TCPAddr).Port)}}}, "tag": "direct"}},
 		"routing":   map[string]any{"rules": []any{map[string]any{"type": "field", "inboundTag": []string{"api"}, "outboundTag": "api"}}},
 		"policy":    map[string]any{"levels": map[string]any{"0": map[string]any{"statsUserOnline": true}}}, "stats": map[string]any{},
 	}
