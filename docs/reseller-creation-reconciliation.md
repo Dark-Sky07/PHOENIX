@@ -699,3 +699,13 @@ snapshots, rejects stale callbacks and tracks stream and packet sessions. It
 applies only to the multi-user inbound, not the single-user or relay variants.
 Real TCP and UDP tests and race tests are limited evidence, not a quiescence or
 accounting certificate. This remains test-only and cannot justify quota release.
+
+The experimental VLESS removal now waits (subject to the RPC context deadline)
+for its tracked inbound handler scopes to exit. A timeout returns an error and
+does not restore the removed credential. This is **not** a final accounting
+barrier: the pinned core's `task.Run` may return after one task errors while a
+sibling is still executing, and asynchronous dispatcher work may also outlive an
+inbound handler. `TestXrayTaskRunMayReturnBeforeSiblingCompletes` characterizes
+that behavior. Do not treat handler exit or a stable-looking counter as proof
+that no subsequent counter writes are possible. Other protocols do not have this
+experimental handler wait.

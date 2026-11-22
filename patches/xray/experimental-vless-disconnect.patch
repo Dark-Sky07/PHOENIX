@@ -10,7 +10,7 @@
 @@ -240,0 +246,2 @@
 +	h.userSessionMu.Lock()
 +	defer h.userSessionMu.Unlock()
-@@ -246,2 +253,23 @@
+@@ -246,2 +253,32 @@
 -	h.RemoveReverse(h.validator.GetByEmail(e))
 -	return h.validator.Del(e)
 +	h.userSessionMu.Lock()
@@ -35,8 +35,17 @@
 +	if closeErr != nil {
 +		return errors.New("failed to close removed VLESS user connection").Base(closeErr)
 +	}
++	// Wait for the inbound handlers' tracked scopes, bounded by the caller's
++	// deadline. This is not a drain of asynchronous outbound writers.
++	for _, c := range connections {
++		select {
++		case <-c.done:
++		case <-ctx.Done():
++			return errors.New("timed out waiting for removed VLESS handlers").Base(ctx.Err())
++		}
++	}
 +	return nil
-@@ -525,0 +554,8 @@
+@@ -525,0 +563,8 @@
 +
 +	// Reject a request authenticated before a concurrent removal or credential
 +	// replacement. Track before dispatch so removal cannot miss this connection.
@@ -47,18 +56,23 @@
 +	defer untrack()
 --- /dev/null
 +++ b/proxy/vless/inbound/phoenix_user_sessions.go
-@@ -0,0 +1,43 @@
+@@ -0,0 +1,51 @@
 +package inbound
 +
 +import (
 +	"net"
++	"sync"
 +
 +	"github.com/xtls/xray-core/common/protocol"
 +)
 +
 +// trackedUserConnection holds the exact authenticated transport. It is not
 +// a count of substreams, a persistent epoch, or proof that traffic was flushed.
-+type trackedUserConnection struct{ connection net.Conn }
++type trackedUserConnection struct {
++	connection net.Conn
++	done       chan struct{}
++	once       sync.Once
++}
 +
 +func (h *Handler) trackUserConnection(user *protocol.MemoryUser, conn net.Conn) (func(), bool) {
 +	if user == nil || conn == nil {
@@ -80,20 +94,23 @@
 +	if h.userSessions[user] == nil {
 +		h.userSessions[user] = make(map[*trackedUserConnection]struct{})
 +	}
-+	entry := &trackedUserConnection{connection: conn}
++	entry := &trackedUserConnection{connection: conn, done: make(chan struct{})}
 +	h.userSessions[user][entry] = struct{}{}
 +	return func() {
-+		h.userSessionMu.Lock()
-+		defer h.userSessionMu.Unlock()
-+		delete(h.userSessions[user], entry)
-+		if len(h.userSessions[user]) == 0 {
-+			delete(h.userSessions, user)
-+		}
++		entry.once.Do(func() {
++			h.userSessionMu.Lock()
++			defer h.userSessionMu.Unlock()
++			delete(h.userSessions[user], entry)
++			if len(h.userSessions[user]) == 0 {
++				delete(h.userSessions, user)
++			}
++			close(entry.done)
++		})
 +	}, true
 +}
 --- /dev/null
 +++ b/proxy/vless/inbound/phoenix_user_sessions_test.go
-@@ -0,0 +1,113 @@
+@@ -0,0 +1,146 @@
 +package inbound
 +
 +import (
@@ -144,9 +161,8 @@
 +		t.Fatal("failed tracking b")
 +	}
 +	defer doneB()
-+	if err := h.RemoveUser(context.Background(), "a@test"); err != nil {
-+		t.Fatal(err)
-+	}
++	removed := make(chan error, 1)
++	go func() { removed <- h.RemoveUser(context.Background(), "a@test") }()
 +	_ = aPeer.SetReadDeadline(time.Now().Add(time.Second))
 +	var buf [1]byte
 +	if _, err := aPeer.Read(buf[:]); err != io.EOF {
@@ -155,6 +171,17 @@
 +	_ = secondPeer.SetReadDeadline(time.Now().Add(time.Second))
 +	if _, err := secondPeer.Read(buf[:]); err != io.EOF {
 +		t.Fatalf("second removed session remains open: %v", err)
++	}
++	// Closing transports alone must not complete the handler-scope barrier.
++	select {
++	case err := <-removed:
++		t.Fatalf("removal completed before handlers returned: %v", err)
++	default:
++	}
++	doneA()
++	doneSecond()
++	if err := <-removed; err != nil {
++		t.Fatal(err)
 +	}
 +	_ = bPeer.SetReadDeadline(time.Now().Add(25 * time.Millisecond))
 +	if _, err := bPeer.Read(buf[:]); err == nil {
@@ -205,5 +232,28 @@
 +		}
 +		_ = check.Close()
 +		_ = checkPeer.Close()
++	}
++}
++
++func TestPhoenixVlessBarrierTimeoutDoesNotClaimSuccess(t *testing.T) {
++	h := &Handler{validator: new(vless.MemoryValidator)}
++	u := testPhoenixUser("timeout@test")
++	if err := h.AddUser(context.Background(), u); err != nil {
++		t.Fatal(err)
++	}
++	conn, peer := net.Pipe()
++	defer peer.Close()
++	done, ok := h.trackUserConnection(u, conn)
++	if !ok {
++		t.Fatal("track failed")
++	}
++	defer done()
++	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
++	defer cancel()
++	if err := h.RemoveUser(ctx, u.Email); err == nil {
++		t.Fatal("unfinished handler reported as removed")
++	}
++	if h.validator.GetByEmail(u.Email) != nil {
++		t.Fatal("user was re-enabled after timeout")
 +	}
 +}
