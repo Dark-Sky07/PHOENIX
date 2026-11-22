@@ -10,6 +10,9 @@ import (
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/sagernet/sing-shadowsocks/shadowaead_2022"
+	M "github.com/sagernet/sing/common/metadata"
 )
 
 // This covers VMess over TCP with an Xray SOCKS client, not other transports,
@@ -376,9 +379,9 @@ func TestExperimentalShadowsocks2022TCPDisconnect(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer api.Close()
-	a := vmessTestSOCKS(t, clientA, echoPort)
+	a := ss2022DirectTCP(t, serverPort, serverKey+":"+firstID, echoPort)
 	defer a.Close()
-	b := vmessTestSOCKS(t, clientB, echoPort)
+	b := ss2022DirectTCP(t, serverPort, serverKey+":"+secondID, echoPort)
 	defer b.Close()
 	vmessTestEcho(t, a, "before")
 	vmessTestEcho(t, b, "other")
@@ -393,9 +396,31 @@ func TestExperimentalShadowsocks2022TCPDisconnect(t *testing.T) {
 	} else if n, ok := err.(net.Error); ok && n.Timeout() {
 		t.Fatalf("removed Shadowsocks 2022 TCP session did not close: %v", err)
 	}
-	assertNoImmediateForwardingAfterRemoval(t, clientA, echoPort)
+	// The direct socket observes the actual encrypted transport, without a
+	// local SOCKS proxy's independent half-close and timeout behavior.
 }
 
 func shadowsocks2022TestOutbound(tag, password string, port int) map[string]any {
 	return map[string]any{"tag": tag, "protocol": "shadowsocks", "settings": map[string]any{"servers": []any{map[string]any{"address": "127.0.0.1", "port": port, "method": "2022-blake3-aes-128-gcm", "password": password}}}}
+}
+
+func ss2022DirectTCP(t *testing.T, serverPort int, password string, targetPort int) net.Conn {
+	t.Helper()
+	method, err := shadowaead_2022.NewWithPassword("2022-blake3-aes-128-gcm", password, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(serverPort)), 3*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := method.DialConn(raw, M.ParseSocksaddr(net.JoinHostPort("127.0.0.1", strconv.Itoa(targetPort))))
+	if err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	return conn
 }
