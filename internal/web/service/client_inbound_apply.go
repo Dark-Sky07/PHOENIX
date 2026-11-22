@@ -872,7 +872,10 @@ func (s *ClientService) UpdateInboundClient(inboundSvc *InboundService, data *mo
 						needRestart = true
 					}
 				}
-				if clients[0].Enable {
+				// A failed removal can mean the old handler or its sessions are
+				// still active (including a retry returning not-found after a
+				// timeout). Do not install a new credential before recovery.
+				if clients[0].Enable && !needRestart {
 					cipher := ""
 					if oldInbound.Protocol == "shadowsocks" {
 						cipher = oldSettings["method"].(string)

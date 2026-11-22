@@ -258,3 +258,71 @@ func TestBulkDetachRemovesNormalizedEmailAndPreservesRestartOnSaveFailure(t *tes
 		})
 	}
 }
+
+func TestUpdateInboundClientDoesNotReaddAfterUncertainRemoval(t *testing.T) {
+	for _, code := range []codes.Code{codes.NotFound, codes.DeadlineExceeded, codes.Unavailable, codes.OK} {
+		t.Run(code.String(), func(t *testing.T) {
+			setupBulkDB(t)
+			original := []model.Client{{Email: "update-remove@example.test", ID: "a17e367c-2074-4d3e-aaeb-fbef5dfde7e7", Enable: true}}
+			ib := mkInbound(t, 22213, model.VLESS, clientsSettings(t, original))
+			svc := &ClientService{}
+			if err := svc.SyncInbound(nil, ib.Id, original); err != nil {
+				t.Fatal(err)
+			}
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			server := grpc.NewServer()
+			recorder := &recordingRemovalServer{requests: make(chan *command.AlterInboundRequest, 3)}
+			if code != codes.OK {
+				recorder.failure = status.Error(code, "User update-remove@example.test not found.")
+			}
+			command.RegisterHandlerServiceServer(server, recorder)
+			go func() { _ = server.Serve(listener) }()
+			defer server.Stop()
+			old := runtime.GetManager()
+			runtime.SetManager(runtime.NewManager(runtime.LocalDeps{APIPort: func() int { return listener.Addr().(*net.TCPAddr).Port }}))
+			t.Cleanup(func() { runtime.SetManager(old) })
+			updated := []model.Client{{Email: original[0].Email, ID: "c2a615fe-086d-4fc8-9d5f-97cda3dceee0", Enable: true}}
+			restart, err := svc.UpdateInboundClient(&InboundService{}, &model.Inbound{Id: ib.Id, Settings: clientsSettings(t, updated)}, original[0].Email)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if restart != (code != codes.OK) {
+				t.Fatalf("restart=%v, code=%v", restart, code)
+			}
+			var first *command.AlterInboundRequest
+			select {
+			case first = <-recorder.requests:
+			default:
+				t.Fatal("runtime removal was not attempted")
+			}
+			op, err := first.Operation.GetInstance()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := op.(*command.RemoveUserOperation); !ok {
+				t.Fatalf("first operation is not removal: %v", op)
+			}
+			select {
+			case second := <-recorder.requests:
+				if code != codes.OK {
+					t.Fatalf("add attempted after uncertain removal: %v", second)
+				}
+				op, err := second.Operation.GetInstance()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, ok := op.(*command.AddUserOperation); !ok {
+					t.Fatalf("second operation is not add: %v", op)
+				}
+			default:
+				if code == codes.OK {
+					t.Fatal("successful removal did not update runtime")
+				}
+			}
+		})
+	}
+}
