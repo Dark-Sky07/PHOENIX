@@ -389,6 +389,11 @@ func TestExperimentalShadowsocks2022TCPDisconnect(t *testing.T) {
 		t.Fatal(err)
 	}
 	vmessTestEcho(t, b, "alive")
+	// Removing the first user changes the list positions. A fresh second-user
+	// authentication must still resolve to the original second user.
+	freshB := ss2022DirectTCP(t, serverPort, serverKey+":"+secondID, echoPort)
+	defer freshB.Close()
+	vmessTestEcho(t, freshB, "fresh-second")
 	_ = a.SetReadDeadline(time.Now().Add(3 * time.Second))
 	var buf [1]byte
 	if _, err := a.Read(buf[:]); err == nil {

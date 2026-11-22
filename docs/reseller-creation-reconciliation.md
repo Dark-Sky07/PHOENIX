@@ -676,8 +676,8 @@ packets; removing a user from the validator alone does not revoke that cached
 UDP flow. The experimental patch also tracks those UDP associations. Its bounded
 real-packet test checks an established and a fresh association for the removed
 user and verifies another user's traffic continues. It does not establish
-quiescence of in-flight packets or counter writers. Shadowsocks 2022 is not
-covered.
+quiescence of in-flight packets or counter writers. Shadowsocks 2022 has a
+separate experimental multi-user patch, described below.
 
 For every experimental protocol, closing a transport is not equivalent to
 waiting for forwarding goroutines and counter writers to finish: late buffered
@@ -691,11 +691,11 @@ The VMess and Shadowsocks SOCKS reconnection tests observe no forwarded data for
 five seconds after removal. They do not prove immediate closure of an invalid
 new connection: Xray's anti-probing behavior can intentionally delay rejection.
 
-Shadowsocks 2022 multi-user is a separate implementation using sing's service
-and integer user indices. In the pinned source the service authenticates an
-index and the callback indexes the mutable `users` slice, while removal swaps
-and truncates that slice. A correct implementation must establish a stable
-identity across service updates and callback entry as well as close both stream
-and packet sessions. Treating an index as a stable user identity across updates
-is unsafe; this path remains outside the prototype and cannot justify quota
-release.
+Shadowsocks 2022 multi-user uses sing's authentication service. In the pinned
+source the service authenticates an index and the callback indexes a mutable
+`users` slice; removal changes that slice. The experimental patch uses stable
+user object identities, synchronizes the dependency's authentication-map
+snapshots, rejects stale callbacks and tracks stream and packet sessions. It
+applies only to the multi-user inbound, not the single-user or relay variants.
+Real TCP and UDP tests and race tests are limited evidence, not a quiescence or
+accounting certificate. This remains test-only and cannot justify quota release.
