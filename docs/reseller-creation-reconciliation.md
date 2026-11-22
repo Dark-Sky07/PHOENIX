@@ -593,3 +593,12 @@ omission, not an exit between polls, undetected resets that overtake the old
 value, incomplete runtime coverage, or usage never reported to the panel.
 Client-quota checks now consult poll, journal and incident barriers even for
 unlimited resellers, rather than returning early before these checks.
+
+For a missing or decreasing user counter, the collector retains the shared
+pre-poll marker even if writing both incident stores fails. The marker has no
+batch receipt, blocks participating allocations on other hosts using the same
+database, and is not automatically cleared by receipt recovery. Investigate
+and reconcile it together with any incident or fallback evidence; do not simply
+delete it. This protects only after the pre-poll marker committed and while the
+shared database and cooperating checks remain trustworthy. It does not capture
+unpolled bytes or fence operations already in progress.

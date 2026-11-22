@@ -2,6 +2,7 @@ package job
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -315,5 +316,52 @@ func TestJournaledXrayBatchKeepsAllocationLockedUntilDatabaseCommit(t *testing.T
 	}
 	if err := db.First(&counter, counter.Id).Error; err != nil || counter.Up != 123 {
 		t.Fatalf("allocation resumed without committed usage: %+v %v", counter, err)
+	}
+}
+
+func TestCounterIncidentRetainsCrossHostPollBarrier(t *testing.T) {
+	for _, pollErr := range []error{
+		&xray.UserTrafficCounterMissing{Email: "alice@example.test", Direction: "uplink", Previous: 10},
+		&xray.UserTrafficCounterDecrease{Email: "alice@example.test", Direction: "downlink", Previous: 10, Observed: 1},
+	} {
+		t.Run(fmt.Sprintf("%T", pollErr), func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("XUI_DB_FOLDER", dir)
+			if err := database.InitDB(filepath.Join(dir, "test.db")); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = database.CloseDB() })
+			j := NewXrayTrafficJob()
+			polls := 0
+			poll := func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
+				polls++
+				return nil, nil, fmt.Errorf("injected incident persistence failure: %w", pollErr)
+			}
+			capture := func([]*xray.ClientTraffic) ([]service.XrayTrafficIdentity, error) {
+				t.Fatal("capture after failed poll")
+				return nil, nil
+			}
+			if err := j.prepareXrayBatch(poll, capture); err == nil {
+				t.Fatal("counter incident accepted")
+			}
+			var markers []model.XrayTrafficInFlight
+			if err := database.GetDB().Find(&markers).Error; err != nil || len(markers) != 1 {
+				t.Fatalf("cross-host marker missing: %+v %v", markers, err)
+			}
+			if unlock, err := service.LockResellerAllocation(); err == nil {
+				unlock()
+				t.Fatal("incident marker failed to block allocations")
+			}
+			if err := j.prepareXrayBatch(poll, capture); err == nil || polls != 1 {
+				t.Fatalf("new poll bypassed barrier: %d %v", polls, err)
+			}
+			if err := service.RecoverCommittedXrayPollMarkers(); err != nil {
+				t.Fatal(err)
+			}
+			var remaining int64
+			if err := database.GetDB().Model(&model.XrayTrafficInFlight{}).Count(&remaining).Error; err != nil || remaining != 1 {
+				t.Fatalf("uncommitted marker cleared: %d %v", remaining, err)
+			}
+		})
 	}
 }

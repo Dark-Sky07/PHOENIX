@@ -1430,7 +1430,7 @@ func (t *xrayTrafficState) persistPendingCounterMissing(db *gorm.DB) error {
 		return nil
 	}
 	if transferEmailKey(missing.Email) == "" || missing.Previous < 0 || (missing.Direction != "uplink" && missing.Direction != "downlink") {
-		return errors.New("invalid missing Xray counter evidence")
+		return fmt.Errorf("%w; invalid missing Xray counter evidence", missing)
 	}
 	incident := model.ResellerNodeCounterIncident{NodeId: 0, Email: transferEmailKey(missing.Email), Direction: "missing-" + missing.Direction}
 	if missing.Direction == "uplink" {

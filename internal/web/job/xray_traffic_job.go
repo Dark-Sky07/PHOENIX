@@ -2,6 +2,7 @@ package job
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -152,6 +153,16 @@ func (j *XrayTrafficJob) prepareXrayBatch(
 		}
 		traffic, clients, err := poll()
 		if err != nil {
+			var decrease *xray.UserTrafficCounterDecrease
+			var missing *xray.UserTrafficCounterMissing
+			if errors.As(err, &decrease) || errors.As(err, &missing) {
+				// The observation may have failed to persist in both the DB
+				// incident and the local fallback. Keep the already-committed
+				// poll marker as a cross-host barrier; it has no receipt and
+				// requires manual evidence-based reconciliation.
+				unlock()
+				return fmt.Errorf("Xray counter incident; poll marker %s retained: %w", id, err)
+			}
 			// GetXrayTraffic does not advance its baseline on an error. If
 			// clearing the marker fails, leave it to block future mutations.
 			clearErr := service.FinishXrayPoll(id)
