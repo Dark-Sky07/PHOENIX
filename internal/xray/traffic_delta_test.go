@@ -160,3 +160,30 @@ func TestGetTrafficRejectsUserCounterDecreaseWithoutAdvancingAnyBaseline(t *test
 		t.Fatalf("partial baseline advance: %+v", api.StatsLastValues)
 	}
 }
+
+func TestGetTrafficRejectsDisappearingUserCounterWithoutAdvancing(t *testing.T) {
+	const up = "user>>>alice@example.test>>>traffic>>>uplink"
+	const down = "user>>>alice@example.test>>>traffic>>>downlink"
+	fake := &fakeTrafficStatsClient{}
+	var client statsService.StatsServiceClient = fake
+	api := &XrayAPI{grpcClient: &grpc.ClientConn{}, StatsServiceClient: &client}
+	api.ResetTrafficBaseline(true)
+	fake.response = &statsService.QueryStatsResponse{Stat: []*statsService.Stat{{Name: up, Value: 100}, {Name: down, Value: 50}}}
+	if _, _, err := api.GetTraffic(); err != nil {
+		t.Fatal(err)
+	}
+	fake.response.Stat = []*statsService.Stat{{Name: up, Value: 120}}
+	_, _, err := api.GetTraffic()
+	var missing *UserTrafficCounterMissing
+	if !errors.As(err, &missing) || missing.Email != "alice@example.test" || missing.Direction != "downlink" || missing.Previous != 50 {
+		t.Fatalf("missing=%+v err=%v", missing, err)
+	}
+	if api.StatsLastValues[up] != 100 || api.StatsLastValues[down] != 50 {
+		t.Fatalf("advanced baselines: %+v", api.StatsLastValues)
+	}
+	fake.response.Stat = []*statsService.Stat{{Name: up, Value: 130}, {Name: down, Value: 60}}
+	_, rows, err := api.GetTraffic()
+	if err != nil || len(rows) != 1 || rows[0].Up != 30 || rows[0].Down != 10 {
+		t.Fatalf("retry %+v %v", rows, err)
+	}
+}

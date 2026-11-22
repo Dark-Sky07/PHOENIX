@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -562,6 +563,17 @@ func (e *UserTrafficCounterDecrease) Error() string {
 	return fmt.Sprintf("Xray user %q %s counter decreased from %d to %d; reconciliation required", e.Email, e.Direction, e.Previous, e.Observed)
 }
 
+// UserTrafficCounterMissing records a previously observed counter omitted by
+// the runtime. Absence does not establish a zero reading or final usage.
+type UserTrafficCounterMissing struct {
+	Email, Direction string
+	Previous         int64
+}
+
+func (e *UserTrafficCounterMissing) Error() string {
+	return fmt.Sprintf("Xray user %q %s counter missing after previous reading %d; reconciliation required", e.Email, e.Direction, e.Previous)
+}
+
 // GetTraffic queries traffic statistics from the Xray core without resetting counters.
 func (x *XrayAPI) GetTraffic() ([]*Traffic, []*ClientTraffic, error) {
 	if x.grpcClient == nil {
@@ -613,6 +625,20 @@ func (x *XrayAPI) GetTraffic() ([]*Traffic, []*ClientTraffic, error) {
 				return nil, nil, &UserTrafficCounterDecrease{Email: match[1], Direction: match[2], Previous: previous, Observed: stat.Value}
 			}
 		}
+	}
+	// A previously observed user counter disappearing is not a reading of
+	// zero. Preserve every baseline and surface the uncertainty for review.
+	missing := make([]string, 0)
+	for name := range x.StatsLastValues {
+		if _, ok := seen[name]; !ok && clientTrafficRegex.MatchString(name) {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		name := missing[0]
+		match := clientTrafficRegex.FindStringSubmatch(name)
+		return nil, nil, &UserTrafficCounterMissing{Email: match[1], Direction: match[2], Previous: x.StatsLastValues[name]}
 	}
 	for _, stat := range resp.GetStat() {
 		tagMatches := trafficRegex.FindStringSubmatch(stat.Name)

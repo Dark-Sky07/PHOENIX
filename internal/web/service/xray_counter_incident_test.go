@@ -324,3 +324,28 @@ func TestManualStopWithoutManagedCoreDoesNotInventIncident(t *testing.T) {
 		t.Fatalf("unexpected incident count=%d err=%v", count, err)
 	}
 }
+
+func TestMissingXrayCounterIsPersistedWithoutInventedObservation(t *testing.T) {
+	reseller, client := seedResellerRenewal(t)
+	db := database.GetDB()
+	state := xrayTrafficState{pendingCounterMissing: &xray.UserTrafficCounterMissing{Email: client.Email, Direction: "downlink", Previous: 180}}
+	if err := state.persistPendingCounterMissing(nil); err == nil || state.pendingCounterMissing == nil {
+		t.Fatal("failed persistence discarded missing observation")
+	}
+	if err := state.persistPendingCounterMissing(db); err == nil || state.pendingCounterMissing != nil {
+		t.Fatal("missing observation was not retained durably")
+	}
+	var incident model.ResellerNodeCounterIncident
+	if err := db.Where("node_id = ? AND email = ?", 0, client.Email).First(&incident).Error; err != nil {
+		t.Fatal(err)
+	}
+	if incident.Direction != "missing-downlink" || incident.PreviousDown != 180 || incident.ObservedDown != 0 {
+		t.Fatalf("incorrect missing evidence: %+v", incident)
+	}
+	if err := (&ResellerService{}).CheckClientQuota(&reseller, 1, 1); err == nil {
+		t.Fatal("missing counter did not block allocation")
+	}
+	if err := checkLocalXrayCounterIncidents(db); err == nil {
+		t.Fatal("missing counter did not block collection")
+	}
+}

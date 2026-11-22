@@ -579,3 +579,17 @@ The copy is not an online consistency or runtime fencing protocol. Stop writes
 and runtimes, preserve and reconcile on-disk journals/fallbacks separately,
 and take consistent backups before migration; an incomplete copy, concurrent
 writer, prior data loss, or database rollback cannot be corrected by this change.
+
+### Disappearing Xray counters
+
+If a previously observed Xray user uplink or downlink counter disappears from a
+later complete stats response, the poll is rejected without advancing any
+baselines. A persistent incident and local fallback retain the prior reading;
+`missing-uplink` / `missing-downlink` means no new reading was observed, not
+that the observed value was zero. Collection and participating quota changes
+remain blocked for manual review even if the counter reappears. Legitimate user
+removals can also trigger this conservative barrier. This detects an observed
+omission, not an exit between polls, undetected resets that overtake the old
+value, incomplete runtime coverage, or usage never reported to the panel.
+Client-quota checks now consult poll, journal and incident barriers even for
+unlimited resellers, rather than returning early before these checks.

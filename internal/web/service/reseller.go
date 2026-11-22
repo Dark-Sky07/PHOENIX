@@ -1884,6 +1884,17 @@ func (s *ResellerService) CheckClientQuota(reseller *model.Reseller, adding int,
 	if addBytes < 0 {
 		return errors.New("traffic allocation cannot be negative")
 	}
+	// Client quota is also an allocation decision, even for unlimited
+	// resellers. Do not bypass in-flight poll, journal or incident barriers.
+	if err := pendingXrayPollError(database.GetDB()); err != nil {
+		return err
+	}
+	if err := pendingXrayJournalError(); err != nil {
+		return err
+	}
+	if err := validateResellerNodeBaselines(database.GetDB(), reseller.Id); err != nil {
+		return err
+	}
 	if err := rejectResellerUnverifiedNodes(database.GetDB(), reseller.Id); err != nil {
 		return err
 	}

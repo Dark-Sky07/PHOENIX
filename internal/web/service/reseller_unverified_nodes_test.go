@@ -76,3 +76,29 @@ func TestResellerRemoteGuardRejectsOrphanedEvidence(t *testing.T) {
 		t.Fatalf("local-only client blocked after removing test evidence: %v", err)
 	}
 }
+
+func TestClientQuotaRejectsPendingPollAndCoreExitEvenWhenUnlimited(t *testing.T) {
+	reseller, _ := seedResellerRenewal(t)
+	reseller.ClientLimit, reseller.TrafficLimit = 0, 0
+	svc := &ResellerService{}
+	if err := svc.CheckClientQuota(&reseller, 1, 1); err != nil {
+		t.Fatalf("clean local account rejected: %v", err)
+	}
+	if err := BeginXrayPoll("client-quota-pending"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.CheckClientQuota(&reseller, 1, 1); err == nil {
+		t.Fatal("unlimited client quota bypassed pending poll")
+	}
+	if err := FinishXrayPoll("client-quota-pending"); err != nil {
+		t.Fatal(err)
+	}
+	// Use the DB incident without a local fallback, as if another host had
+	// persisted it. No missing usage is guessed.
+	if err := database.GetDB().Create(&model.ResellerNodeCounterIncident{NodeId: 0, Direction: "core-exited"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.CheckClientQuota(&reseller, 1, 1); err == nil {
+		t.Fatal("unlimited client quota bypassed core-exit incident")
+	}
+}

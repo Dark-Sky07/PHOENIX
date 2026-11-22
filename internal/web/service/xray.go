@@ -61,6 +61,7 @@ type xrayTrafficState struct {
 	api                    xray.XrayAPI
 	process                *xray.Process
 	pendingCounterDecrease *xray.UserTrafficCounterDecrease
+	pendingCounterMissing  *xray.UserTrafficCounterMissing
 }
 
 // observeProcess is called under lock. The only assignment to p starts a new
@@ -970,6 +971,9 @@ func (s *XrayService) GetXrayTraffic() ([]*xray.Traffic, []*xray.ClientTraffic, 
 	if trafficState.pendingCounterDecrease != nil {
 		return nil, nil, trafficState.persistPendingCounterDecrease(database.GetDB())
 	}
+	if trafficState.pendingCounterMissing != nil {
+		return nil, nil, trafficState.persistPendingCounterMissing(database.GetDB())
+	}
 	current := p
 	if current == nil || !current.IsRunning() {
 		err := errors.New("xray is not running")
@@ -992,6 +996,12 @@ func (s *XrayService) GetXrayTraffic() ([]*xray.Traffic, []*xray.ClientTraffic, 
 			trafficState.pendingCounterDecrease = decrease
 			xrayCounterIncidentPending.Store(true)
 			return nil, nil, trafficState.persistPendingCounterDecrease(database.GetDB())
+		}
+		var missing *xray.UserTrafficCounterMissing
+		if errors.As(err, &missing) {
+			trafficState.pendingCounterMissing = missing
+			xrayCounterIncidentPending.Store(true)
+			return nil, nil, trafficState.persistPendingCounterMissing(database.GetDB())
 		}
 		logger.Debug("Failed to fetch Xray traffic:", err)
 		return nil, nil, err
@@ -1410,6 +1420,39 @@ func (t *xrayTrafficState) persistPendingCounterDecrease(db *gorm.DB) error {
 		return fmt.Errorf("%w; fallback failed: %v; database incident retained", decrease, diskErr)
 	}
 	return decrease
+}
+
+// A missing counter has no observed value. Direction distinguishes this from
+// an actual zero; fields named Observed* are not evidence for missing values.
+func (t *xrayTrafficState) persistPendingCounterMissing(db *gorm.DB) error {
+	missing := t.pendingCounterMissing
+	if missing == nil {
+		return nil
+	}
+	if transferEmailKey(missing.Email) == "" || missing.Previous < 0 || (missing.Direction != "uplink" && missing.Direction != "downlink") {
+		return errors.New("invalid missing Xray counter evidence")
+	}
+	incident := model.ResellerNodeCounterIncident{NodeId: 0, Email: transferEmailKey(missing.Email), Direction: "missing-" + missing.Direction}
+	if missing.Direction == "uplink" {
+		incident.PreviousUp = missing.Previous
+	} else {
+		incident.PreviousDown = missing.Previous
+	}
+	diskErr := storeCounterIncidentFallback(incident)
+	if db == nil {
+		return fmt.Errorf("%w; database unavailable; fallback error: %v", missing, diskErr)
+	}
+	if err := db.Clauses(clause.OnConflict{DoNothing: true}).Create(&incident).Error; err != nil {
+		return fmt.Errorf("%w; database incident write failed: %v; fallback error: %v", missing, err, diskErr)
+	}
+	t.pendingCounterMissing = nil
+	if t == &trafficState {
+		xrayCounterIncidentPending.Store(false)
+	}
+	if diskErr != nil {
+		return fmt.Errorf("%w; fallback failed: %v; database incident retained", missing, diskErr)
+	}
+	return missing
 }
 
 // These markers persist until evidence-based reconciliation. An unobserved
