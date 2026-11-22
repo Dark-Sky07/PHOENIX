@@ -683,3 +683,7 @@ quota is released. A process crash during that process and node rollback also
 need fail-closed recovery. Until an authenticated, versioned capability with
 these properties is implemented and deployed, the current upstream release
 and reconciliation guards remain unchanged.
+
+The VMess and Shadowsocks SOCKS reconnection tests observe no forwarded data for
+five seconds after removal. They do not prove immediate closure of an invalid
+new connection: Xray's anti-probing behavior can intentionally delay rejection.
