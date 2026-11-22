@@ -136,7 +136,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          if go test -mod=mod ./internal/xray -run '^(TestXrayRemoveUserDoesNotDrainEstablished(VLESS|Trojan)|TestExperimentalVMessDisconnect|TestExperimentalShadowsocksTCPDisconnect)$' -count=1 -v 2>&1 | tee /tmp/experimental-xray-test.log; then exit 0; fi
+          if go test -mod=mod ./internal/xray -run '^(TestXrayRemoveUserDoesNotDrainEstablished(VLESS|Trojan)|TestExperimentalVMessDisconnect|TestExperimentalShadowsocksTCPDisconnect|TestExperimentalShadowsocksUDPDisconnect)$' -count=1 -v 2>&1 | tee /tmp/experimental-xray-test.log; then exit 0; fi
           python3 - <<'PYLOG'
           from pathlib import Path
           output = Path('/tmp/experimental-xray-test.log').read_text(errors='replace')[-4000:]

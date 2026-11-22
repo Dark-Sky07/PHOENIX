@@ -29,10 +29,30 @@
 +		}
 +	}
 +	if closeErr != nil {
-+		return errors.New("failed to close removed Shadowsocks TCP connection").Base(closeErr)
++		return errors.New("failed to close removed Shadowsocks connection").Base(closeErr)
 +	}
 +	return nil
-@@ -216,0 +243,7 @@
+@@ -134,0 +161 @@
++	var untrack func()
+@@ -142 +169 @@
+-		for _, payload := range mpayload {
++		for i, payload := range mpayload {
+@@ -171,0 +199,14 @@
++			// Register the cached UDP association on the first decoded packet.
++			// A removed or replaced account must not be admitted even if the
++			// packet decoded concurrently with removal.
++			if untrack == nil {
++				var ok bool
++				untrack, ok = s.trackUserConnection(request.User, conn)
++				if !ok {
++					data.Release()
++					buf.ReleaseMulti(mpayload[i+1:])
++					return errors.New("Shadowsocks user removed during UDP authentication")
++				}
++				defer untrack()
++			}
++
+@@ -216,0 +258,7 @@
 +	// This covers TCP only; packet sessions are not registered here.
 +	untrack, ok := s.trackUserConnection(request.User, conn)
 +	if !ok {
@@ -201,5 +221,40 @@
 +		}
 +		_ = check.Close()
 +		_ = checkPeer.Close()
++	}
++}
+--- a/app/proxyman/inbound/worker.go
++++ b/app/proxyman/inbound/worker.go
+@@ -368 +368 @@
+-				w.removeConn(id)
++				w.removeConn(id, conn)
+@@ -374 +374 @@
+-func (w *udpWorker) removeConn(id connID) {
++func (w *udpWorker) removeConn(id connID, conn *udpConn) {
+@@ -376 +376,5 @@
+-	delete(w.activeConn, id)
++	// A closed association can be replaced for the same endpoint before the
++	// old handler returns. Never delete the replacement.
++	if w.activeConn[id] == conn {
++		delete(w.activeConn, id)
++	}
+--- /dev/null
++++ b/app/proxyman/inbound/phoenix_udp_session_test.go
+@@ -0,0 +1,17 @@
++package inbound
++
++import "testing"
++
++func TestPhoenixUDPRemovalDoesNotDeleteReplacement(t *testing.T) {
++	id := connID{}
++	old, current := &udpConn{}, &udpConn{}
++	w := &udpWorker{activeConn: map[connID]*udpConn{id: current}}
++	w.removeConn(id, old)
++	if w.activeConn[id] != current {
++		t.Fatal("old UDP handler removed its replacement")
++	}
++	w.removeConn(id, current)
++	if _, ok := w.activeConn[id]; ok {
++		t.Fatal("current UDP association was not removed")
 +	}
 +}

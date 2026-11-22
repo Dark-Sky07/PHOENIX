@@ -21,6 +21,6 @@ patch --batch --forward --fuzz=0 -p1 < "$root/patches/xray/experimental-trojan-d
 patch --batch --forward --fuzz=0 -p1 < "$root/patches/xray/experimental-vmess-disconnect.patch"
 patch --batch --forward --fuzz=0 -p1 < "$root/patches/xray/experimental-shadowsocks-tcp-disconnect.patch"
 if [ "${PHOENIX_XRAY_RUN_TESTS:-0}" = 1 ]; then
-  GOWORK=off go test -mod=mod -race ./proxy/vless/inbound ./proxy/trojan ./proxy/vmess/inbound ./proxy/shadowsocks -run '^TestPhoenix(Vless|Trojan|Vmess|Shadowsocks)' -count=1
+  GOWORK=off go test -mod=mod -race ./proxy/vless/inbound ./proxy/trojan ./proxy/vmess/inbound ./proxy/shadowsocks ./app/proxyman/inbound -run '^TestPhoenix(Vless|Trojan|Vmess|Shadowsocks|UDP)' -count=1
 fi
 GOWORK=off go build -mod=mod -o "$output" ./main
