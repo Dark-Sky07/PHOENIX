@@ -80,6 +80,21 @@ jobs:
           print(f'::error title=go-test-output::{output}')
           PYLOG
           exit 1
+  xray-quiescence-characterization:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build the pinned Xray core
+        run: go build -mod=mod -o /tmp/phoenix-xray github.com/xtls/xray-core/main
+      - name: Characterize established VLESS connection after user removal
+        env:
+          XRAY_E2E_BINARY: /tmp/phoenix-xray
+        run: go test -mod=mod ./internal/xray -run '^TestXrayRemoveUserDoesNotDrainEstablishedVLESS$' -count=1 -v
+
   codegen:
     runs-on: ubuntu-latest
     steps:

@@ -633,3 +633,10 @@ connections and nonparticipating writers throughout final capture and commit,
 and fails closed across crashes and remote nodes; its guarantees must be tested
 against real cores. Externally running cores and already missing usage also need
 independent evidence. The affected-node/no-node-shutdown policy remains intact.
+
+The CI characterization test starts the pinned Xray binary, opens a real
+VLESS TCP stream through it to a local echo server, removes the user over the
+API, and tests whether that existing stream still carries data. It characterizes
+one pinned core and protocol, not all release binaries or protocols. In
+particular, it is a regression warning against assuming RemoveUser drains
+sessions; it is not a quiescence implementation.
