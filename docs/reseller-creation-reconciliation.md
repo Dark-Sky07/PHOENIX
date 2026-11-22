@@ -717,3 +717,26 @@ wait clears the fence and does not prevent a later re-add; restart, other
 inbounds, other nodes, direct writers and untracked asynchronous traffic are
 outside this mechanism. This is neither a durable reconciliation fence nor an
 operator recovery mechanism and cannot authorize final quota release.
+
+The pinned dispatcher's `DispatchLink` has a separate late-accounting hazard:
+it wraps the uplink in `buf.TimeoutWrapperReader`. When a timed read returns
+without data, its underlying read goroutine can subsequently finish and leave
+bytes buffered inside the wrapper; the counter is incremented only when a
+later read consumes those bytes. `TestXrayTimedOutReadCanAccountBytesLater`
+reproduces this ordering deterministically against the pinned code with the race
+detector. Consequently even a completed underlying read and unchanged counter
+are not enough to establish final consumption. Any future drain design must
+include pending wrapper reads and account for their buffered bytes, without
+counting them twice or dropping them. This test does not cover every dispatcher,
+transport, or writer, and does not authorize quota release.
+
+The test-only Xray build now applies
+`patches/xray/experimental-timeout-accounting.patch`: an asynchronous timed
+read accounts its returned bytes when the underlying read completes, even if
+no caller later consumes the retained buffer. Both timed and ordinary later
+reads avoid adding those bytes again. Race tests exercise abandoned reads,
+errors carrying bytes and later consumption. This changes the timing of
+accounting for bytes already read and needs further protocol and production
+review. It neither waits for a pending read to finish nor proves that a final
+poll or commit is complete, so it remains experimental and does not affect
+release binaries or lift any quota guard.

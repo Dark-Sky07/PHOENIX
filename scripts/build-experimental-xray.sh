@@ -16,6 +16,7 @@ trap 'rm -rf "$work"' EXIT
 cp -R "$source_dir"/. "$work"/
 chmod -R u+w "$work"
 cd "$work"
+patch --batch --forward --fuzz=0 -p1 < "$root/patches/xray/experimental-timeout-accounting.patch"
 patch --batch --forward --fuzz=0 -p1 < "$root/patches/xray/experimental-vless-disconnect.patch"
 patch --batch --forward --fuzz=0 -p1 < "$root/patches/xray/experimental-trojan-disconnect.patch"
 patch --batch --forward --fuzz=0 -p1 < "$root/patches/xray/experimental-vmess-disconnect.patch"
@@ -32,7 +33,7 @@ chmod -R u+w "$work/phoenix-sing-shadowsocks"
 go mod edit -replace github.com/sagernet/sing-shadowsocks=./phoenix-sing-shadowsocks
 patch --batch --forward --fuzz=0 -p1 < "$root/patches/xray/experimental-shadowsocks-2022-disconnect.patch"
 if [ "${PHOENIX_XRAY_RUN_TESTS:-0}" = 1 ]; then
-  GOWORK=off go test -mod=mod -race ./proxy/vless/inbound ./proxy/trojan ./proxy/vmess/inbound ./proxy/shadowsocks ./proxy/shadowsocks_2022 ./app/proxyman/inbound -run '^TestPhoenix(Vless|Trojan|Vmess|Shadowsocks|SS2022|UDP)' -count=1
+  GOWORK=off go test -mod=mod -race ./proxy/vless/inbound ./proxy/trojan ./proxy/vmess/inbound ./proxy/shadowsocks ./proxy/shadowsocks_2022 ./app/proxyman/inbound ./common/buf -run '^TestPhoenix(Vless|Trojan|Vmess|Shadowsocks|SS2022|UDP|Timeout)' -count=1
 fi
 if [ "${PHOENIX_XRAY_RACE_BINARY:-0}" = 1 ]; then
   GOWORK=off go build -race -mod=mod -o "$output" ./main

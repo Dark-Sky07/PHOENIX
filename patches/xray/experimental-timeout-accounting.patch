@@ -1,0 +1,118 @@
+--- a/common/buf/io.go
++++ b/common/buf/io.go
+@@ -43,3 +42,0 @@
+-		if r.Counter != nil {
+-			r.Counter.Add(int64(r.mb.Len()))
+-		}
+@@ -59,0 +57,6 @@
++			// Account bytes when the asynchronous read completes, not when a
++			// later caller happens to consume its retained buffer. This still
++			// does not wait for pending reads or certify final accounting.
++			if r.Counter != nil {
++				r.Counter.Add(int64(r.mb.Len()))
++			}
+@@ -71,3 +73,0 @@
+-		if r.Counter != nil {
+-			r.Counter.Add(int64(r.mb.Len()))
+-		}
+--- /dev/null
++++ b/common/buf/phoenix_timeout_accounting_test.go
+@@ -0,0 +1,98 @@
++package buf
++
++import (
++	"errors"
++	"sync/atomic"
++	"testing"
++	"time"
++)
++
++type phoenixDelayedReader struct {
++	release <-chan struct{}
++	err     error
++}
++
++func (r *phoenixDelayedReader) ReadMultiBuffer() (MultiBuffer, error) {
++	<-r.release
++	return MergeBytes(nil, []byte("late-data")), r.err
++}
++
++type phoenixCounter struct {
++	value atomic.Int64
++	added chan struct{}
++}
++
++func (c *phoenixCounter) Value() int64      { return c.value.Load() }
++func (c *phoenixCounter) Set(v int64) int64 { return c.value.Swap(v) }
++func (c *phoenixCounter) Add(v int64) int64 {
++	before := c.value.Add(v) - v
++	select {
++	case c.added <- struct{}{}:
++	default:
++	}
++	return before
++}
++
++// A timed-out caller may never come back to consume the pending result. Count
++// as soon as the underlying read ends, then do not count the retained result a
++// second time if the caller does return. This is not a pending-read barrier.
++func TestPhoenixTimeoutReaderAccountsAbandonedReadsOnce(t *testing.T) {
++	for _, readErr := range []error{nil, errors.New("injected read error")} {
++		for _, consumeTimed := range []bool{false, true} {
++			name := "success"
++			if readErr != nil {
++				name = "error-with-bytes"
++			}
++			if consumeTimed {
++				name += "-timed-consume"
++			}
++			t.Run(name, func(t *testing.T) {
++				release := make(chan struct{})
++				counter := &phoenixCounter{added: make(chan struct{}, 2)}
++				reader := &TimeoutWrapperReader{Reader: &phoenixDelayedReader{release: release, err: readErr}, Counter: counter}
++				mb, err := reader.ReadMultiBufferTimeout(10 * time.Millisecond)
++				if err != nil || len(mb) != 0 || counter.Value() != 0 {
++					t.Fatalf("unexpected result before read completion: %v %v %d", mb, err, counter.Value())
++				}
++				close(release)
++				select {
++				case <-counter.added:
++				case <-time.After(time.Second):
++					t.Fatal("completed read was not accounted without a second read")
++				}
++				if counter.Value() != int64(len("late-data")) {
++					t.Fatalf("unexpected counter: %d", counter.Value())
++				}
++				if consumeTimed {
++					mb, err = reader.ReadMultiBufferTimeout(time.Second)
++				} else {
++					mb, err = reader.ReadMultiBuffer()
++				}
++				defer ReleaseMulti(mb)
++				if !errors.Is(err, readErr) || counter.Value() != int64(len("late-data")) {
++					t.Fatalf("late read was lost or counted twice: %v %d", err, counter.Value())
++				}
++			})
++		}
++	}
++}
++
++func TestPhoenixTimeoutReaderAccountsImmediateAndOrdinaryReads(t *testing.T) {
++	for _, timed := range []bool{false, true} {
++		release := make(chan struct{})
++		close(release)
++		counter := &phoenixCounter{added: make(chan struct{}, 2)}
++		reader := &TimeoutWrapperReader{Reader: &phoenixDelayedReader{release: release}, Counter: counter}
++		var mb MultiBuffer
++		var err error
++		if timed {
++			mb, err = reader.ReadMultiBufferTimeout(time.Second)
++		} else {
++			mb, err = reader.ReadMultiBuffer()
++		}
++		if err != nil || counter.Value() != int64(len("late-data")) {
++			t.Fatalf("timed=%v err=%v counter=%d", timed, err, counter.Value())
++		}
++		ReleaseMulti(mb)
++	}
++}
