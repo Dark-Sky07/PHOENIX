@@ -38,3 +38,41 @@ func TestResellerRemoteInboundBlocksQuotaEvenWithoutClients(t *testing.T) {
 		t.Fatal("database error treated as clear")
 	}
 }
+
+func TestResellerRemoteGuardRejectsOrphanedEvidence(t *testing.T) {
+	reseller, client := seedResellerRenewal(t)
+	db := database.GetDB()
+	if err := rejectResellerUnverifiedNodes(db, reseller.Id); err != nil {
+		t.Fatalf("local-only client blocked: %v", err)
+	}
+	if err := db.Create(&model.ResellerInbound{ResellerId: reseller.Id, InboundId: 999991}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectResellerUnverifiedNodes(db, reseller.Id); err == nil {
+		t.Fatal("orphaned assignment accepted")
+	}
+	if err := db.Where("reseller_id = ?", reseller.Id).Delete(&model.ResellerInbound{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&model.ClientInbound{ClientId: client.Id, InboundId: 999992}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectResellerUnverifiedNodes(db, reseller.Id); err == nil {
+		t.Fatal("orphaned client link accepted")
+	}
+	if err := db.Where("client_id = ? AND inbound_id = ?", client.Id, 999992).Delete(&model.ClientInbound{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&model.NodeClientTraffic{NodeId: 73, Email: "  RENEW@example.test ", Up: 5}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectResellerUnverifiedNodes(db, reseller.Id); err == nil {
+		t.Fatal("orphaned remote baseline accepted")
+	}
+	if err := db.Where("node_id = ?", 73).Delete(&model.NodeClientTraffic{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectResellerUnverifiedNodes(db, reseller.Id); err != nil {
+		t.Fatalf("local-only client blocked after removing test evidence: %v", err)
+	}
+}

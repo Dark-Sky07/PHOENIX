@@ -153,3 +153,39 @@ func TestNormalizeInboundClientSubId_FillsMissingAndPreservesExisting(t *testing
 		t.Fatalf("expected one InboundClientSubIdFix history row, got %d", historyCount)
 	}
 }
+
+func TestPruneOrphanedClientInboundsPreservesResellerEvidence(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XUI_DB_FOLDER", dir)
+	if err := InitDB(filepath.Join(dir, "x-ui.db")); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = CloseDB() })
+	owned := model.ClientRecord{Email: "owned@example.test", UUID: "owned-prune-test"}
+	other := model.ClientRecord{Email: "other@example.test", UUID: "other-prune-test"}
+	for _, v := range []any{&owned, &other} {
+		if err := db.Create(v).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Create(&model.ResellerClient{ResellerId: 17, Email: "  OWNED@example.test "}).Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []int{owned.Id, other.Id} {
+		if err := db.Create(&model.ClientInbound{ClientId: id, InboundId: 99991}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := pruneOrphanedClientInbounds(); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		id   int
+		want int64
+	}{{owned.Id, 1}, {other.Id, 0}} {
+		var count int64
+		if err := db.Model(&model.ClientInbound{}).Where("client_id = ? AND inbound_id = ?", tc.id, 99991).Count(&count).Error; err != nil || count != tc.want {
+			t.Fatalf("client %d: count %d, err %v", tc.id, count, err)
+		}
+	}
+}

@@ -544,3 +544,15 @@ mode, nested nodes, other-admin inbounds, DB backup rollback, cross-host fencing
 and manual reconciliation workflow remain unresolved. The endpoint and the
 manual confirmation do not lift reseller quota blocks or prove that unpolled
 usage is complete. Sequence state must never be reset to clear an error.
+
+### Retaining incomplete remote-association evidence
+
+Participating reseller quota and renewal checks also reject missing inbound
+references and any surviving node traffic baseline for an owned client, even
+when its client-inbound link is missing. Startup orphan cleanup retains links
+for clients still mapped to a reseller so it cannot silently erase that
+warning. These checks may block a genuinely retired remote association until
+manual review. Do not delete a baseline or link merely to unblock quota; use
+runtime and accounting evidence to reconcile first. This cannot detect an
+association or ownership mapping that was already erased, fence external
+writers, or recover bytes never recorded by a runtime.
