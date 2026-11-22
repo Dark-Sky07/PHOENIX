@@ -47,6 +47,16 @@ func TestTrafficPeerProvisioningRequiresSuperadminSession(t *testing.T) {
 	api := r.Group("/panel/api")
 	api.Use((&APIController{}).checkAPIAuth)
 	NewNodeController(api.Group("/nodes"))
+	for _, path := range []string{"/panel/api/nodes/nodeSnapshot/producer", "/panel/api/nodes/nodeSnapshot/receiver/1"} {
+		req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader([]byte(`{"tokenId":1,"sender":"x","generation":"g","reconciled":true}`)))
+		req.Header.Set("Authorization", "Bearer "+token.Token)
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("token provisioned node snapshot at %s: %d", path, w.Code)
+		}
+	}
 	payload, err := json.Marshal(map[string]any{"tokenId": token.Id, "sender": "master", "generation": "generation", "reconciled": true})
 	if err != nil {
 		t.Fatal(err)

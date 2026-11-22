@@ -262,18 +262,38 @@ func (j *NodeTrafficSyncJob) syncOne(mgr *runtime.Manager, n *model.Node, doIpSy
 		j.structural.set()
 	}
 
-	changed, err := withNodeTrafficAllocationLock(func() (bool, error) {
+	verified, err := service.NodeInboundVerificationRequired(n.Id)
+	if err != nil {
+		logger.Warning("node traffic sync: cannot read verification state for", n.Name, ":", err)
+		return
+	}
+	var changed bool
+	if verified {
+		// Do not hold the local allocation lock across a remote request: the
+		// node's producer takes its own lock, so reciprocal syncs can deadlock.
 		ctx, cancel := context.WithTimeout(context.Background(), nodeTrafficSyncRequestTimeout)
-		defer cancel()
-		snap, err := rt.FetchTrafficSnapshot(ctx)
-		if err != nil {
+		envelope, fetchErr := rt.FetchVerifiedNodeSnapshot(ctx)
+		cancel()
+		if fetchErr != nil {
 			j.inboundService.ClearNodeOnlineClients(n.Id)
-			return false, err
+			logger.Warning("node traffic sync: verified fetch for", n.Name, "failed:", fetchErr)
+			return
 		}
-		service.FilterNodeSnapshot(n, snap)
-		_, _, dirty, _, _ := j.nodeService.NodeSyncState(n.Id)
-		return j.inboundService.SetRemoteTraffic(n.Id, snap, dirty)
-	})
+		changed, err = withNodeTrafficAllocationLock(func() (bool, error) { return j.inboundService.SetVerifiedRemoteTraffic(n.Id, *envelope) })
+	} else {
+		changed, err = withNodeTrafficAllocationLock(func() (bool, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), nodeTrafficSyncRequestTimeout)
+			defer cancel()
+			snap, err := rt.FetchTrafficSnapshot(ctx)
+			if err != nil {
+				j.inboundService.ClearNodeOnlineClients(n.Id)
+				return false, err
+			}
+			service.FilterNodeSnapshot(n, snap)
+			_, _, dirty, _, _ := j.nodeService.NodeSyncState(n.Id)
+			return j.inboundService.SetRemoteTraffic(n.Id, snap, dirty)
+		})
+	}
 	if err != nil {
 		logger.Warning("node traffic sync: fetch or merge for", n.Name, "failed:", err)
 		return

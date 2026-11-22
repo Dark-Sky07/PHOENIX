@@ -522,7 +522,21 @@ captures local database traffic without the global overlay, uses a distinct
 node-snapshot key, and reserves its sequence while holding the allocation lock.
 It rejects missing traffic, ambiguous identities, malformed settings, nested
 nodes, and other-admin inbounds rather than signing a partial view. It does not
-poll Xray or establish completeness of historical or unpolled usage. The node
-sender provisioning UI, secure fetching/dispatch, downgrade protection and manual
-reconciliation workflow are not yet implemented; this endpoint does not lift
-reseller quota blocks. Sequence state must never be reset to clear an error.
+poll Xray or establish completeness of historical or unpolled usage. The interactive-superadmin API (not yet the UI) stages a node producer with
+`POST /panel/api/nodes/nodeSnapshot/producer` (`tokenId`, `reconciled: true`)
+and can reread its identity with `GET /panel/api/nodes/nodeSnapshot/producer/:tokenId`.
+Transfer the sender and generation securely to the master. On the master,
+`POST /panel/api/nodes/nodeSnapshot/receiver/:id` (`sender`, `generation`,
+`reconciled: true`) durably requires verified pulls and blocks legacy merges.
+Ensure the node is ready first: this switch is immediate, failed verified
+requests have no fallback, and sync may stop. Full inbound sync and standard
+HTTPS verification are mandatory. Existing sender/generation streams cannot be
+reset or replaced, including after token rotation. The shared receiver table
+requires sender identities to be unique even across global and inbound streams;
+conflicts must be investigated, never bypassed by changing identity. The sync
+job fetches without holding the master's allocation lock and verifies the
+sequence and merges accounting atomically under that lock. Selected-inbound
+mode, nested nodes, other-admin inbounds, DB backup rollback, cross-host fencing,
+and manual reconciliation workflow remain unresolved. The endpoint and the
+manual confirmation do not lift reseller quota blocks or prove that unpolled
+usage is complete. Sequence state must never be reset to clear an error.

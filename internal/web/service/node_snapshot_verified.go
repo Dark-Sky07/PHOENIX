@@ -6,17 +6,52 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
 	"github.com/Dark-Sky07/phoenix/internal/web/runtime"
 	"github.com/Dark-Sky07/phoenix/internal/web/trafficprotocol"
 	"gorm.io/gorm"
 )
 
-// acceptVerifiedNodeTrafficLocked is an integration building block, not yet
-// connected to the node sync job. Caller must hold the allocation lock and run
-// on the traffic writer, with the usual incident barriers. Inbound transport,
-// provisioning, downgrade prevention, migration and reconciliation are not
-// implemented by this function; it must not be used to lift quota guards.
+// NodeInboundVerificationRequired reports durable receiver registration. A
+// read error must never be interpreted as permission to use the legacy path.
+func NodeInboundVerificationRequired(nodeID int) (bool, error) {
+	if nodeID <= 0 {
+		return false, errors.New("invalid node")
+	}
+	var count int64
+	if err := database.GetDB().Model(&model.TrafficSnapshotReceiver{}).Where("id = ?", fmt.Sprintf("node-inbound:%d", nodeID)).Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count != 0, nil
+}
+
+// SetVerifiedRemoteTraffic is called with the allocation lock held, just as
+// SetRemoteTraffic is. Its sequence and accounting commit atomically. It does
+// not prove runtime freshness or justify lifting reseller quota guards.
+func (s *InboundService) SetVerifiedRemoteTraffic(nodeID int, envelope trafficprotocol.Envelope) (bool, error) {
+	var changed bool
+	err := submitTrafficWrite(func() error {
+		if err := persistPendingNodeCounterIncident(database.GetDB(), nodeID); err != nil {
+			return err
+		}
+		if err := diskCounterIncidentError(); err != nil {
+			return err
+		}
+		var inner error
+		changed, inner = s.acceptVerifiedNodeTrafficLocked(nodeID, envelope)
+		var decrease *resellerNodeCounterDecrease
+		if errors.As(inner, &decrease) {
+			rememberNodeCounterDecrease(decrease)
+			return persistPendingNodeCounterIncident(database.GetDB(), nodeID)
+		}
+		return inner
+	})
+	return changed, err
+}
+
+// acceptVerifiedNodeTrafficLocked requires the normal allocation lock and
+// traffic writer. Reconciliation remains an explicit operator responsibility.
 func (s *InboundService) acceptVerifiedNodeTrafficLocked(nodeID int, envelope trafficprotocol.Envelope) (bool, error) {
 	if nodeID <= 0 || len(envelope.Snapshot) == 0 || len(envelope.Snapshot) > trafficprotocol.MaxSnapshotBytes {
 		return false, errors.New("invalid verified node snapshot")
@@ -50,6 +85,18 @@ func (s *InboundService) acceptVerifiedNodeTrafficLocked(nodeID int, envelope tr
 			var decoded []model.Client
 			if string(clients) == "null" || json.Unmarshal(clients, &decoded) != nil {
 				return false, fmt.Errorf("invalid node clients for %q", ib.Tag)
+			}
+			stats := make(map[string]bool, len(ib.ClientStats))
+			for _, stat := range ib.ClientStats {
+				stats[nodeEmailKey(stat.Email)] = true
+			}
+			clientsSeen := make(map[string]bool, len(decoded))
+			for _, client := range decoded {
+				key := nodeEmailKey(client.Email)
+				if key == "" || clientsSeen[key] || !stats[key] {
+					return false, fmt.Errorf("missing or ambiguous node client traffic for %q", ib.Tag)
+				}
+				clientsSeen[key] = true
 			}
 		}
 	}

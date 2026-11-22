@@ -231,6 +231,17 @@ func (s *InboundService) setRemoteTrafficTransaction(nodeID int, snap *runtime.T
 			tx.Rollback()
 		}
 	}()
+	if beforeMerge == nil {
+		// Once a node receiver is provisioned, no legacy call may bypass it,
+		// including stale job state or a caller outside the sync job.
+		var registered int64
+		if err := tx.Model(&model.TrafficSnapshotReceiver{}).Where("id = ?", fmt.Sprintf("node-inbound:%d", nodeID)).Count(&registered).Error; err != nil {
+			return false, err
+		}
+		if registered != 0 {
+			return false, errors.New("legacy node snapshot rejected for registered verified receiver")
+		}
+	}
 	if beforeMerge != nil {
 		if err := beforeMerge(tx); err != nil {
 			return false, err

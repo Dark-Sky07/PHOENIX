@@ -8276,6 +8276,171 @@
         }
       }
     },
+    "/panel/api/nodes/nodeSnapshot/producer": {
+      "post": {
+        "tags": [
+          "Nodes"
+        ],
+        "summary": "Stage a token-bound node snapshot producer. Interactive superadmin only; requires reconciliation confirmation and never resets existing state.",
+        "operationId": "post_panel_api_nodes_nodeSnapshot_producer",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "tokenId": {
+                    "type": "integer",
+                    "description": "Full-scope API token ID on this node."
+                  },
+                  "reconciled": {
+                    "type": "boolean",
+                    "description": "Confirm manual accounting and migration review."
+                  }
+                },
+                "required": [
+                  "tokenId",
+                  "reconciled"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/nodes/nodeSnapshot/producer/{tokenId}": {
+      "get": {
+        "tags": [
+          "Nodes"
+        ],
+        "summary": "Read the existing node snapshot producer identity and generation without revealing a token. Interactive superadmin only.",
+        "operationId": "get_panel_api_nodes_nodeSnapshot_producer_tokenId",
+        "parameters": [
+          {
+            "name": "tokenId",
+            "in": "path",
+            "required": true,
+            "description": "Producer API token ID.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/nodes/nodeSnapshot/receiver/{id}": {
+      "post": {
+        "tags": [
+          "Nodes"
+        ],
+        "summary": "Register a node snapshot receiver and disable legacy sync for this node. Interactive superadmin only; failures do not fall back. Does not lift quota blocks.",
+        "operationId": "post_panel_api_nodes_nodeSnapshot_receiver_id",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Local node ID.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "sender": {
+                    "type": "string",
+                    "description": "Producer GUID transferred securely."
+                  },
+                  "generation": {
+                    "type": "string",
+                    "description": "Producer generation transferred securely."
+                  },
+                  "reconciled": {
+                    "type": "boolean",
+                    "description": "Confirm manual accounting and migration review."
+                  }
+                },
+                "required": [
+                  "sender",
+                  "generation",
+                  "reconciled"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/panel/api/nodes/trafficSnapshot/sender/{id}": {
       "get": {
         "tags": [

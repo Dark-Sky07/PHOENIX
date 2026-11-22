@@ -943,6 +943,32 @@ export const sections: readonly Section[] = [
         response: '{\n  "success": true,\n  "obj": {\n    "webCertFile": "/root/cert/example.com/fullchain.pem",\n    "webKeyFile": "/root/cert/example.com/privkey.pem"\n  }\n}',
       },
       {
+        method: 'POST',
+        path: '/panel/api/nodes/nodeSnapshot/producer',
+        summary: 'Stage a token-bound node snapshot producer. Interactive superadmin only; requires reconciliation confirmation and never resets existing state.',
+        params: [
+          { name: 'tokenId', in: 'body (json)', type: 'integer', desc: 'Full-scope API token ID on this node.' },
+          { name: 'reconciled', in: 'body (json)', type: 'boolean', desc: 'Confirm manual accounting and migration review.' },
+        ],
+      },
+      {
+        method: 'GET',
+        path: '/panel/api/nodes/nodeSnapshot/producer/:tokenId',
+        summary: 'Read the existing node snapshot producer identity and generation without revealing a token. Interactive superadmin only.',
+        params: [{ name: 'tokenId', in: 'path', type: 'integer', desc: 'Producer API token ID.' }],
+      },
+      {
+        method: 'POST',
+        path: '/panel/api/nodes/nodeSnapshot/receiver/:id',
+        summary: 'Register a node snapshot receiver and disable legacy sync for this node. Interactive superadmin only; failures do not fall back. Does not lift quota blocks.',
+        params: [
+          { name: 'id', in: 'path', type: 'integer', desc: 'Local node ID.' },
+          { name: 'sender', in: 'body (json)', type: 'string', desc: 'Producer GUID transferred securely.' },
+          { name: 'generation', in: 'body (json)', type: 'string', desc: 'Producer generation transferred securely.' },
+          { name: 'reconciled', in: 'body (json)', type: 'boolean', desc: 'Confirm manual accounting and migration review.' },
+        ],
+      },
+      {
         method: 'GET',
         path: '/panel/api/nodes/trafficSnapshot/sender/:id',
         summary: 'Read a provisioned sender identity, generation and last reserved sequence. Interactive superadmin session only; no token secret is returned.',

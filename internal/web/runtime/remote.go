@@ -449,6 +449,33 @@ type TrafficSnapshot struct {
 	LastOnlineMap map[string]int64
 }
 
+// FetchVerifiedNodeSnapshot obtains an untrusted envelope; its MAC, sender,
+// generation and sequence must be verified in the accounting transaction.
+// There is deliberately no fallback or redirect on failure.
+func (r *Remote) FetchVerifiedNodeSnapshot(ctx context.Context) (*trafficprotocol.Envelope, error) {
+	if r.node == nil || r.node.Scheme != "https" || (r.node.TlsVerifyMode != "" && r.node.TlsVerifyMode != "verify") {
+		return nil, errors.New("verified node snapshots require HTTPS and standard TLS verification")
+	}
+	if _, err := trafficprotocol.NodeSnapshotKeyFromAPIToken(r.node.ApiToken); err != nil {
+		return nil, err
+	}
+	client := *remoteHTTPClient
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	limit := int64((trafficprotocol.MaxSnapshotBytes+2)/3*4 + 8192)
+	env, err := r.doWithClient(ctx, http.MethodPost, "panel/api/inbounds/verifiedNodeSnapshot", nil, &client, limit)
+	if err != nil {
+		return nil, err
+	}
+	var result trafficprotocol.Envelope
+	if err := json.Unmarshal(env.Obj, &result); err != nil {
+		return nil, err
+	}
+	if len(result.Snapshot) == 0 || len(result.Snapshot) > trafficprotocol.MaxSnapshotBytes {
+		return nil, errors.New("invalid verified node snapshot size")
+	}
+	return &result, nil
+}
+
 func (r *Remote) FetchTrafficSnapshot(ctx context.Context) (*TrafficSnapshot, error) {
 	snap := &TrafficSnapshot{LastOnlineMap: map[string]int64{}}
 

@@ -115,3 +115,24 @@ func TestTrafficReadinessRejectsRedirectAndOversizedResponse(t *testing.T) {
 		t.Fatal("oversized response accepted")
 	}
 }
+
+func TestVerifiedNodeFetchDoesNotFallbackOrFollowRedirect(t *testing.T) {
+	old := remoteHTTPClient
+	calls := 0
+	remoteHTTPClient = &http.Client{Transport: verifiedTestTransport(func(req *http.Request) (*http.Response, error) {
+		calls++
+		if req.URL.Path != "/panel/api/inbounds/verifiedNodeSnapshot" {
+			t.Errorf("unexpected endpoint %s", req.URL.Path)
+		}
+		return &http.Response{StatusCode: http.StatusFound, Header: http.Header{"Location": []string{"http://example.com/legacy"}}, Body: io.NopCloser(strings.NewReader(""))}, nil
+	})}
+	t.Cleanup(func() { remoteHTTPClient = old })
+	r := NewRemote(&model.Node{Scheme: "https", Address: "example.com", Port: 443, ApiToken: "0123456789012345678901234567890123456789"})
+	if _, err := r.FetchVerifiedNodeSnapshot(context.Background()); err == nil || calls != 1 {
+		t.Fatalf("redirect or fallback: calls %d err %v", calls, err)
+	}
+	r.node.Scheme = "http"
+	if _, err := r.FetchVerifiedNodeSnapshot(context.Background()); err == nil || calls != 1 {
+		t.Fatal("insecure transport accepted")
+	}
+}
