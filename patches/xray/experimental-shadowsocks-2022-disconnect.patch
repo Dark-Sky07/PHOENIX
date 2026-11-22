@@ -287,3 +287,87 @@
 +		_ = p.Close()
 +	}
 +}
+--- a/common/singbridge/packet.go
++++ b/common/singbridge/packet.go
+@@ -4,0 +5,2 @@
++	"io"
++	"sync"
+@@ -36,2 +38,4 @@
+-	Dest   net.Destination
+-	cached buf.MultiBuffer
++	Dest    net.Destination
++	cacheMu sync.Mutex
++	cached  buf.MultiBuffer
++	closed  bool
+@@ -51,2 +55,16 @@
+-	if w.cached != nil {
+-		mb, bb := buf.SplitFirst(w.cached)
++	w.cacheMu.Lock()
++	if w.closed {
++		w.cacheMu.Unlock()
++		return M.Socksaddr{}, io.ErrClosedPipe
++	}
++	mb, bb := buf.SplitFirst(w.cached)
++	w.cached = mb
++	w.cacheMu.Unlock()
++	if bb == nil {
++		var readErr error
++		mb, readErr = w.ReadMultiBuffer()
++		if readErr != nil {
++			buf.ReleaseMulti(mb)
++			return M.Socksaddr{}, readErr
++		}
++		mb, bb = buf.SplitFirst(mb)
+@@ -54,10 +72,5 @@
+-			w.cached = nil
+-		} else {
+-			buffer.Write(bb.Bytes())
+-			w.cached = mb
+-			var destination net.Destination
+-			if bb.UDP != nil {
+-				destination = *bb.UDP
+-			} else {
+-				destination = w.Dest
+-			}
++			return M.Socksaddr{}, io.EOF
++		}
++		w.cacheMu.Lock()
++		if w.closed {
++			w.cacheMu.Unlock()
+@@ -65 +78,2 @@
+-			return ToSocksaddr(destination), nil
++			buf.ReleaseMulti(mb)
++			return M.Socksaddr{}, io.ErrClosedPipe
+@@ -66,0 +81,2 @@
++		w.cached = mb
++		w.cacheMu.Unlock()
+@@ -68,15 +84,4 @@
+-	mb, err := w.ReadMultiBuffer()
+-	nb, bb := buf.SplitFirst(mb)
+-	if bb == nil {
+-		return M.Socksaddr{}, nil
+-	} else {
+-		buffer.Write(bb.Bytes())
+-		w.cached = nb
+-		var destination net.Destination
+-		if bb.UDP != nil {
+-			destination = *bb.UDP
+-		} else {
+-			destination = w.Dest
+-		}
+-		bb.Release()
+-		return ToSocksaddr(destination), nil
++	buffer.Write(bb.Bytes())
++	destination := w.Dest
++	if bb.UDP != nil {
++		destination = *bb.UDP
+@@ -83,0 +89,2 @@
++	bb.Release()
++	return ToSocksaddr(destination), nil
+@@ -104,0 +112,2 @@
++	w.cacheMu.Lock()
++	w.closed = true
+@@ -105,0 +115,3 @@
++	w.cached = nil
++	w.cacheMu.Unlock()
++	common.Interrupt(w.Reader)
