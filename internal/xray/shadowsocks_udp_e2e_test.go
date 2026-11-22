@@ -20,8 +20,8 @@ import (
 // observation, not a counter flush, transport-wide proof, or quiescence fence.
 func TestExperimentalShadowsocksUDPDisconnect(t *testing.T) {
 	bin := os.Getenv("XRAY_E2E_BINARY")
-	if bin == "" || os.Getenv("XRAY_EXPECT_EXPERIMENTAL_DRAIN") != "1" {
-		t.Skip("experimental Xray required")
+	if bin == "" {
+		t.Skip("set XRAY_E2E_BINARY to an Xray binary")
 	}
 	echo, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
@@ -90,7 +90,9 @@ func TestExperimentalShadowsocksUDPDisconnect(t *testing.T) {
 		t.Fatal(err)
 	}
 	ssUDPExchange(t, b, second, echoPort, "alive", true)
-	ssUDPExchange(t, a, first, echoPort, "removed", false)
+	// The upstream core keeps using the cached user in the existing UDP
+	// association; the experimental patch should close that association.
+	ssUDPExchange(t, a, first, echoPort, "removed", os.Getenv("XRAY_EXPECT_EXPERIMENTAL_DRAIN") != "1")
 	fresh, err := net.Dial("udp", net.JoinHostPort("127.0.0.1", strconv.Itoa(userPort)))
 	if err != nil {
 		t.Fatal(err)

@@ -670,11 +670,14 @@ and neither is enabled in release or quota reconciliation.
 
 The experimental build also includes VMess and legacy AEAD Shadowsocks TCP
 patches. CI exercises each with a real Xray SOCKS client and two user streams,
-as well as handler registration/removal race tests. The Shadowsocks patch does
-**not** cover UDP or Shadowsocks 2022. In particular, the legacy Shadowsocks UDP
+as well as handler registration/removal race tests. The legacy Shadowsocks UDP
 handler caches an authenticated `inbound.User` and uses it for subsequent
 packets; removing a user from the validator alone does not revoke that cached
-UDP flow. Do not interpret TCP test success as UDP revocation.
+UDP flow. The experimental patch also tracks those UDP associations. Its bounded
+real-packet test checks an established and a fresh association for the removed
+user and verifies another user's traffic continues. It does not establish
+quiescence of in-flight packets or counter writers. Shadowsocks 2022 is not
+covered.
 
 For every experimental protocol, closing a transport is not equivalent to
 waiting for forwarding goroutines and counter writers to finish: late buffered
@@ -687,3 +690,12 @@ and reconciliation guards remain unchanged.
 The VMess and Shadowsocks SOCKS reconnection tests observe no forwarded data for
 five seconds after removal. They do not prove immediate closure of an invalid
 new connection: Xray's anti-probing behavior can intentionally delay rejection.
+
+Shadowsocks 2022 multi-user is a separate implementation using sing's service
+and integer user indices. In the pinned source the service authenticates an
+index and the callback indexes the mutable `users` slice, while removal swaps
+and truncates that slice. A correct implementation must establish a stable
+identity across service updates and callback entry as well as close both stream
+and packet sessions. Treating an index as a stable user identity across updates
+is unsafe; this path remains outside the prototype and cannot justify quota
+release.
