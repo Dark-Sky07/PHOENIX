@@ -602,3 +602,10 @@ and reconcile it together with any incident or fallback evidence; do not simply
 delete it. This protects only after the pre-poll marker committed and while the
 shared database and cooperating checks remain trustworthy. It does not capture
 unpolled bytes or fence operations already in progress.
+
+Node snapshot processing now refuses to sweep a reseller's surviving node
+baseline when its client link has disappeared. A second check prevents cleanup
+from deleting an owned client and its baselines across all nodes when the final
+link disappears during synchronization. These checks preserve evidence for
+review, not proof that the remote runtime is inactive; already-erased ownership
+or baseline records remain outside their coverage.

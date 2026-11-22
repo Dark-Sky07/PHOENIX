@@ -57,6 +57,24 @@ func validateNodeResellerSnapshot(tx *gorm.DB, nodeID int, snap *runtime.Traffic
 		}
 		attachedKeys[link.InboundID][nodeEmailKey(link.Email)] = true
 	}
+	// A detached or missing client link cannot prove the node stopped using a
+	// previously reported reseller identity. In particular, snapshot cleanup
+	// must not delete the only surviving node baseline and thereby hide the
+	// remote association from quota checks.
+	var orphaned int64
+	if err := tx.Table("node_client_traffics AS b").
+		Joins("JOIN reseller_clients rc ON LOWER(TRIM(rc.email)) = LOWER(TRIM(b.email))").
+		Where("b.node_id = ?", nodeID).
+		Where(`NOT EXISTS (SELECT 1 FROM clients c
+			JOIN client_inbounds ci ON ci.client_id = c.id
+			JOIN inbounds i ON i.id = ci.inbound_id
+			WHERE i.node_id = b.node_id AND LOWER(TRIM(c.email)) = LOWER(TRIM(b.email)))`).
+		Count(&orphaned).Error; err != nil {
+		return err
+	}
+	if orphaned > 0 {
+		return fmt.Errorf("node %d has detached reseller traffic evidence; manual reconciliation required", nodeID)
+	}
 	if err := rejectNewNodeResellerAssociations(tx, snap, tagToCentral, attachedKeys); err != nil {
 		return err
 	}

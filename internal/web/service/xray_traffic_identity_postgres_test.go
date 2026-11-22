@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
+	"github.com/Dark-Sky07/phoenix/internal/web/runtime"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -195,7 +196,7 @@ func TestResellerRemoteGuardOrphanedEvidencePostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	if err := db.AutoMigrate(&model.ClientRecord{}, &model.ResellerClient{}, &model.ResellerInbound{}, &model.Inbound{}, &model.ClientInbound{}, &model.NodeClientTraffic{}); err != nil {
+	if err := db.AutoMigrate(&model.ClientRecord{}, &model.ResellerClient{}, &model.ResellerInbound{}, &model.Inbound{}, &model.ClientInbound{}, &model.NodeClientTraffic{}, &model.ResellerNodeCounterIncident{}); err != nil {
 		t.Fatal(err)
 	}
 	tx := db.Begin()
@@ -237,5 +238,8 @@ func TestResellerRemoteGuardOrphanedEvidencePostgres(t *testing.T) {
 	}
 	if err := rejectResellerUnverifiedNodes(tx, reseller); err == nil {
 		t.Fatal("orphaned baseline accepted")
+	}
+	if err := validateNodeResellerSnapshot(tx, 999999, &runtime.TrafficSnapshot{Inbounds: []*model.Inbound{}}, map[string]*model.Inbound{}, false); err == nil {
+		t.Fatal("node snapshot accepted orphaned reseller baseline")
 	}
 }

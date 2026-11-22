@@ -876,6 +876,16 @@ func (s *InboundService) setRemoteTrafficTransaction(nodeID int, snap *runtime.T
 			if attachmentCount > 0 {
 				continue
 			}
+			// A missing link is not proof that a reseller client can be
+			// discarded. In particular the following baseline deletion spans
+			// all nodes, including nodes not represented by this snapshot.
+			var ownerCount int64
+			if err := tx.Model(&model.ResellerClient{}).Where("LOWER(TRIM(email)) = LOWER(?)", email).Count(&ownerCount).Error; err != nil {
+				return false, err
+			}
+			if ownerCount > 0 {
+				return false, fmt.Errorf("detached reseller client %q requires manual reconciliation", email)
+			}
 			if err := tx.Where("LOWER(TRIM(email)) = LOWER(?)", email).Delete(&model.ClientRecord{}).Error; err != nil {
 				if beforeMerge != nil {
 					return false, err

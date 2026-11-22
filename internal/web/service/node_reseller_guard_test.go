@@ -293,3 +293,38 @@ func TestNodeResellerMissingBaselineDoesNotDiscardFirstInterval(t *testing.T) {
 		t.Fatalf("known interval not accounted: %+v", row)
 	}
 }
+
+// Losing a link must not let the next node snapshot delete the remaining
+// reseller baseline and thereby make the quota guard think the node is local.
+func TestNodeSyncRetainsOrphanedResellerBaseline(t *testing.T) {
+	reseller, client := seedResellerRenewal(t)
+	db := database.GetDB()
+	var link model.ClientInbound
+	if err := db.Where("client_id = ?", client.Id).First(&link).Error; err != nil {
+		t.Fatal(err)
+	}
+	const nodeID = 77
+	if err := db.Model(&model.Inbound{}).Where("id = ?", link.InboundId).Update("node_id", nodeID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&model.NodeClientTraffic{NodeId: nodeID, Email: "  RENEW@example.test ", Up: 120, Down: 180}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Where("client_id = ? AND inbound_id = ?", client.Id, link.InboundId).Delete(&model.ClientInbound{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&InboundService{}).setRemoteTrafficLocked(nodeID, &runtime.TrafficSnapshot{Inbounds: []*model.Inbound{}}, false); err == nil {
+		t.Fatal("orphaned reseller baseline was removed by snapshot")
+	}
+	var baseline model.NodeClientTraffic
+	if err := db.Where("node_id = ?", nodeID).First(&baseline).Error; err != nil || baseline.Up != 120 || baseline.Down != 180 {
+		t.Fatalf("baseline lost: %+v %v", baseline, err)
+	}
+	if err := (&ResellerService{}).CheckClientQuota(&reseller, 1, 1); err == nil {
+		t.Fatal("orphaned baseline did not block quota")
+	}
+	var inbound model.Inbound
+	if err := db.First(&inbound, link.InboundId).Error; err != nil {
+		t.Fatalf("snapshot partially removed inbound: %v", err)
+	}
+}
