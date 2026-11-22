@@ -400,7 +400,9 @@ func (s *ClientService) Update(inboundSvc *InboundService, id int, updated model
 		if ips, ok := updated.AllowedIPsByInbound[ibId]; ok &&
 			(inbound.Protocol == model.WireGuard || inbound.Protocol == model.AmneziaWG) {
 			if err := s.persistTunnelAllowedIPs(inboundSvc, ibId, existing.Email, ips); err != nil {
-				return needRestart, err
+				// An AWG override may already have been saved before its live
+				// apply failed; preserve recovery on the error path.
+				return needRestart || (inbound.Protocol == model.AmneziaWG && inbound.NodeID == nil), err
 			}
 		}
 	}

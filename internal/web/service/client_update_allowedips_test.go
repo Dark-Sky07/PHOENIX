@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
+	"github.com/Dark-Sky07/phoenix/internal/web/runtime"
 )
 
 // seedDualProtocolClient creates a WireGuard inbound and an AmneziaWG inbound
@@ -83,6 +84,9 @@ func TestUpdateBroadcastAllowedIPsDoesNotOverwriteOtherInboundWhenMismatched(t *
 // each land on their own inbound.
 func TestUpdateAllowedIPsByInboundAppliesDistinctValuesPerInbound(t *testing.T) {
 	setupBulkDB(t)
+	oldManager := runtime.GetManager()
+	runtime.SetManager(runtime.NewManager(runtime.LocalDeps{APIPort: func() int { return 0 }}))
+	t.Cleanup(func() { runtime.SetManager(oldManager) })
 	inboundSvc := &InboundService{}
 	svc := &ClientService{}
 

@@ -224,9 +224,13 @@ func (s *ClientService) delInboundClients(inboundSvc *InboundService, inboundId 
 	if oldInbound.NodeID == nil {
 		switch oldInbound.Protocol {
 		case model.AmneziaWG:
-			inboundSvc.applyLocalAmneziaWG(oldInbound.Id)
+			if inboundSvc.applyLocalAmneziaWG(oldInbound.Id) != nil {
+				needRestart = true
+			}
 		case model.TUIC:
-			inboundSvc.applyLocalTuic(oldInbound.Id)
+			if inboundSvc.applyLocalTuic(oldInbound.Id) != nil {
+				needRestart = true
+			}
 		}
 	}
 	return needRestart, nil
@@ -506,9 +510,13 @@ func (s *ClientService) addInboundClient(inboundSvc *InboundService, data *model
 			}
 			switch oldInbound.Protocol {
 			case model.TUIC:
-				inboundSvc.applyLocalTuic(oldInbound.Id)
+				if inboundSvc.applyLocalTuic(oldInbound.Id) != nil {
+					needRestart = true
+				}
 			case model.AmneziaWG:
-				inboundSvc.applyLocalAmneziaWG(oldInbound.Id)
+				if inboundSvc.applyLocalAmneziaWG(oldInbound.Id) != nil {
+					needRestart = true
+				}
 			}
 		}
 		if markDirty {
@@ -850,9 +858,13 @@ func (s *ClientService) UpdateInboundClient(inboundSvc *InboundService, data *mo
 			}
 			switch oldInbound.Protocol {
 			case model.TUIC:
-				inboundSvc.applyLocalTuic(oldInbound.Id)
+				if inboundSvc.applyLocalTuic(oldInbound.Id) != nil {
+					needRestart = true
+				}
 			case model.AmneziaWG:
-				inboundSvc.applyLocalAmneziaWG(oldInbound.Id)
+				if inboundSvc.applyLocalAmneziaWG(oldInbound.Id) != nil {
+					needRestart = true
+				}
 			}
 		}
 		if markDirty && oldInbound.NodeID != nil {
@@ -1124,10 +1136,14 @@ func (s *ClientService) DelInboundClientByEmail(inboundSvc *InboundService, inbo
 		return needRestart || oldInbound.NodeID == nil, err
 	}
 	if oldInbound.Protocol == model.AmneziaWG && oldInbound.NodeID == nil {
-		inboundSvc.applyLocalAmneziaWG(oldInbound.Id)
+		if inboundSvc.applyLocalAmneziaWG(oldInbound.Id) != nil {
+			needRestart = true
+		}
 	}
 	if oldInbound.Protocol == model.TUIC && oldInbound.NodeID == nil {
-		inboundSvc.applyLocalTuic(oldInbound.Id)
+		if inboundSvc.applyLocalTuic(oldInbound.Id) != nil {
+			needRestart = true
+		}
 	}
 	return needRestart, nil
 }

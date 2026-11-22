@@ -758,10 +758,14 @@ local TUIC/AmneziaWG reconciliation after settings synchronization. Tests
 exercise a running TUIC listener and AmneziaWG peer index, including failed
 bulk saves. These checks establish that the intended local runtime update is
 attempted with committed settings, not that every live tunnel/relay and its
-accounting has drained. TUIC and AmneziaWG immediate-apply helpers still log
-and suppress application failures, leaving periodic reconciliation as their
-backstop; PPP shutdown and residual child/session lifetime likewise need further
-verification. These paths must not be treated as quota-release barriers.
+accounting has drained. TUIC and AmneziaWG immediate-apply helpers now reject
+filter-construction failures rather than applying raw settings; they log and
+return errors, and client mutation paths request recovery on failure. Most
+mutation callers still return success with a restart request after an apply
+failure, not a durable per-client incident; an Xray restart does not itself
+prove tunnel recovery. Periodic reconciliation remains a backstop, and PPP
+shutdown and residual child/session lifetime need further verification. These
+paths must not be treated as quota-release barriers.
 
 The client-add transaction now applies local PPP and AmneziaWG changes after
 commit, and marks a remote node dirty if its add was attempted but the local

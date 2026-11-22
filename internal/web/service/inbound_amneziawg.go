@@ -87,26 +87,33 @@ func (s *InboundService) DesiredAmneziaWGInstances() ([]amneziawg.Instance, erro
 // waiting up to 10s for the reconcile job. It re-reads the inbound so it sees
 // the committed settings, filters depleted clients exactly like the
 // reconcile job, and is a no-op for node-owned or non-AmneziaWG inbounds.
-// Failures are logged and swallowed: the reconcile job is the backstop.
-// Mirrors applyLocalMtproto.
-func (s *InboundService) applyLocalAmneziaWG(inboundId int) {
+// Errors are returned and logged; periodic reconciliation remains a backstop,
+// not evidence that existing peers or accounting have drained.
+func (s *InboundService) applyLocalAmneziaWG(inboundId int) (err error) {
+	defer func() {
+		if err != nil {
+			logger.Warningf("amneziawg: immediate apply failed for inbound %d: %v", inboundId, err)
+		}
+	}()
 	inbound, err := s.GetInbound(inboundId)
-	if err != nil || inbound == nil || inbound.Protocol != model.AmneziaWG || inbound.NodeID != nil {
-		return
+	if err != nil {
+		return err
+	}
+	if inbound == nil || inbound.Protocol != model.AmneziaWG || inbound.NodeID != nil {
+		return nil
 	}
 	rt, err := s.runtimeFor(inbound)
 	if err != nil {
-		return
+		return err
 	}
 	payload := inbound
 	if inbound.Enable {
-		if built, bErr := s.buildRuntimeInboundForAPI(database.GetDB(), inbound); bErr == nil {
-			payload = built
+		payload, err = s.buildRuntimeInboundForAPI(database.GetDB(), inbound)
+		if err != nil {
+			return fmt.Errorf("build filtered runtime settings: %w", err)
 		}
 	}
-	if err := rt.UpdateInbound(context.Background(), inbound, payload); err != nil {
-		logger.Debugf("amneziawg: immediate apply failed for inbound %d: %v", inboundId, err)
-	}
+	return rt.UpdateInbound(context.Background(), inbound, payload)
 }
 
 // defaultAmneziaWGServer builds a fresh server block: a random AmneziaWG 3.1

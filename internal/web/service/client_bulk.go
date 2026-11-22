@@ -1132,9 +1132,13 @@ func (s *ClientService) bulkDelInboundClients(
 		if oldInbound.NodeID == nil {
 			switch oldInbound.Protocol {
 			case model.AmneziaWG:
-				inboundSvc.applyLocalAmneziaWG(oldInbound.Id)
+				if inboundSvc.applyLocalAmneziaWG(oldInbound.Id) != nil {
+					res.needRestart = true
+				}
 			case model.TUIC:
-				inboundSvc.applyLocalTuic(oldInbound.Id)
+				if inboundSvc.applyLocalTuic(oldInbound.Id) != nil {
+					res.needRestart = true
+				}
 			}
 		}
 		if markDirty && oldInbound.NodeID != nil {

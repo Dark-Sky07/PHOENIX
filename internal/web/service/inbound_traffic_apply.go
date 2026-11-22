@@ -98,11 +98,15 @@ func (s *InboundService) applyTrafficMutationBatch(b *trafficMutationBatch) bool
 			continue
 		}
 		if plan.inbound.Protocol == model.AmneziaWG {
-			s.applyLocalAmneziaWG(plan.inbound.Id)
+			if s.applyLocalAmneziaWG(plan.inbound.Id) != nil {
+				needRestart = true
+			}
 			continue
 		}
 		if plan.inbound.Protocol == model.TUIC {
-			s.applyLocalTuic(plan.inbound.Id)
+			if s.applyLocalTuic(plan.inbound.Id) != nil {
+				needRestart = true
+			}
 			continue
 		}
 		rt, err := s.runtimeFor(&plan.inbound)
