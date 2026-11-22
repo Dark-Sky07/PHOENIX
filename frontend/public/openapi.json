@@ -3885,6 +3885,25 @@
         ],
         "summary": "Experimental signed node snapshot for a separately provisioned bearer-token sender stream. Fails closed on incomplete local data; does not poll the runtime or prove historical completeness.",
         "operationId": "post_panel_api_inbounds_verifiedNodeSnapshot",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "challenge": {
+                    "type": "string",
+                    "description": "Base64 unpredictable 32-byte challenge, echoed in the signed snapshot."
+                  }
+                },
+                "required": [
+                  "challenge"
+                ]
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Successful response",
@@ -8376,7 +8395,7 @@
         "tags": [
           "Nodes"
         ],
-        "summary": "Register a node snapshot receiver and disable legacy sync for this node. Interactive superadmin only; failures do not fall back. Does not lift quota blocks.",
+        "summary": "Probe a fresh nonce-bound signed snapshot, then register a node receiver and disable legacy sync. Interactive superadmin only; failures do not fall back. Does not lift quota blocks.",
         "operationId": "post_panel_api_nodes_nodeSnapshot_receiver_id",
         "parameters": [
           {

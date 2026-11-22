@@ -519,7 +519,8 @@ The experimental node-to-master snapshot endpoint
 `POST /panel/api/inbounds/verifiedNodeSnapshot` requires a full bearer token and
 an independently provisioned `node-snapshot:api-token:<id>` sender state. It
 captures local database traffic without the global overlay, uses a distinct
-node-snapshot key, and reserves its sequence while holding the allocation lock.
+node-snapshot key, binds the response to a 32-byte request challenge, and
+reserves its sequence while holding the allocation lock.
 It rejects missing traffic, ambiguous identities, malformed settings, nested
 nodes, and other-admin inbounds rather than signing a partial view. It does not
 poll Xray or establish completeness of historical or unpolled usage. The Nodes peer setup dialog and interactive-superadmin API stage a node producer with
@@ -527,9 +528,11 @@ poll Xray or establish completeness of historical or unpolled usage. The Nodes p
 and can reread its identity with `GET /panel/api/nodes/nodeSnapshot/producer/:tokenId`.
 Transfer the sender and generation securely to the master. On the master,
 `POST /panel/api/nodes/nodeSnapshot/receiver/:id` (`sender`, `generation`,
-`reconciled: true`) durably requires verified pulls and blocks legacy merges.
-Ensure the node is ready first: this switch is immediate, failed verified
-requests have no fallback, and sync may stop. Full inbound sync and standard
+`reconciled: true`) first probes a fresh nonce-bound signed snapshot using the
+configured token, then durably requires verified pulls and blocks legacy merges.
+The probe sequence is fenced and never merged as accounting; subsequent pulls
+must have a higher sequence. The switch is immediate after the probe, failed
+verified requests have no fallback, and sync may still stop if conditions change. Full inbound sync and standard
 HTTPS verification are mandatory. Existing sender/generation streams cannot be
 reset or replaced, including after token rotation. The shared receiver table
 requires sender identities to be unique even across global and inbound streams;

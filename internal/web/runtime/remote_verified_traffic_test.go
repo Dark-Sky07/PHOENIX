@@ -136,3 +136,50 @@ func TestVerifiedNodeFetchDoesNotFallbackOrFollowRedirect(t *testing.T) {
 		t.Fatal("insecure transport accepted")
 	}
 }
+
+func TestVerifiedNodeSnapshotBindsFreshChallenge(t *testing.T) {
+	old := remoteHTTPClient
+	token := "0123456789012345678901234567890123456789"
+	key, err := trafficprotocol.NodeSnapshotKeyFromAPIToken(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved trafficprotocol.Envelope
+	calls := 0
+	remoteHTTPClient = &http.Client{Transport: verifiedTestTransport(func(req *http.Request) (*http.Response, error) {
+		calls++
+		var request struct {
+			Challenge []byte `json:"challenge"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&request); err != nil || len(request.Challenge) != 32 {
+			t.Fatalf("bad challenge: %+v %v", request, err)
+		}
+		if calls == 1 {
+			payload, err := json.Marshal(TrafficSnapshot{Challenge: request.Challenge, Inbounds: []*model.Inbound{}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			saved, err = trafficprotocol.Sign(trafficprotocol.Envelope{Version: trafficprotocol.Version, Sender: "node", Generation: "epoch", Sequence: 1, Snapshot: payload}, key)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		body, err := json.Marshal(map[string]any{"success": true, "obj": saved})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(string(body)))}, nil
+	})}
+	t.Cleanup(func() { remoteHTTPClient = old })
+	r := NewRemote(&model.Node{Scheme: "https", Address: "example.com", Port: 443, ApiToken: token})
+	env, err := r.FetchVerifiedNodeSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := trafficprotocol.Verify(*env, key, trafficprotocol.Expected{Sender: "node", Generation: "epoch"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.FetchVerifiedNodeSnapshot(context.Background()); err == nil {
+		t.Fatal("old response to different challenge accepted")
+	}
+}

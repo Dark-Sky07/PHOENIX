@@ -1032,7 +1032,7 @@
         "nodeTransferTitle": "Transfer these values securely to the master panel",
         "nodeTransferHint": "Register the node snapshot receiver on the master. Never reset the sequence.",
         "nodeReceiverWarningTitle": "Registration immediately disables legacy node sync",
-        "nodeReceiverWarning": "Register the producer and reconcile first. If the receiver or TLS check fails, sync stops without fallback. This does not recover unpolled traffic or unblock reseller quotas. Existing sequences cannot be reset here.",
+        "nodeReceiverWarning": "Register the producer and reconcile first. Registration checks a fresh signed snapshot before switching; after the switch, failures stop sync without fallback. This does not recover unpolled traffic or unblock reseller quotas. Existing sequences cannot be reset here.",
         "nodeSenderIdentity": "Node producer GUID",
         "nodeReceiverConfirm": "I reviewed and reconciled this node and understand that registration immediately disables legacy sync and does not prove usage completeness.",
         "registerNodeReceiver": "Register receiver and require verified sync",

@@ -18,8 +18,8 @@ import (
 // under the allocation lock. It does not poll the runtime or prove that bytes
 // between polls were observed. Nested nodes and multi-admin inbounds are
 // rejected until their complete accounting semantics can be established.
-func (s *InboundService) PrepareVerifiedInboundSnapshot(tokenID, userID int, token string) (*trafficprotocol.Envelope, error) {
-	if tokenID <= 0 || userID <= 0 {
+func (s *InboundService) PrepareVerifiedInboundSnapshot(tokenID, userID int, token string, challenge []byte) (*trafficprotocol.Envelope, error) {
+	if tokenID <= 0 || userID <= 0 || len(challenge) != 32 {
 		return nil, errors.New("invalid snapshot principal")
 	}
 	key, err := trafficprotocol.NodeSnapshotKeyFromAPIToken(token)
@@ -116,7 +116,7 @@ func (s *InboundService) PrepareVerifiedInboundSnapshot(tokenID, userID int, tok
 		}
 		ib.OriginNodeGuid = state.Sender
 	}
-	payload, err := json.Marshal(runtime.TrafficSnapshot{Inbounds: inbounds})
+	payload, err := json.Marshal(runtime.TrafficSnapshot{Inbounds: inbounds, Challenge: append([]byte(nil), challenge...)})
 	if err != nil {
 		return nil, err
 	}

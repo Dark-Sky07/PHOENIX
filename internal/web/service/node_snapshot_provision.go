@@ -1,15 +1,20 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
 	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
+	"github.com/Dark-Sky07/phoenix/internal/web/runtime"
+	"github.com/Dark-Sky07/phoenix/internal/web/trafficprotocol"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // RegisterNodeSnapshotProducer stages a token-bound producer on the node. It
@@ -59,27 +64,64 @@ func RegisterNodeSnapshotProducer(tokenID int, reconciled bool) (*model.TrafficS
 	return &state, nil
 }
 
-// RegisterNodeSnapshotReceiver permanently switches participating node sync
-// away from legacy traffic. Provisioning must be coordinated out of band and
-// may interrupt node synchronization if the remote is not ready. This does not
-// release quota guards or validate unpolled historical usage.
-func RegisterNodeSnapshotReceiver(nodeID int, sender, generation string, reconciled bool) error {
-	if nodeID <= 0 || !reconciled || !validTrafficPeerIdentity(sender) || !validTrafficPeerIdentity(generation) {
+// RegisterNodeSnapshotReceiver probes a nonce-bound, signed snapshot before
+// permanently switching away from legacy sync. The probe advances producer
+// sequence but does not apply accounting; its sequence is fenced in the new
+// receiver row. Readiness is not proof of historical or unpolled completeness.
+func RegisterNodeSnapshotReceiver(ctx context.Context, nodeID int, sender, generation string, reconciled bool) error {
+	return registerNodeSnapshotReceiver(ctx, nodeID, sender, generation, reconciled, func(ctx context.Context, node *model.Node) (*trafficprotocol.Envelope, error) {
+		return runtime.NewRemote(node).FetchVerifiedNodeSnapshot(ctx)
+	})
+}
+
+func registerNodeSnapshotReceiver(ctx context.Context, nodeID int, sender, generation string, reconciled bool, probe func(context.Context, *model.Node) (*trafficprotocol.Envelope, error)) error {
+	if nodeID <= 0 || !reconciled || !validTrafficPeerIdentity(sender) || !validTrafficPeerIdentity(generation) || probe == nil {
 		return errors.New("receiver registration requires reviewed canonical identity and reconciliation confirmation")
+	}
+	db := database.GetDB()
+	var node model.Node
+	if err := db.First(&node, "id = ?", nodeID).Error; err != nil {
+		return err
+	}
+	if node.Scheme != "https" || (node.TlsVerifyMode != "" && node.TlsVerifyMode != "verify") || len(node.ApiToken) < 32 || node.InboundSyncMode == "selected" {
+		return errors.New("receiver requires full inbound sync, HTTPS, standard TLS and a valid token")
+	}
+	required, err := NodeInboundVerificationRequired(nodeID)
+	if err != nil {
+		return err
+	}
+	if required {
+		return errors.New("node snapshot receiver already registered")
+	}
+	// Remote producer takes its own allocation lock. Do not hold the local
+	// allocation lock across the network, avoiding reciprocal lock deadlock.
+	envelope, err := probe(ctx, &node)
+	if err != nil {
+		return err
+	}
+	if envelope == nil || envelope.Sequence > math.MaxInt64 {
+		return errors.New("invalid node readiness snapshot")
+	}
+	key, err := trafficprotocol.NodeSnapshotKeyFromAPIToken(node.ApiToken)
+	if err != nil {
+		return err
+	}
+	if err := trafficprotocol.Verify(*envelope, key, trafficprotocol.Expected{Sender: sender, Generation: generation}); err != nil {
+		return err
 	}
 	unlock, err := LockResellerAllocation()
 	if err != nil {
 		return err
 	}
 	defer unlock()
-	return database.GetDB().Transaction(func(tx *gorm.DB) error {
-		var node model.Node
-		if err := tx.First(&node, "id = ?", nodeID).Error; err != nil {
+	return db.Transaction(func(tx *gorm.DB) error {
+		var current model.Node
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&current, "id = ?", nodeID).Error; err != nil {
 			return err
 		}
-		if node.Scheme != "https" || (node.TlsVerifyMode != "" && node.TlsVerifyMode != "verify") || len(node.ApiToken) < 32 || node.InboundSyncMode == "selected" {
-			return errors.New("receiver requires full inbound sync, HTTPS, standard TLS and a valid token")
+		if current.Scheme != node.Scheme || current.TlsVerifyMode != node.TlsVerifyMode || current.ApiToken != node.ApiToken || current.Address != node.Address || current.Port != node.Port || current.BasePath != node.BasePath || current.AllowPrivateAddress != node.AllowPrivateAddress || current.InboundSyncMode != node.InboundSyncMode {
+			return errors.New("node configuration changed during readiness probe")
 		}
-		return tx.Create(&model.TrafficSnapshotReceiver{ID: fmt.Sprintf("node-inbound:%d", nodeID), Sender: sender, Generation: generation}).Error
+		return tx.Create(&model.TrafficSnapshotReceiver{ID: fmt.Sprintf("node-inbound:%d", nodeID), Sender: sender, Generation: generation, LastSequence: int64(envelope.Sequence)}).Error
 	})
 }

@@ -59,7 +59,8 @@ func TestVerifiedGlobalEndpointBindsBearerTokenAndRegisteredSender(t *testing.T)
 		t.Fatal(err)
 	}
 	fetchNodeSnapshot := func(token string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(http.MethodPost, "/panel/api/inbounds/verifiedNodeSnapshot", nil)
+		req := httptest.NewRequest(http.MethodPost, "/panel/api/inbounds/verifiedNodeSnapshot", bytes.NewReader([]byte(`{"challenge":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}`)))
+		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+token)
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, req)

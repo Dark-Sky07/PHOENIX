@@ -121,7 +121,7 @@ func (a *NodeController) registerNodeSnapshotReceiver(c *gin.Context) {
 		jsonMsg(c, "invalid node snapshot receiver", err)
 		return
 	}
-	if err := service.RegisterNodeSnapshotReceiver(id, req.Sender, req.Generation, req.Reconciled); err != nil {
+	if err := service.RegisterNodeSnapshotReceiver(c.Request.Context(), id, req.Sender, req.Generation, req.Reconciled); err != nil {
 		jsonMsg(c, "node snapshot receiver registration failed", err)
 		return
 	}

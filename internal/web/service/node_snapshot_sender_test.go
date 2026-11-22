@@ -31,7 +31,7 @@ func TestVerifiedNodeSnapshotCaptureAndSequence(t *testing.T) {
 	}
 	token := "0123456789012345678901234567890123456789"
 	svc := &InboundService{}
-	if _, err := svc.PrepareVerifiedInboundSnapshot(7, user.Id, token); err == nil {
+	if _, err := svc.PrepareVerifiedInboundSnapshot(7, user.Id, token, make([]byte, 32)); err == nil {
 		t.Fatal("missing traffic accepted")
 	}
 	if err := db.First(&state, "id = ?", state.ID).Error; err != nil || state.LastSequence != 0 {
@@ -43,7 +43,7 @@ func TestVerifiedNodeSnapshotCaptureAndSequence(t *testing.T) {
 	if err := db.Create(&model.ClientGlobalTraffic{MasterGuid: "other", Email: "test@example.test", Up: 9999}).Error; err != nil {
 		t.Fatal(err)
 	}
-	env, err := svc.PrepareVerifiedInboundSnapshot(7, user.Id, token)
+	env, err := svc.PrepareVerifiedInboundSnapshot(7, user.Id, token, make([]byte, 32))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,11 +61,11 @@ func TestVerifiedNodeSnapshotCaptureAndSequence(t *testing.T) {
 	if env.Sequence != 1 || len(snap.Inbounds) != 1 || len(snap.Inbounds[0].ClientStats) != 1 || snap.Inbounds[0].ClientStats[0].Up != 100 {
 		t.Fatalf("wrong snapshot: %+v %+v", env, snap)
 	}
-	next, err := svc.PrepareVerifiedInboundSnapshot(7, user.Id, token)
+	next, err := svc.PrepareVerifiedInboundSnapshot(7, user.Id, token, make([]byte, 32))
 	if err != nil || next.Sequence != 2 {
 		t.Fatalf("next sequence: %+v %v", next, err)
 	}
-	if _, err := svc.PrepareVerifiedInboundSnapshot(8, user.Id, token); err == nil {
+	if _, err := svc.PrepareVerifiedInboundSnapshot(8, user.Id, token, make([]byte, 32)); err == nil {
 		t.Fatal("unprovisioned token accepted")
 	}
 	nodeID := 1
@@ -73,7 +73,7 @@ func TestVerifiedNodeSnapshotCaptureAndSequence(t *testing.T) {
 	if err := db.Create(&other).Error; err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.PrepareVerifiedInboundSnapshot(7, user.Id, token); err == nil {
+	if _, err := svc.PrepareVerifiedInboundSnapshot(7, user.Id, token, make([]byte, 32)); err == nil {
 		t.Fatal("nested nodes silently omitted")
 	}
 	if err := db.First(&state, "id = ?", fmt.Sprintf("node-snapshot:api-token:%d", 7)).Error; err != nil || state.LastSequence != 2 {

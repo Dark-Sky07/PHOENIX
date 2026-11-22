@@ -210,6 +210,7 @@ export const sections: readonly Section[] = [
         method: 'POST',
         path: '/panel/api/inbounds/verifiedNodeSnapshot',
         summary: 'Experimental signed node snapshot for a separately provisioned bearer-token sender stream. Fails closed on incomplete local data; does not poll the runtime or prove historical completeness.',
+        params: [{ name: 'challenge', in: 'body (json)', type: 'string', desc: 'Base64 unpredictable 32-byte challenge, echoed in the signed snapshot.' }],
       },
       {
         method: 'POST',
@@ -960,7 +961,7 @@ export const sections: readonly Section[] = [
       {
         method: 'POST',
         path: '/panel/api/nodes/nodeSnapshot/receiver/:id',
-        summary: 'Register a node snapshot receiver and disable legacy sync for this node. Interactive superadmin only; failures do not fall back. Does not lift quota blocks.',
+        summary: 'Probe a fresh nonce-bound signed snapshot, then register a node receiver and disable legacy sync. Interactive superadmin only; failures do not fall back. Does not lift quota blocks.',
         params: [
           { name: 'id', in: 'path', type: 'integer', desc: 'Local node ID.' },
           { name: 'sender', in: 'body (json)', type: 'string', desc: 'Producer GUID transferred securely.' },

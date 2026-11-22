@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"path/filepath"
 	"testing"
@@ -8,6 +9,7 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
 	"github.com/Dark-Sky07/phoenix/internal/web/runtime"
+	"github.com/Dark-Sky07/phoenix/internal/web/trafficprotocol"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
 )
 
@@ -44,14 +46,14 @@ func TestNodeSnapshotMigrationPreservesBaselineAndRejectsDowngrade(t *testing.T)
 	}
 	token := "0123456789012345678901234567890123456789"
 	svc := &InboundService{}
-	first, err := svc.PrepareVerifiedInboundSnapshot(tokenID.Id, user.Id, token)
+	first, err := svc.PrepareVerifiedInboundSnapshot(tokenID.Id, user.Id, token, make([]byte, 32))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Model(&stats).Updates(map[string]any{"up": 150, "down": 20}).Error; err != nil {
 		t.Fatal(err)
 	}
-	second, err := svc.PrepareVerifiedInboundSnapshot(tokenID.Id, user.Id, token)
+	second, err := svc.PrepareVerifiedInboundSnapshot(tokenID.Id, user.Id, token, make([]byte, 32))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +77,7 @@ func TestNodeSnapshotMigrationPreservesBaselineAndRejectsDowngrade(t *testing.T)
 	if _, err := svc.setRemoteTrafficLocked(node.Id, &legacy, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := RegisterNodeSnapshotReceiver(node.Id, producer.Sender, producer.Generation, true); err != nil {
+	if err := registerNodeSnapshotReceiver(context.Background(), node.Id, producer.Sender, producer.Generation, true, func(context.Context, *model.Node) (*trafficprotocol.Envelope, error) { return first, nil }); err != nil {
 		t.Fatal(err)
 	}
 	unlock, err := LockResellerAllocation()

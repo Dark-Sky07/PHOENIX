@@ -3,6 +3,7 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -438,6 +439,9 @@ func (r *Remote) ResetInboundTraffic(ctx context.Context, ib *model.Inbound) err
 }
 
 type TrafficSnapshot struct {
+	// Challenge binds a verified snapshot to the requesting pull. Legacy
+	// snapshots omit it and never use it as accounting evidence.
+	Challenge    []byte `json:"challenge,omitempty"`
 	Inbounds     []*model.Inbound
 	OnlineEmails []string
 	// OnlineTree is the node's GUID-keyed online subtree (its own clients under
@@ -462,7 +466,11 @@ func (r *Remote) FetchVerifiedNodeSnapshot(ctx context.Context) (*trafficprotoco
 	client := *remoteHTTPClient
 	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
 	limit := int64((trafficprotocol.MaxSnapshotBytes+2)/3*4 + 8192)
-	env, err := r.doWithClient(ctx, http.MethodPost, "panel/api/inbounds/verifiedNodeSnapshot", nil, &client, limit)
+	challenge := make([]byte, 32)
+	if _, err := rand.Read(challenge); err != nil {
+		return nil, err
+	}
+	env, err := r.doWithClient(ctx, http.MethodPost, "panel/api/inbounds/verifiedNodeSnapshot", map[string][]byte{"challenge": challenge}, &client, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -472,6 +480,12 @@ func (r *Remote) FetchVerifiedNodeSnapshot(ctx context.Context) (*trafficprotoco
 	}
 	if len(result.Snapshot) == 0 || len(result.Snapshot) > trafficprotocol.MaxSnapshotBytes {
 		return nil, errors.New("invalid verified node snapshot size")
+	}
+	var echoed struct {
+		Challenge []byte `json:"challenge"`
+	}
+	if err := json.Unmarshal(result.Snapshot, &echoed); err != nil || !bytes.Equal(echoed.Challenge, challenge) {
+		return nil, errors.New("verified node snapshot challenge mismatch")
 	}
 	return &result, nil
 }

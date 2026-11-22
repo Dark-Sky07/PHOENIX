@@ -470,7 +470,15 @@ func (a *InboundController) verifiedNodeSnapshot(c *gin.Context) {
 		c.AbortWithStatus(http.StatusForbidden)
 		return
 	}
-	envelope, err := a.inboundService.PrepareVerifiedInboundSnapshot(c.GetInt("api_token_id"), user.Id, token)
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 4096)
+	var req struct {
+		Challenge []byte `json:"challenge"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || len(req.Challenge) != 32 {
+		c.AbortWithStatus(http.StatusBadRequest)
+		return
+	}
+	envelope, err := a.inboundService.PrepareVerifiedInboundSnapshot(c.GetInt("api_token_id"), user.Id, token, req.Challenge)
 	if err != nil {
 		jsonMsg(c, "verified node snapshot unavailable", err)
 		return
