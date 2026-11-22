@@ -221,6 +221,14 @@ func (s *ClientService) delInboundClients(inboundSvc *InboundService, inboundId 
 	if err := s.SyncInbound(db, inboundId, finalClients); err != nil {
 		return needRestart || localRemovalAttempted, err
 	}
+	if oldInbound.NodeID == nil {
+		switch oldInbound.Protocol {
+		case model.AmneziaWG:
+			inboundSvc.applyLocalAmneziaWG(oldInbound.Id)
+		case model.TUIC:
+			inboundSvc.applyLocalTuic(oldInbound.Id)
+		}
+	}
 	return needRestart, nil
 }
 
@@ -811,8 +819,19 @@ func (s *ClientService) UpdateInboundClient(inboundSvc *InboundService, data *mo
 			}
 			return
 		}
-		if oldInbound.Protocol == model.TUIC && oldInbound.NodeID == nil {
-			inboundSvc.applyLocalTuic(oldInbound.Id)
+		// The runtime must see committed settings; applying against another DB
+		// connection before commit can read stale peers or block on the writer.
+		if oldInbound.NodeID == nil {
+			if pppErr := reconcilePPPVPNRuntime(oldInbound); pppErr != nil {
+				logger.Warning("PPP VPN: synchronous client reconcile failed:", pppErr)
+				needRestart = true
+			}
+			switch oldInbound.Protocol {
+			case model.TUIC:
+				inboundSvc.applyLocalTuic(oldInbound.Id)
+			case model.AmneziaWG:
+				inboundSvc.applyLocalAmneziaWG(oldInbound.Id)
+			}
 		}
 		if markDirty && oldInbound.NodeID != nil {
 			if dErr := (&NodeService{}).MarkNodeDirty(*oldInbound.NodeID); dErr != nil {
@@ -939,13 +958,6 @@ func (s *ClientService) UpdateInboundClient(inboundSvc *InboundService, data *mo
 	if err = tx.Save(oldInbound).Error; err != nil {
 		return false, err
 	}
-	if oldInbound.NodeID == nil && (oldInbound.Protocol == model.L2TP || oldInbound.Protocol == model.SSTP || oldInbound.Protocol == model.PPTP) {
-		localRuntimeAttempted = true
-	}
-	if err := reconcilePPPVPNRuntime(oldInbound); err != nil {
-		logger.Warning("PPP VPN: synchronous client reconcile failed:", err)
-		needRestart = true
-	}
 	finalClients, gcErr := inboundSvc.GetClients(oldInbound)
 	if gcErr != nil {
 		err = gcErr
@@ -953,10 +965,6 @@ func (s *ClientService) UpdateInboundClient(inboundSvc *InboundService, data *mo
 	}
 	if err = s.SyncInbound(tx, oldInbound.Id, finalClients); err != nil {
 		return false, err
-	}
-	if oldInbound.Protocol == model.AmneziaWG && oldInbound.NodeID == nil {
-		localRuntimeAttempted = true
-		inboundSvc.applyLocalAmneziaWG(oldInbound.Id)
 	}
 	return needRestart, nil
 }

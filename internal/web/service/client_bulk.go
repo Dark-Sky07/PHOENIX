@@ -1129,6 +1129,14 @@ func (s *ClientService) bulkDelInboundClients(
 			logger.Warning("l2tp: synchronous bulk client deletion reconcile failed:", err)
 			res.needRestart = true
 		}
+		if oldInbound.NodeID == nil {
+			switch oldInbound.Protocol {
+			case model.AmneziaWG:
+				inboundSvc.applyLocalAmneziaWG(oldInbound.Id)
+			case model.TUIC:
+				inboundSvc.applyLocalTuic(oldInbound.Id)
+			}
+		}
 		if markDirty && oldInbound.NodeID != nil {
 			if dErr := (&NodeService{}).MarkNodeDirty(*oldInbound.NodeID); dErr != nil {
 				logger.Warning("mark node dirty failed:", dErr)

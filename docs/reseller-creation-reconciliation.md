@@ -751,3 +751,14 @@ that an administrator disabled independently. A failed enable may therefore
 need manual investigation and resource reconciliation. Remote dirty markers
 and local restart requests are recovery signals, not evidence of closed
 sessions, complete traffic accounting, or successful final synchronization.
+
+Client edits now apply local PPP VPN and AmneziaWG updates only after the
+settings transaction commits. Bulk detach and bulk delete also trigger the
+local TUIC/AmneziaWG reconciliation after settings synchronization. Tests
+exercise a running TUIC listener and AmneziaWG peer index, including failed
+bulk saves. These checks establish that the intended local runtime update is
+attempted with committed settings, not that every live tunnel/relay and its
+accounting has drained. TUIC and AmneziaWG immediate-apply helpers still log
+and suppress application failures, leaving periodic reconciliation as their
+backstop; PPP shutdown and residual child/session lifetime likewise need further
+verification. These paths must not be treated as quota-release barriers.
