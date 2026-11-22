@@ -7,6 +7,8 @@ import type { NodeRecord } from '@/schemas/node';
 type SenderState = { sender: string; generation: string; lastSequence: number };
 type ReceiverFields = { tokenId: number; sender: string; generation: string; reconciled: boolean };
 type SenderFields = { nodeId: number; reconciled: boolean };
+type NodeProducerFields = { tokenId: number; reconciled: boolean };
+type NodeReceiverFields = { nodeId: number; sender: string; generation: string; reconciled: boolean };
 
 interface Props { open: boolean; nodes: NodeRecord[]; onClose: () => void; onChanged: () => void }
 
@@ -16,12 +18,18 @@ export default function TrafficPeerModal({ open, nodes, onClose, onChanged }: Pr
   const { t } = useTranslation();
   const [senderForm] = Form.useForm<SenderFields>();
   const [receiverForm] = Form.useForm<ReceiverFields>();
+  const [nodeProducerForm] = Form.useForm<NodeProducerFields>();
+  const [nodeReceiverForm] = Form.useForm<NodeReceiverFields>();
   const [busy, setBusy] = useState(false);
   const [senderState, setSenderState] = useState<SenderState | null>(null);
+  const [nodeProducerState, setNodeProducerState] = useState<SenderState | null>(null);
   const [error, setError] = useState('');
   const senderAcknowledged = Form.useWatch('reconciled', senderForm);
   const receiverAcknowledged = Form.useWatch('reconciled', receiverForm);
   const selectedNode = Form.useWatch('nodeId', senderForm);
+  const nodeProducerAcknowledged = Form.useWatch('reconciled', nodeProducerForm);
+  const nodeReceiverAcknowledged = Form.useWatch('reconciled', nodeReceiverForm);
+  const producerTokenId = Form.useWatch('tokenId', nodeProducerForm);
   const options = nodes.filter((node) => !node.transitive).map((node) => ({ value: node.id, label: `${node.name || node.id} (#${node.id})` }));
 
   const registerSender = async (values: SenderFields) => {
@@ -65,9 +73,39 @@ export default function TrafficPeerModal({ open, nodes, onClose, onChanged }: Pr
     } finally { setBusy(false); }
   };
 
+  const registerNodeProducer = async (values: NodeProducerFields) => {
+    if (!values.reconciled) return;
+    setBusy(true); setError(''); setNodeProducerState(null);
+    try {
+      const msg = await HttpUtil.post<SenderState>('/panel/api/nodes/nodeSnapshot/producer', { tokenId: values.tokenId, reconciled: true }, { silent: true });
+      if (!msg.success || !msg.obj?.sender || !msg.obj?.generation) { setError(msg.msg || t('somethingWentWrong')); return; }
+      setNodeProducerState(msg.obj); nodeProducerForm.setFieldValue('reconciled', false); message.success(t('pages.nodes.trafficPeers.nodeProducerSaved'));
+    } finally { setBusy(false); }
+  };
+
+  const readNodeProducer = async () => {
+    if (!producerTokenId) return;
+    setBusy(true); setError(''); setNodeProducerState(null);
+    try {
+      const msg = await HttpUtil.get<SenderState>(`/panel/api/nodes/nodeSnapshot/producer/${producerTokenId}`, undefined, { silent: true });
+      if (!msg.success || !msg.obj?.sender || !msg.obj?.generation) { setError(msg.msg || t('somethingWentWrong')); return; }
+      setNodeProducerState(msg.obj);
+    } finally { setBusy(false); }
+  };
+
+  const registerNodeReceiver = async (values: NodeReceiverFields) => {
+    if (!values.reconciled) return;
+    setBusy(true); setError('');
+    try {
+      const msg = await HttpUtil.post(`/panel/api/nodes/nodeSnapshot/receiver/${values.nodeId}`, { sender: values.sender, generation: values.generation, reconciled: true }, { silent: true });
+      if (!msg.success) { setError(msg.msg || t('somethingWentWrong')); return; }
+      nodeReceiverForm.resetFields(); onChanged(); message.success(t('pages.nodes.trafficPeers.nodeReceiverSaved'));
+    } finally { setBusy(false); }
+  };
+
   const close = () => {
     if (busy) return;
-    senderForm.resetFields(); receiverForm.resetFields(); setSenderState(null); setError(''); onClose();
+    senderForm.resetFields(); receiverForm.resetFields(); nodeProducerForm.resetFields(); nodeReceiverForm.resetFields(); setSenderState(null); setNodeProducerState(null); setError(''); onClose();
   };
   const required = [{ required: true, message: t('pages.nodes.trafficPeers.required') }];
   return (
@@ -77,7 +115,7 @@ export default function TrafficPeerModal({ open, nodes, onClose, onChanged }: Pr
         {error && <Alert type="error" showIcon title={error} />}
         <Tabs items={[
           { key: 'sender', label: t('pages.nodes.trafficPeers.senderTab'), children: (
-            <Form form={senderForm} layout="vertical" onFinish={registerSender} initialValues={{ reconciled: false }}>
+            <Form name="globalTrafficSender" form={senderForm} layout="vertical" onFinish={registerSender} initialValues={{ reconciled: false }}>
               <Form.Item name="nodeId" label={t('pages.nodes.trafficPeers.node')} rules={required}>
                 <Select options={options} onChange={() => { setSenderState(null); setError(''); }} />
               </Form.Item>
@@ -97,8 +135,37 @@ export default function TrafficPeerModal({ open, nodes, onClose, onChanged }: Pr
               )} />}
             </Form>
           ) },
+          { key: 'nodeProducer', label: t('pages.nodes.trafficPeers.nodeProducerTab'), children: (
+            <Form name="nodeSnapshotProducer" form={nodeProducerForm} layout="vertical" onFinish={registerNodeProducer} initialValues={{ reconciled: false }}>
+              <Alert type="warning" showIcon title={t('pages.nodes.trafficPeers.nodeProducerWarning')} style={{ marginBottom: 16 }} />
+              <Form.Item name="tokenId" label={t('pages.nodes.trafficPeers.nodeTokenId')} rules={required}><InputNumber min={1} precision={0} style={{ width: '100%' }} onChange={() => { setNodeProducerState(null); setError(''); }} /></Form.Item>
+              <Form.Item name="reconciled" valuePropName="checked"><Checkbox>{t('pages.nodes.trafficPeers.confirm')}</Checkbox></Form.Item>
+              <Space wrap>
+                <Button htmlType="submit" type="primary" disabled={!nodeProducerAcknowledged} loading={busy}>{t('pages.nodes.trafficPeers.registerNodeProducer')}</Button>
+                <Button onClick={readNodeProducer} disabled={!producerTokenId || busy}>{t('pages.nodes.trafficPeers.readNodeProducer')}</Button>
+              </Space>
+              {nodeProducerState && <Alert style={{ marginTop: 16 }} type="info" showIcon title={t('pages.nodes.trafficPeers.nodeTransferTitle')} description={(
+                <Space orientation="vertical" size="small">
+                  <span>{t('pages.nodes.trafficPeers.nodeTransferHint')}</span>
+                  <Typography.Text copyable>{nodeProducerState.sender}</Typography.Text>
+                  <Typography.Text copyable>{nodeProducerState.generation}</Typography.Text>
+                  <span>{t('pages.nodes.trafficPeers.sequence', { count: nodeProducerState.lastSequence })}</span>
+                </Space>
+              )} />}
+            </Form>
+          ) },
+          { key: 'nodeReceiver', label: t('pages.nodes.trafficPeers.nodeReceiverTab'), children: (
+            <Form name="nodeSnapshotReceiver" form={nodeReceiverForm} layout="vertical" onFinish={registerNodeReceiver} initialValues={{ reconciled: false }}>
+              <Alert type="warning" showIcon title={t('pages.nodes.trafficPeers.nodeReceiverWarningTitle')} description={t('pages.nodes.trafficPeers.nodeReceiverWarning')} style={{ marginBottom: 16 }} />
+              <Form.Item name="nodeId" label={t('pages.nodes.trafficPeers.node')} rules={required}><Select options={options} /></Form.Item>
+              <Form.Item name="sender" label={t('pages.nodes.trafficPeers.nodeSenderIdentity')} rules={required}><Input maxLength={256} autoComplete="off" /></Form.Item>
+              <Form.Item name="generation" label={t('pages.nodes.trafficPeers.generation')} rules={required}><Input maxLength={256} autoComplete="off" /></Form.Item>
+              <Form.Item name="reconciled" valuePropName="checked"><Checkbox>{t('pages.nodes.trafficPeers.nodeReceiverConfirm')}</Checkbox></Form.Item>
+              <Button htmlType="submit" type="primary" danger disabled={!nodeReceiverAcknowledged} loading={busy}>{t('pages.nodes.trafficPeers.registerNodeReceiver')}</Button>
+            </Form>
+          ) },
           { key: 'receiver', label: t('pages.nodes.trafficPeers.receiverTab'), children: (
-            <Form form={receiverForm} layout="vertical" onFinish={registerReceiver} initialValues={{ reconciled: false }}>
+            <Form name="globalTrafficReceiver" form={receiverForm} layout="vertical" onFinish={registerReceiver} initialValues={{ reconciled: false }}>
               <Form.Item name="tokenId" label={t('pages.nodes.trafficPeers.tokenId')} rules={required}><InputNumber min={1} precision={0} style={{ width: '100%' }} /></Form.Item>
               <Form.Item name="sender" label={t('pages.nodes.trafficPeers.senderIdentity')} rules={required}><Input maxLength={256} autoComplete="off" /></Form.Item>
               <Form.Item name="generation" label={t('pages.nodes.trafficPeers.generation')} rules={required}><Input maxLength={256} autoComplete="off" /></Form.Item>

@@ -522,7 +522,7 @@ captures local database traffic without the global overlay, uses a distinct
 node-snapshot key, and reserves its sequence while holding the allocation lock.
 It rejects missing traffic, ambiguous identities, malformed settings, nested
 nodes, and other-admin inbounds rather than signing a partial view. It does not
-poll Xray or establish completeness of historical or unpolled usage. The interactive-superadmin API (not yet the UI) stages a node producer with
+poll Xray or establish completeness of historical or unpolled usage. The Nodes peer setup dialog and interactive-superadmin API stage a node producer with
 `POST /panel/api/nodes/nodeSnapshot/producer` (`tokenId`, `reconciled: true`)
 and can reread its identity with `GET /panel/api/nodes/nodeSnapshot/producer/:tokenId`.
 Transfer the sender and generation securely to the master. On the master,
