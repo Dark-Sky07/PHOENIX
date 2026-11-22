@@ -9,7 +9,8 @@ import (
 // rejectResellerUnverifiedNodes blocks participating quota mutations for any
 // reseller assigned a remote inbound or owning a client attached to one.
 // Verified outbound global pushes do not authenticate the reverse node traffic
-// snapshots, so every remote node remains unverified for this purpose. The
+// snapshots. Even verified incoming snapshots do not prove historical or
+// unpolled usage complete, so every remote node remains blocked. The
 // caller must hold its normal allocation lock when mutation follows this check.
 // This does not cover administrator/DB writes, missing associations or remote
 // runtimes that are no longer represented in these tables.

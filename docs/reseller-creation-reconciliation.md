@@ -456,8 +456,8 @@ Verified mode is not automatically provisioned. The Nodes page provides an
 experimental interactive superadmin setup dialog. Do not enable it until both peers, their identities, generations, sequence
 state and token are configured and reconciled under a reviewed procedure.
 
-The agreed rollout is **not complete**: inbound node snapshots remain legacy;
-the dashboard and limited reseller guard described below do not cover all write
+The agreed rollout is **not complete**: inbound node snapshots remain legacy
+unless explicitly provisioned for the experimental verified path; the dashboard and limited reseller guard described below do not cover all write
 paths. Cross-process failover/integration testing remains necessary. These mechanisms
 do not prove that a runtime observed or reported all traffic. The lock cannot
 fence a lost PostgreSQL session or nonparticipating writers. Database rollback
@@ -494,8 +494,8 @@ these registration operations and can reread an existing sender identity and
 generation, and can activate after the readiness check. Unregistered peers still use legacy paths.
 
 The administrator dashboard now warns about every registered node, including
-disabled nodes and nodes with verified outgoing global pushes, because incoming
-node snapshots do not yet have an authenticated ordered protocol. The warning
+disabled nodes and nodes with either experimental verified direction enabled,
+because neither proves that historical or unpolled usage is complete. The warning
 links to the existing node inventory conceptually (all registered nodes are
 affected); it does not list credentials or client identities. If node status
 cannot be read, the dashboard warns rather than treating it as clear. A zero
@@ -507,8 +507,8 @@ not proof of safe incoming node accounting.
 As an interim fail-closed measure, participating reseller traffic/client quota
 checks and automatic renewal reservations reject accounts assigned a remote
 inbound or owning a client attached to one. This applies to unlimited accounts
-and to nodes with verified outbound pushes: incoming node snapshots are still
-unverified. Normal quota/accounting mutation callers must hold the allocation
+and to nodes with either verified snapshot direction: historical or unpolled
+usage is not proven complete. Normal quota/accounting mutation callers must hold the allocation
 lock. The rule can block otherwise healthy resellers until an incoming protocol
 and an evidence-based migration exist; it does not shut down the node. It is
 not a complete perimeter: direct administrator/runtime/database writes,
