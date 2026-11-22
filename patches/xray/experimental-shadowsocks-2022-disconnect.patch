@@ -1,18 +1,20 @@
 --- a/proxy/shadowsocks_2022/inbound_multi.go
 +++ b/proxy/shadowsocks_2022/inbound_multi.go
-@@ -5,0 +6 @@
+@@ -5,0 +6,3 @@
++	goerrors "errors"
 +	"io"
-@@ -43 +44,2 @@
++	gonet "net"
+@@ -43 +46,2 @@
 -	service  *shadowaead_2022.MultiService[int]
 +	service  *shadowaead_2022.MultiService[*protocol.MemoryUser]
 +	sessions map[*protocol.MemoryUser]map[*phoenixSession]struct{}
-@@ -78 +80 @@
+@@ -78 +82 @@
 -	service, err := shadowaead_2022.NewMultiService[int](config.Method, psk, 500, inbound, nil)
 +	service, err := shadowaead_2022.NewMultiService[*protocol.MemoryUser](config.Method, psk, 500, inbound, nil)
-@@ -83 +85 @@
+@@ -83 +87 @@
 -		C.MapIndexed(memUsers, func(index int, it *protocol.MemoryUser) int { return index }),
 +		memUsers,
-@@ -98,6 +100,3 @@
+@@ -98,6 +102,3 @@
 -
 -	if u.Email != "" {
 -		for idx := range i.users {
@@ -22,7 +24,7 @@
 +	for _, existing := range i.users {
 +		if u.Email != "" && strings.EqualFold(existing.Email, u.Email) {
 +			return errors.New("User ", u.Email, " already exists.")
-@@ -106,9 +105,5 @@
+@@ -106,9 +107,5 @@
 -	i.users = append(i.users, u)
 -
 -	// sync to multi service
@@ -37,7 +39,7 @@
 +		return err
 +	}
 +	i.users = next
-@@ -118 +113,6 @@
+@@ -118 +115,6 @@
 -// RemoveUser implements proxy.UserManager.RemoveUser().
 +// updatePhoenixUsers is called under i.Lock, or before publication at startup.
 +func (i *MultiUserInbound) updatePhoenixUsers(users []*protocol.MemoryUser) error {
@@ -45,23 +47,23 @@
 +}
 +
 +// RemoveUser removes authentication and closes the matching tracked sessions.
-@@ -123 +122,0 @@
+@@ -123 +124,0 @@
 -
-@@ -125,2 +123,0 @@
+@@ -125,2 +125,0 @@
 -	defer i.Unlock()
 -
-@@ -128 +125 @@
+@@ -128 +127 @@
 -	for ii, u := range i.users {
 +	for n, u := range i.users {
-@@ -130 +127 @@
+@@ -130 +129 @@
 -			idx = ii
 +			idx = n
-@@ -134,2 +131,2 @@
+@@ -134,2 +133,2 @@
 -
 -	if idx == -1 {
 +	if idx < 0 {
 +		i.Unlock()
-@@ -137,0 +135,25 @@
+@@ -137,0 +137,25 @@
 +	user := i.users[idx]
 +	next := make([]*protocol.MemoryUser, 0, len(i.users)-1)
 +	next = append(next, i.users[:idx]...)
@@ -78,7 +80,7 @@
 +	i.Unlock()
 +	var closeErr error
 +	for _, c := range connections {
-+		if err := c.connection.Close(); err != nil && closeErr == nil {
++		if err := c.connection.Close(); err != nil && !goerrors.Is(err, gonet.ErrClosed) && closeErr == nil {
 +			closeErr = err
 +		}
 +	}
@@ -87,7 +89,7 @@
 +	}
 +	return nil
 +}
-@@ -139,12 +161 @@
+@@ -139,12 +163 @@
 -	ulen := len(i.users)
 -
 -	i.users[idx] = i.users[ulen-1]
@@ -101,7 +103,7 @@
 -		C.Map(i.users, func(it *protocol.MemoryUser) string { return it.Account.(*MemoryAccount).Key }),
 -	)
 +type phoenixSession struct{ connection io.Closer }
-@@ -152 +163,34 @@
+@@ -152 +165,34 @@
 -	return nil
 +// Authentication may have completed against an old service snapshot. The
 +// object identity check prevents registering after deletion or replacement.
@@ -137,7 +139,7 @@
 +			delete(i.sessions, user)
 +		}
 +	}, true
-@@ -231,2 +275,9 @@
+@@ -231,2 +277,9 @@
 -	userInt, _ := A.UserFromContext[int](ctx)
 -	user := i.users[userInt]
 +	user, found := A.UserFromContext[*protocol.MemoryUser](ctx)
@@ -149,7 +151,7 @@
 +		return errors.New("Shadowsocks 2022 user removed during authentication")
 +	}
 +	defer untrack()
-@@ -255,2 +306,9 @@
+@@ -255,2 +308,9 @@
 -	userInt, _ := A.UserFromContext[int](ctx)
 -	user := i.users[userInt]
 +	user, found := A.UserFromContext[*protocol.MemoryUser](ctx)
