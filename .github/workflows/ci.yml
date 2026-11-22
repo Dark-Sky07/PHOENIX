@@ -129,14 +129,14 @@ jobs:
           print(f'::error title=experimental-xray-build-output::{output}')
           PYLOG
           exit 1
-      - name: Test VLESS, Trojan and VMess connections close on user removal
+      - name: Test experimental TCP connections close on user removal
         env:
           XRAY_E2E_BINARY: /tmp/phoenix-xray-experimental
           XRAY_EXPECT_EXPERIMENTAL_DRAIN: '1'
         shell: bash
         run: |
           set -o pipefail
-          if go test -mod=mod ./internal/xray -run '^(TestXrayRemoveUserDoesNotDrainEstablished(VLESS|Trojan)|TestExperimentalVMessDisconnect)$' -count=1 -v 2>&1 | tee /tmp/experimental-xray-test.log; then exit 0; fi
+          if go test -mod=mod ./internal/xray -run '^(TestXrayRemoveUserDoesNotDrainEstablished(VLESS|Trojan)|TestExperimentalVMessDisconnect|TestExperimentalShadowsocksTCPDisconnect)$' -count=1 -v 2>&1 | tee /tmp/experimental-xray-test.log; then exit 0; fi
           python3 - <<'PYLOG'
           from pathlib import Path
           output = Path('/tmp/experimental-xray-test.log').read_text(errors='replace')[-4000:]
