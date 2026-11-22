@@ -717,3 +717,20 @@ func TestSingleDetachRemoteMutationAndSaveFailureMarksNodeDirty(t *testing.T) {
 		t.Fatalf("failed inbound transaction was not preserved: err=%v", err)
 	}
 }
+
+func TestSetInboundEnablePlanFailurePreservesPersistedState(t *testing.T) {
+	setupConflictDB(t)
+	db := database.GetDB()
+	nodeID := 987654
+	ib := model.Inbound{UserId: 1, Port: 19188, Protocol: model.VLESS, Tag: "toggle-missing-node", Enable: true, NodeID: &nodeID, Settings: `{"clients":[]}`}
+	if err := db.Create(&ib).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&InboundService{}).SetInboundEnable(ib.Id, false); err == nil {
+		t.Fatal("missing node plan succeeded")
+	}
+	var persisted model.Inbound
+	if err := db.First(&persisted, ib.Id).Error; err != nil || !persisted.Enable {
+		t.Fatalf("failed toggle changed persisted state: %+v err=%v", persisted, err)
+	}
+}

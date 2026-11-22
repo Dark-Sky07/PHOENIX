@@ -1374,6 +1374,13 @@ func (s *InboundService) SetInboundEnable(id int, enable bool) (bool, error) {
 		return false, common.NewError("openvpn is supported only on the local Linux host")
 	}
 
+	// Resolve the plan before persisting the toggle. Otherwise a missing node
+	// can leave the DB changed without applying or scheduling runtime recovery,
+	// and a retry would incorrectly see the requested state as already done.
+	rt, push, dirty, perr := s.nodePushPlan(inbound)
+	if perr != nil {
+		return false, perr
+	}
 	db := database.GetDB()
 	if err := db.Model(model.Inbound{}).Where("id = ?", id).
 		Update("enable", enable).Error; err != nil {
@@ -1382,10 +1389,6 @@ func (s *InboundService) SetInboundEnable(id int, enable bool) (bool, error) {
 	inbound.Enable = enable
 
 	needRestart := false
-	rt, push, dirty, perr := s.nodePushPlan(inbound)
-	if perr != nil {
-		return false, perr
-	}
 
 	// Remote nodes interpret DelInbound as a real row delete (it hits
 	// panel/api/inbounds/del/:id on the remote), so toggling the enable

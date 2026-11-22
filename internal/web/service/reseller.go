@@ -15,7 +15,6 @@ import (
 
 	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
-	"github.com/Dark-Sky07/phoenix/internal/logger"
 	"github.com/Dark-Sky07/phoenix/internal/util/crypto"
 	moneycurrency "github.com/Dark-Sky07/phoenix/internal/util/currency"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
@@ -441,49 +440,61 @@ func (s *ResellerService) SetEnable(id int, enable bool) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if reseller.Enable == enable {
+	// A failed disable can leave some owned resources active. Allow a repeated
+	// disable to retry them, without bumping the session epoch again. Do not
+	// re-enable manually disabled clients on a redundant enable request.
+	if reseller.Enable == enable && enable {
 		return false, nil
 	}
 	db := database.GetDB()
-	updates := map[string]any{
-		"enable":      enable,
-		"updated_at":  time.Now().UnixMilli(),
-		"login_epoch": reseller.LoginEpoch + 1,
-	}
-	if err := db.Model(model.Reseller{}).Where("id = ?", id).Updates(updates).Error; err != nil {
-		return false, err
+	if reseller.Enable != enable {
+		updates := map[string]any{
+			"enable":      enable,
+			"updated_at":  time.Now().UnixMilli(),
+			"login_epoch": reseller.LoginEpoch + 1,
+		}
+		if err := db.Model(model.Reseller{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+			return false, err
+		}
 	}
 	needRestart := false
+	var failures []error
 	ids, err := s.OwnedInboundIds(id)
 	if err != nil {
-		return false, err
+		failures = append(failures, fmt.Errorf("list owned inbounds: %w", err))
 	}
 	for _, inboundId := range ids {
 		var otherResellers int64
 		if err := db.Model(model.ResellerInbound{}).
 			Where("inbound_id = ? AND reseller_id <> ?", inboundId, id).
 			Count(&otherResellers).Error; err != nil {
-			logger.Warningf("reseller %d: failed to check shared inbound %d: %v", id, inboundId, err)
+			failures = append(failures, fmt.Errorf("check shared inbound %d: %w", inboundId, err))
 			continue
 		}
 		if otherResellers > 0 {
-			// Inbound is shared with other resellers — never toggle the whole
-			// inbound; toggle only this reseller's own isolated clients below.
+			// Shared inbounds must not be toggled for other resellers.
 			continue
 		}
-		changed, err := s.inboundService.SetInboundEnable(inboundId, enable)
+		restart, err := s.inboundService.SetInboundEnable(inboundId, enable)
+		needRestart = needRestart || restart
 		if err != nil {
-			logger.Warningf("reseller %d: failed to set inbound %d enable=%v: %v", id, inboundId, enable, err)
-			continue
+			failures = append(failures, fmt.Errorf("set inbound %d enable=%v: %w", inboundId, enable, err))
 		}
-		needRestart = needRestart || changed
 	}
-	if isolated, err := s.OwnedIsolatedAssociatedEmailSet(id); err == nil {
+	isolated, err := s.OwnedIsolatedAssociatedEmailSet(id)
+	if err != nil {
+		failures = append(failures, fmt.Errorf("list isolated clients: %w", err))
+	} else {
 		for email := range isolated {
-			if _, changed, err := s.clientService.SetClientEnableByEmail(&s.inboundService, email, enable); err == nil {
-				needRestart = needRestart || changed
+			_, restart, err := s.clientService.SetClientEnableByEmail(&s.inboundService, email, enable)
+			needRestart = needRestart || restart
+			if err != nil {
+				failures = append(failures, fmt.Errorf("set client %s enable=%v: %w", email, enable, err))
 			}
 		}
+	}
+	if len(failures) > 0 {
+		return needRestart, fmt.Errorf("reseller state saved, but resource enforcement is incomplete: %w", errors.Join(failures...))
 	}
 	return needRestart, nil
 }

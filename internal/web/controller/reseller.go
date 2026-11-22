@@ -29,6 +29,7 @@ type resellerForm struct {
 type ResellerController struct {
 	BaseController
 	resellerService service.ResellerService
+	xrayService     service.XrayService
 	ticketService   service.TicketService
 	webhookService  service.PaymentWebhookService
 	voucherService  service.VoucherService
@@ -380,7 +381,12 @@ func (a *ResellerController) setEnable(c *gin.Context) {
 		jsonMsg(c, "", err)
 		return
 	}
-	if _, err := a.resellerService.SetEnable(id, form.Enable); err != nil {
+	needRestart, err := a.resellerService.SetEnable(id, form.Enable)
+	// A failed enforcement can still have mutated the running core.
+	if needRestart {
+		a.xrayService.SetToNeedRestart()
+	}
+	if err != nil {
 		jsonMsg(c, "", err)
 		return
 	}

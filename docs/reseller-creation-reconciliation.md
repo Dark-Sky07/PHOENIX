@@ -740,3 +740,14 @@ accounting for bytes already read and needs further protocol and production
 review. It neither waits for a pending read to finish nor proves that a final
 poll or commit is complete, so it remains experimental and does not affect
 release binaries or lift any quota guard.
+
+Administrative reseller enable/disable is not an atomic runtime operation.
+The account state and login epoch are saved before enforcement across inbounds
+and isolated clients. Partial enforcement failures are now returned to the
+caller, and local restart requests are propagated even on failure. A repeated
+**disable** retries eligible resources without bumping the login epoch again;
+a redundant enable remains a no-op to avoid unexpectedly re-enabling clients
+that an administrator disabled independently. A failed enable may therefore
+need manual investigation and resource reconciliation. Remote dirty markers
+and local restart requests are recovery signals, not evidence of closed
+sessions, complete traffic accounting, or successful final synchronization.
