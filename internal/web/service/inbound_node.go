@@ -212,7 +212,19 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 	if snap == nil || nodeID <= 0 {
 		return false, nil
 	}
-	db := database.GetDB()
+	// Baselines, mirrored rows, and their associated writes must see the same
+	// transaction. The allocation lock remains required for cross-process
+	// serialization with other participating accounting paths.
+	tx := database.GetDB().Begin()
+	if tx.Error != nil {
+		return false, tx.Error
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			tx.Rollback()
+		}
+	}()
 	now := time.Now().UnixMilli()
 	// Validate the whole snapshot before any baseline or database mutation.
 	// A malformed counter must not turn into a reset or partially advance a
@@ -252,7 +264,7 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 	// empty result (old-build node with no GUID yet) leaves attribution to the
 	// node_id fallback downstream (#4983).
 	var nodeRow model.Node
-	db.Select("guid").Where("id = ?", nodeID).First(&nodeRow)
+	tx.Select("guid").Where("id = ?", nodeID).First(&nodeRow)
 	originGuidFor := func(snapIb *model.Inbound) string {
 		if snapIb.OriginNodeGuid != "" {
 			return snapIb.OriginNodeGuid
@@ -261,7 +273,7 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 	}
 
 	var central []model.Inbound
-	if err := db.Model(model.Inbound{}).
+	if err := tx.Model(model.Inbound{}).
 		Where("node_id = ?", nodeID).
 		Find(&central).Error; err != nil {
 		return false, err
@@ -288,7 +300,7 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 		for i := range central {
 			ids = append(ids, central[i].Id)
 		}
-		if err := db.Model(xray.ClientTraffic{}).
+		if err := tx.Model(xray.ClientTraffic{}).
 			Where("inbound_id IN ?", ids).
 			Find(&centralClientStats).Error; err != nil {
 			return false, err
@@ -308,7 +320,7 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 
 	nodeBaselines := make(map[string]nodeTrafficCounter)
 	var baselineRows []model.NodeClientTraffic
-	if err := db.Model(&model.NodeClientTraffic{}).
+	if err := tx.Model(&model.NodeClientTraffic{}).
 		Where("node_id = ?", nodeID).
 		Find(&baselineRows).Error; err != nil {
 		return false, err
@@ -327,7 +339,7 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 	}
 
 	var existingRows []xray.ClientTraffic
-	if err := db.Model(xray.ClientTraffic{}).Select("email", "up", "down").Find(&existingRows).Error; err != nil {
+	if err := tx.Model(xray.ClientTraffic{}).Select("email", "up", "down").Find(&existingRows).Error; err != nil {
 		return false, err
 	}
 	existingEmails := make(map[string]struct{}, len(existingRows))
@@ -349,7 +361,7 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 		defaultUserId = central[0].UserId
 	} else {
 		var u model.User
-		if err := db.Model(model.User{}).Order("id asc").First(&u).Error; err == nil {
+		if err := tx.Model(model.User{}).Order("id asc").First(&u).Error; err == nil {
 			defaultUserId = u.Id
 		} else {
 			defaultUserId = 1
@@ -374,17 +386,6 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 		}
 	}
 
-	tx := db.Begin()
-	committed := false
-	defer func() {
-		if !committed {
-			tx.Rollback()
-		}
-	}()
-
-	if tx.Error != nil {
-		return false, tx.Error
-	}
 	if err := validateNodeResellerSnapshot(tx, nodeID, snap, tagToCentral, dirty); err != nil {
 		return false, err
 	}
@@ -567,7 +568,7 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 			// email's last inbound — wiping it while a sibling still feeds it
 			// loses the summed history, and the next node sync would re-seed the
 			// row with that node's counter alone.
-			sharedEmails, sErr := s.emailsUsedByOtherInbounds(goneEmails, c.Id)
+			sharedEmails, sErr := emailsUsedByOtherInboundsDB(tx, goneEmails, c.Id)
 			if sErr != nil {
 				return false, sErr
 			}
@@ -709,7 +710,7 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 			}
 			// Same shared-accumulator rule as the inbound-removal sweep above:
 			// keep the row while another inbound still references the email.
-			stillUsed, uErr := s.emailUsedByOtherInbounds(existing.Email, c.Id)
+			stillUsed, uErr := emailUsedByOtherInboundsDB(tx, existing.Email, c.Id)
 			if uErr != nil {
 				return false, uErr
 			}
