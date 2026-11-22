@@ -667,3 +667,19 @@ user's stream remains usable, and a race test covers stale authentication and
 registration. Trojan UDP-over-TCP is not independently tested. As with the
 VLESS prototype, neither patch supplies a final counter flush or a durable fence,
 and neither is enabled in release or quota reconciliation.
+
+The experimental build also includes VMess and legacy AEAD Shadowsocks TCP
+patches. CI exercises each with a real Xray SOCKS client and two user streams,
+as well as handler registration/removal race tests. The Shadowsocks patch does
+**not** cover UDP or Shadowsocks 2022. In particular, the legacy Shadowsocks UDP
+handler caches an authenticated `inbound.User` and uses it for subsequent
+packets; removing a user from the validator alone does not revoke that cached
+UDP flow. Do not interpret TCP test success as UDP revocation.
+
+For every experimental protocol, closing a transport is not equivalent to
+waiting for forwarding goroutines and counter writers to finish: late buffered
+traffic and asynchronous writes must be drained and then durably merged before
+quota is released. A process crash during that process and node rollback also
+need fail-closed recovery. Until an authenticated, versioned capability with
+these properties is implemented and deployed, the current upstream release
+and reconciliation guards remain unchanged.

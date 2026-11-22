@@ -116,6 +116,7 @@ func TestExperimentalVMessDisconnect(t *testing.T) {
 	} else if n, ok := err.(net.Error); ok && n.Timeout() {
 		t.Fatalf("removed VMess session did not close: %v", err)
 	}
+	assertRemovedCredentialRejected(t, clientA, echoPort)
 }
 
 func vmessTestOutbound(tag, id string, port int) map[string]any {
@@ -261,8 +262,29 @@ func TestExperimentalShadowsocksTCPDisconnect(t *testing.T) {
 	} else if n, ok := err.(net.Error); ok && n.Timeout() {
 		t.Fatalf("removed Shadowsocks TCP session did not close: %v", err)
 	}
+	assertRemovedCredentialRejected(t, clientA, echoPort)
 }
 
 func shadowsocksTestOutbound(tag, password string, port int) map[string]any {
 	return map[string]any{"tag": tag, "protocol": "shadowsocks", "settings": map[string]any{"servers": []any{map[string]any{"address": "127.0.0.1", "port": port, "method": "aes-128-gcm", "password": password}}}}
+}
+
+// SOCKS can acknowledge a request before the upstream authentication fails;
+// only accepting a returned byte would demonstrate that forwarding survived.
+func assertRemovedCredentialRejected(t *testing.T, socksPort, target int) {
+	t.Helper()
+	c := vmessTestSOCKS(t, socksPort, target)
+	defer c.Close()
+	if err := c.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Write([]byte("retry")); err != nil {
+		return
+	}
+	var b [1]byte
+	if _, err := c.Read(b[:]); err == nil {
+		t.Fatal("removed credential forwarded a new connection")
+	} else if n, ok := err.(net.Error); ok && n.Timeout() {
+		t.Fatalf("removed credential connection did not terminate: %v", err)
+	}
 }
