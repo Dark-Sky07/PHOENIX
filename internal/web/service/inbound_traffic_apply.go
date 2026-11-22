@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"strings"
 
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
 	"github.com/Dark-Sky07/phoenix/internal/logger"
@@ -113,9 +112,6 @@ func (s *InboundService) applyTrafficMutationBatch(b *trafficMutationBatch) bool
 				err = rt.AddUser(context.Background(), &plan.inbound, plan.client)
 			case trafficRemoveUser:
 				err = rt.RemoveUser(context.Background(), &plan.inbound, plan.email)
-				if err != nil && strings.Contains(err.Error(), "not found") {
-					err = nil
-				}
 			case trafficDisableInbound:
 				err = rt.DelInbound(context.Background(), &plan.inbound)
 				if xray.IsMissingHandlerErr(err) {

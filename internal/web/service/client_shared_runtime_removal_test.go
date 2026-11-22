@@ -11,15 +11,21 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/xray"
 	"github.com/xtls/xray-core/app/proxyman/command"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type recordingRemovalServer struct {
 	command.UnimplementedHandlerServiceServer
 	requests chan *command.AlterInboundRequest
+	failure  error
 }
 
 func (s *recordingRemovalServer) AlterInbound(_ context.Context, req *command.AlterInboundRequest) (*command.AlterInboundResponse, error) {
 	s.requests <- req
+	if s.failure != nil {
+		return nil, s.failure
+	}
 	return &command.AlterInboundResponse{}, nil
 }
 
@@ -100,5 +106,90 @@ func TestDetachSharedEmailRemovesOnlyTargetInboundRuntimeUser(t *testing.T) {
 	}
 	if other.Settings != settings {
 		t.Fatal("other inbound settings changed")
+	}
+}
+
+func TestBulkDetachAttemptsRemovalWhenTrafficDisabledOrMissing(t *testing.T) {
+	for _, withStats := range []bool{false, true} {
+		name := "missing"
+		if withStats {
+			name = "disabled"
+		}
+		t.Run(name, func(t *testing.T) {
+			setupConflictDB(t)
+			db := database.GetDB()
+			email := "bulk-remove@example.test"
+			client := model.ClientRecord{Email: email, Enable: true}
+			ib := model.Inbound{UserId: 1, Port: 19183, Protocol: model.VLESS, Tag: "bulk-test", Settings: `{"clients":[{"email":"bulk-remove@example.test","id":"a17e367c-2074-4d3e-aaeb-fbef5dfde7e7","enable":true}]}`}
+			for _, v := range []any{&client, &ib} {
+				if err := db.Create(v).Error; err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := db.Create(&model.ClientInbound{ClientId: client.Id, InboundId: ib.Id}).Error; err != nil {
+				t.Fatal(err)
+			}
+			if withStats {
+				if err := db.Create(&xray.ClientTraffic{Email: email, Enable: false}).Error; err != nil {
+					t.Fatal(err)
+				}
+			}
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			server := grpc.NewServer()
+			recorder := &recordingRemovalServer{requests: make(chan *command.AlterInboundRequest, 2)}
+			command.RegisterHandlerServiceServer(server, recorder)
+			go func() { _ = server.Serve(listener) }()
+			defer server.Stop()
+			old := runtime.GetManager()
+			runtime.SetManager(runtime.NewManager(runtime.LocalDeps{APIPort: func() int { return listener.Addr().(*net.TCPAddr).Port }}))
+			t.Cleanup(func() { runtime.SetManager(old) })
+			result := (&ClientService{}).bulkDelInboundClients(&InboundService{}, ib.Id, []string{email}, map[string]*model.ClientRecord{email: &client}, true)
+			if result.needRestart || len(result.perEmailSkipped) != 0 {
+				t.Fatalf("unexpected result: %+v", result)
+			}
+			select {
+			case req := <-recorder.requests:
+				if req.Tag != ib.Tag {
+					t.Fatalf("unexpected inbound: %q", req.Tag)
+				}
+				op, err := req.Operation.GetInstance()
+				if err != nil {
+					t.Fatal(err)
+				}
+				removed, ok := op.(*command.RemoveUserOperation)
+				if !ok || removed.Email != email {
+					t.Fatalf("unexpected operation: %v", op)
+				}
+			default:
+				t.Fatal("missing or disabled counters suppressed runtime removal")
+			}
+		})
+	}
+}
+
+// A not-found reply may follow a timed-out deletion and does not prove the
+// earlier sessions finished. Post-commit enforcement must request recovery.
+func TestTrafficRemovalNotFoundRequestsRestart(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	server := grpc.NewServer()
+	recorder := &recordingRemovalServer{requests: make(chan *command.AlterInboundRequest, 1), failure: status.Error(codes.NotFound, "User alice not found.")}
+	command.RegisterHandlerServiceServer(server, recorder)
+	go func() { _ = server.Serve(listener) }()
+	defer server.Stop()
+	old := runtime.GetManager()
+	runtime.SetManager(runtime.NewManager(runtime.LocalDeps{APIPort: func() int { return listener.Addr().(*net.TCPAddr).Port }}))
+	t.Cleanup(func() { runtime.SetManager(old) })
+	b := newTrafficMutationBatch()
+	b.localPlans = append(b.localPlans, trafficLocalApplyPlan{action: trafficRemoveUser, inbound: model.Inbound{Tag: "test", Protocol: model.VLESS}, email: "alice"})
+	if !(&InboundService{}).applyTrafficMutationBatch(b) {
+		t.Fatal("uncertain removal failed to request recovery")
 	}
 }

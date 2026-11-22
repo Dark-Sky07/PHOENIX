@@ -1002,25 +1002,6 @@ func (s *ClientService) bulkDelInboundClients(
 		foundList = append(foundList, email)
 	}
 
-	notDepletedByEmail := map[string]bool{}
-	if len(foundList) > 0 {
-		type trafficRow struct {
-			Email  string
-			Enable bool
-		}
-		for _, batch := range chunkStrings(foundList, sqlInChunk) {
-			var rows []trafficRow
-			if err := db.Model(xray.ClientTraffic{}).
-				Where("LOWER(TRIM(email)) IN ?", batch).
-				Select("email, enable").
-				Scan(&rows).Error; err == nil {
-				for _, r := range rows {
-					notDepletedByEmail[transferEmailKey(r.Email)] = r.Enable
-				}
-			}
-		}
-	}
-
 	var sharedSet map[string]bool
 	if !keepTraffic {
 		var sharedErr error
@@ -1064,7 +1045,7 @@ func (s *ClientService) bulkDelInboundClients(
 			res.needRestart = true
 		} else {
 			for email := range foundEmails {
-				if !enableByEmail[email] || !notDepletedByEmail[email] {
+				if !enableByEmail[email] {
 					continue
 				}
 				clientEmail := emailByKey[email]
@@ -1074,8 +1055,6 @@ func (s *ClientService) bulkDelInboundClients(
 				err1 := rt.RemoveUser(context.Background(), oldInbound, clientEmail)
 				if err1 == nil {
 					logger.Debug("Client deleted on", rt.Name(), ":", clientEmail)
-				} else if strings.Contains(err1.Error(), fmt.Sprintf("User %s not found.", clientEmail)) {
-					logger.Debug("User is already deleted. Nothing to do more...")
 				} else {
 					logger.Debug("Error in deleting client on", rt.Name(), ":", err1)
 					res.needRestart = true

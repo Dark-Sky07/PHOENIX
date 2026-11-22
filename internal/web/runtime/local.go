@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"strings"
 	"sync"
 
 	"github.com/Dark-Sky07/phoenix/internal/amneziawg"
@@ -311,18 +310,14 @@ func (l *Local) DeleteUser(ctx context.Context, ib *model.Inbound, email string)
 	if email == "" {
 		return nil
 	}
-	if err := l.RemoveUser(ctx, ib, email); err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			return nil
-		}
-		return err
-	}
-	return nil
+	// Absence of a credential after a timed-out removal is not proof that
+	// its old connections or counter writers have drained.
+	return l.RemoveUser(ctx, ib, email)
 }
 
 func (l *Local) UpdateUser(ctx context.Context, ib *model.Inbound, oldEmail string, payload model.Client) error {
 	if oldEmail != "" {
-		if err := l.RemoveUser(ctx, ib, oldEmail); err != nil && !strings.Contains(err.Error(), "not found") {
+		if err := l.RemoveUser(ctx, ib, oldEmail); err != nil {
 			return err
 		}
 	}
