@@ -34,7 +34,21 @@ func TestXrayRemoveUserDoesNotDrainEstablishedVLESS(t *testing.T) {
 			if err != nil {
 				return
 			}
-			go func() { defer conn.Close(); _, _ = io.Copy(conn, conn) }()
+			go func() {
+				defer conn.Close()
+				buf := make([]byte, 4096)
+				for {
+					n, err := conn.Read(buf)
+					if n > 0 {
+						if _, writeErr := conn.Write(buf[:n]); writeErr != nil {
+							return
+						}
+					}
+					if err != nil {
+						return
+					}
+				}
+			}()
 		}
 	}()
 	apiPort, userPort := freePort(t), freePort(t)
