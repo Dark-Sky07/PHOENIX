@@ -93,7 +93,19 @@ jobs:
       - name: Characterize established VLESS connection after user removal
         env:
           XRAY_E2E_BINARY: /tmp/phoenix-xray
-        run: go test -mod=mod ./internal/xray -run '^TestXrayRemoveUserDoesNotDrainEstablishedVLESS$' -count=1 -v
+        shell: bash
+        run: |
+          set -o pipefail
+          if go test -mod=mod ./internal/xray -run '^TestXrayRemoveUserDoesNotDrainEstablishedVLESS$' -count=1 -v 2>&1 | tee /tmp/xray-quiescence-test.log; then
+            exit 0
+          fi
+          python3 - <<'PYLOG'
+          from pathlib import Path
+          output = Path('/tmp/xray-quiescence-test.log').read_text(errors='replace')[-4000:]
+          output = output.replace('%', '%25').replace(chr(13), '%0D').replace(chr(10), '%0A')
+          print(f'::error title=xray-quiescence-test-output::{output}')
+          PYLOG
+          exit 1
 
   codegen:
     runs-on: ubuntu-latest
