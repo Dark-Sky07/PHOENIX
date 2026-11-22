@@ -289,3 +289,113 @@ func assertNoImmediateForwardingAfterRemoval(t *testing.T, socksPort, target int
 		t.Log("no forwarding observed before the deadline; connection termination is not established")
 	}
 }
+
+func TestExperimentalShadowsocks2022TCPDisconnect(t *testing.T) {
+	bin := os.Getenv("XRAY_E2E_BINARY")
+	if bin == "" || os.Getenv("XRAY_EXPECT_EXPERIMENTAL_DRAIN") != "1" {
+		t.Skip("experimental Xray required")
+	}
+	echo, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer echo.Close()
+	go func() {
+		for {
+			c, err := echo.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				b := make([]byte, 4096)
+				for {
+					n, err := c.Read(b)
+					if n > 0 {
+						if _, e := c.Write(b[:n]); e != nil {
+							return
+						}
+					}
+					if err != nil {
+						return
+					}
+				}
+			}()
+		}
+	}()
+	apiPort, serverPort, clientA, clientB := freePort(t), freePort(t), freePort(t), freePort(t)
+	ports := map[int]bool{}
+	for _, p := range []int{apiPort, serverPort, clientA, clientB} {
+		if ports[p] {
+			t.Skip("ephemeral port collision")
+		}
+		ports[p] = true
+	}
+	serverKey := "ZmVkY2JhOTg3NjU0MzIxMA=="
+	firstID, secondID := "MDEyMzQ1Njc4OWFiY2RlZg==", "YWJjZGVmZ2hpamtsbW5vcA=="
+	echoPort := echo.Addr().(*net.TCPAddr).Port
+	cfg := map[string]any{
+		"log": map[string]any{"loglevel": "warning"},
+		"api": map[string]any{"tag": "api", "services": []string{"HandlerService"}},
+		"inbounds": []any{
+			map[string]any{"listen": "127.0.0.1", "port": apiPort, "protocol": "tunnel", "settings": map[string]any{"rewriteAddress": "127.0.0.1"}, "tag": "api"},
+			map[string]any{"listen": "127.0.0.1", "port": serverPort, "protocol": "shadowsocks", "settings": map[string]any{"network": "tcp", "method": "2022-blake3-aes-128-gcm", "password": serverKey, "clients": []any{map[string]any{"password": firstID, "email": "first@example.test"}, map[string]any{"password": secondID, "email": "second@example.test"}}}, "tag": "server"},
+			map[string]any{"listen": "127.0.0.1", "port": clientA, "protocol": "socks", "settings": map[string]any{"auth": "noauth"}, "tag": "a"},
+			map[string]any{"listen": "127.0.0.1", "port": clientB, "protocol": "socks", "settings": map[string]any{"auth": "noauth"}, "tag": "b"},
+		},
+		"outbounds": []any{
+			map[string]any{"protocol": "freedom", "settings": map[string]any{"finalRules": []any{map[string]any{"action": "allow", "network": "tcp", "ip": []string{"127.0.0.1/32"}, "port": strconv.Itoa(echoPort)}}}, "tag": "direct"},
+			shadowsocks2022TestOutbound("out-a", serverKey+":"+firstID, serverPort), shadowsocks2022TestOutbound("out-b", serverKey+":"+secondID, serverPort),
+		},
+		"routing": map[string]any{"rules": []any{
+			map[string]any{"type": "field", "inboundTag": []string{"api"}, "outboundTag": "api"},
+			map[string]any{"type": "field", "inboundTag": []string{"a"}, "outboundTag": "out-a"},
+			map[string]any{"type": "field", "inboundTag": []string{"b"}, "outboundTag": "out-b"},
+		}},
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(t.TempDir(), "xray.json")
+	if err := os.WriteFile(config, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bin, "-c", config)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() }()
+	for _, port := range []int{apiPort, serverPort, clientA, clientB} {
+		waitForPort(t, port)
+	}
+	api := XrayAPI{}
+	if err := api.Init(apiPort); err != nil {
+		t.Fatal(err)
+	}
+	defer api.Close()
+	a := vmessTestSOCKS(t, clientA, echoPort)
+	defer a.Close()
+	b := vmessTestSOCKS(t, clientB, echoPort)
+	defer b.Close()
+	vmessTestEcho(t, a, "before")
+	vmessTestEcho(t, b, "other")
+	if err := api.RemoveUser("server", "first@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	vmessTestEcho(t, b, "alive")
+	_ = a.SetReadDeadline(time.Now().Add(3 * time.Second))
+	var buf [1]byte
+	if _, err := a.Read(buf[:]); err == nil {
+		t.Fatal("removed Shadowsocks 2022 TCP session still active")
+	} else if n, ok := err.(net.Error); ok && n.Timeout() {
+		t.Fatalf("removed Shadowsocks 2022 TCP session did not close: %v", err)
+	}
+	assertNoImmediateForwardingAfterRemoval(t, clientA, echoPort)
+}
+
+func shadowsocks2022TestOutbound(tag, password string, port int) map[string]any {
+	return map[string]any{"tag": tag, "protocol": "shadowsocks", "settings": map[string]any{"servers": []any{map[string]any{"address": "127.0.0.1", "port": port, "method": "2022-blake3-aes-128-gcm", "password": password}}}}
+}

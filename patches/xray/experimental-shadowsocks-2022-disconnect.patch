@@ -1,0 +1,278 @@
+--- a/proxy/shadowsocks_2022/inbound_multi.go
++++ b/proxy/shadowsocks_2022/inbound_multi.go
+@@ -5,0 +6 @@
++	"io"
+@@ -43 +44,2 @@
+-	service  *shadowaead_2022.MultiService[int]
++	service  *shadowaead_2022.MultiService[*protocol.MemoryUser]
++	sessions map[*protocol.MemoryUser]map[*phoenixSession]struct{}
+@@ -78 +80 @@
+-	service, err := shadowaead_2022.NewMultiService[int](config.Method, psk, 500, inbound, nil)
++	service, err := shadowaead_2022.NewMultiService[*protocol.MemoryUser](config.Method, psk, 500, inbound, nil)
+@@ -83 +85 @@
+-		C.MapIndexed(memUsers, func(index int, it *protocol.MemoryUser) int { return index }),
++		memUsers,
+@@ -98,6 +100,3 @@
+-
+-	if u.Email != "" {
+-		for idx := range i.users {
+-			if i.users[idx].Email == u.Email {
+-				return errors.New("User ", u.Email, " already exists.")
+-			}
++	for _, existing := range i.users {
++		if u.Email != "" && strings.EqualFold(existing.Email, u.Email) {
++			return errors.New("User ", u.Email, " already exists.")
+@@ -106,9 +105,5 @@
+-	i.users = append(i.users, u)
+-
+-	// sync to multi service
+-	// Considering implements shadowsocks2022 in xray-core may have better performance.
+-	i.service.UpdateUsersWithPasswords(
+-		C.MapIndexed(i.users, func(index int, it *protocol.MemoryUser) int { return index }),
+-		C.Map(i.users, func(it *protocol.MemoryUser) string { return it.Account.(*MemoryAccount).Key }),
+-	)
+-
++	next := append(append([]*protocol.MemoryUser(nil), i.users...), u)
++	if err := i.updatePhoenixUsers(next); err != nil {
++		return err
++	}
++	i.users = next
+@@ -118 +113,6 @@
+-// RemoveUser implements proxy.UserManager.RemoveUser().
++// updatePhoenixUsers is called under i.Lock, or before publication at startup.
++func (i *MultiUserInbound) updatePhoenixUsers(users []*protocol.MemoryUser) error {
++	return i.service.UpdateUsersWithPasswords(users, C.Map(users, func(u *protocol.MemoryUser) string { return u.Account.(*MemoryAccount).Key }))
++}
++
++// RemoveUser removes authentication and closes the matching tracked sessions.
+@@ -123 +122,0 @@
+-
+@@ -125,2 +123,0 @@
+-	defer i.Unlock()
+-
+@@ -128 +125 @@
+-	for ii, u := range i.users {
++	for n, u := range i.users {
+@@ -130 +127 @@
+-			idx = ii
++			idx = n
+@@ -134,2 +131,2 @@
+-
+-	if idx == -1 {
++	if idx < 0 {
++		i.Unlock()
+@@ -137,0 +135,25 @@
++	user := i.users[idx]
++	next := make([]*protocol.MemoryUser, 0, len(i.users)-1)
++	next = append(next, i.users[:idx]...)
++	next = append(next, i.users[idx+1:]...)
++	if err := i.updatePhoenixUsers(next); err != nil {
++		i.Unlock()
++		return err
++	}
++	i.users = next
++	connections := make([]*phoenixSession, 0, len(i.sessions[user]))
++	for c := range i.sessions[user] {
++		connections = append(connections, c)
++	}
++	i.Unlock()
++	var closeErr error
++	for _, c := range connections {
++		if err := c.connection.Close(); err != nil && closeErr == nil {
++			closeErr = err
++		}
++	}
++	if closeErr != nil {
++		return errors.New("failed to close removed Shadowsocks 2022 session").Base(closeErr)
++	}
++	return nil
++}
+@@ -139,12 +161 @@
+-	ulen := len(i.users)
+-
+-	i.users[idx] = i.users[ulen-1]
+-	i.users[ulen-1] = nil
+-	i.users = i.users[:ulen-1]
+-
+-	// sync to multi service
+-	// Considering implements shadowsocks2022 in xray-core may have better performance.
+-	i.service.UpdateUsersWithPasswords(
+-		C.MapIndexed(i.users, func(index int, it *protocol.MemoryUser) int { return index }),
+-		C.Map(i.users, func(it *protocol.MemoryUser) string { return it.Account.(*MemoryAccount).Key }),
+-	)
++type phoenixSession struct{ connection io.Closer }
+@@ -152 +163,34 @@
+-	return nil
++// Authentication may have completed against an old service snapshot. The
++// object identity check prevents registering after deletion or replacement.
++func (i *MultiUserInbound) trackPhoenixUser(user *protocol.MemoryUser, conn io.Closer) (func(), bool) {
++	if user == nil || conn == nil {
++		return nil, false
++	}
++	i.Lock()
++	defer i.Unlock()
++	found := false
++	for _, u := range i.users {
++		if u == user {
++			found = true
++			break
++		}
++	}
++	if !found {
++		return nil, false
++	}
++	if i.sessions == nil {
++		i.sessions = make(map[*protocol.MemoryUser]map[*phoenixSession]struct{})
++	}
++	if i.sessions[user] == nil {
++		i.sessions[user] = make(map[*phoenixSession]struct{})
++	}
++	entry := &phoenixSession{connection: conn}
++	i.sessions[user][entry] = struct{}{}
++	return func() {
++		i.Lock()
++		defer i.Unlock()
++		delete(i.sessions[user], entry)
++		if len(i.sessions[user]) == 0 {
++			delete(i.sessions, user)
++		}
++	}, true
+@@ -231,2 +275,9 @@
+-	userInt, _ := A.UserFromContext[int](ctx)
+-	user := i.users[userInt]
++	user, found := A.UserFromContext[*protocol.MemoryUser](ctx)
++	if !found {
++		return errors.New("missing authenticated Shadowsocks 2022 identity")
++	}
++	untrack, ok := i.trackPhoenixUser(user, conn)
++	if !ok {
++		return errors.New("Shadowsocks 2022 user removed during authentication")
++	}
++	defer untrack()
+@@ -255,2 +306,9 @@
+-	userInt, _ := A.UserFromContext[int](ctx)
+-	user := i.users[userInt]
++	user, found := A.UserFromContext[*protocol.MemoryUser](ctx)
++	if !found {
++		return errors.New("missing authenticated Shadowsocks 2022 identity")
++	}
++	untrack, ok := i.trackPhoenixUser(user, conn)
++	if !ok {
++		return errors.New("Shadowsocks 2022 user removed during authentication")
++	}
++	defer untrack()
+--- /dev/null
++++ b/proxy/shadowsocks_2022/phoenix_sessions_test.go
+@@ -0,0 +1,112 @@
++package shadowsocks_2022
++
++import (
++	"context"
++	"encoding/base64"
++	"io"
++	"net"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/sagernet/sing-shadowsocks/shadowaead_2022"
++	"github.com/xtls/xray-core/common/protocol"
++)
++
++func phoenixUser(email, key string) *protocol.MemoryUser {
++	return &protocol.MemoryUser{Email: email, Account: &MemoryAccount{Key: key}}
++}
++func phoenixServer(t *testing.T) (*MultiUserInbound, string) {
++	t.Helper()
++	i := &MultiUserInbound{}
++	key := base64.StdEncoding.EncodeToString([]byte("0123456789abcdef"))
++	service, err := shadowaead_2022.NewMultiService[*protocol.MemoryUser]("2022-blake3-aes-128-gcm", []byte("fedcba9876543210"), 500, i, nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	i.service = service
++	return i, key
++}
++func TestPhoenixSS2022RemovalAndStableIdentity(t *testing.T) {
++	i, key := phoenixServer(t)
++	a, b := phoenixUser("a@test", key), phoenixUser("b@test", base64.StdEncoding.EncodeToString([]byte("abcdefghijklmnop")))
++	if err := i.AddUser(context.Background(), a); err != nil {
++		t.Fatal(err)
++	}
++	if err := i.AddUser(context.Background(), b); err != nil {
++		t.Fatal(err)
++	}
++	ac, ap := net.Pipe()
++	defer ap.Close()
++	bc, bp := net.Pipe()
++	defer bc.Close()
++	defer bp.Close()
++	doneA, ok := i.trackPhoenixUser(a, ac)
++	if !ok {
++		t.Fatal("failed to track a")
++	}
++	defer doneA()
++	doneB, ok := i.trackPhoenixUser(b, bc)
++	if !ok {
++		t.Fatal("failed to track b")
++	}
++	defer doneB()
++	if err := i.RemoveUser(context.Background(), a.Email); err != nil {
++		t.Fatal(err)
++	}
++	_ = ap.SetReadDeadline(time.Now().Add(time.Second))
++	var byteBuf [1]byte
++	if _, err := ap.Read(byteBuf[:]); err != io.EOF {
++		t.Fatalf("removed session remains active: %v", err)
++	}
++	_ = bp.SetReadDeadline(time.Now().Add(20 * time.Millisecond))
++	if _, err := bp.Read(byteBuf[:]); err == nil {
++		t.Fatal("unexpected data")
++	} else if n, ok := err.(net.Error); !ok || !n.Timeout() {
++		t.Fatalf("other session closed: %v", err)
++	}
++	if i.GetUser(context.Background(), b.Email) != b {
++		t.Fatal("remaining identity changed after removal")
++	}
++	if err := i.AddUser(context.Background(), phoenixUser(a.Email, key)); err != nil {
++		t.Fatal(err)
++	}
++	c, p := net.Pipe()
++	defer c.Close()
++	defer p.Close()
++	if _, ok := i.trackPhoenixUser(a, c); ok {
++		t.Fatal("accepted stale identity")
++	}
++	bad := phoenixUser("bad@test", "not-base64!")
++	if err := i.AddUser(context.Background(), bad); err == nil {
++		t.Fatal("invalid key accepted")
++	}
++	if i.GetUser(context.Background(), bad.Email) != nil {
++		t.Fatal("failed update published invalid user")
++	}
++}
++func TestPhoenixSS2022RegistrationRemovalRace(t *testing.T) {
++	for n := 0; n < 100; n++ {
++		i, key := phoenixServer(t)
++		user := phoenixUser("a@test", key)
++		if err := i.AddUser(context.Background(), user); err != nil {
++			t.Fatal(err)
++		}
++		c, p := net.Pipe()
++		var wg sync.WaitGroup
++		wg.Add(2)
++		go func() {
++			defer wg.Done()
++			if done, ok := i.trackPhoenixUser(user, c); ok {
++				defer done()
++				_ = c.SetReadDeadline(time.Now().Add(time.Second))
++				var b [1]byte
++				_, _ = c.Read(b[:])
++			}
++		}()
++		go func() { defer wg.Done(); _ = i.RemoveUser(context.Background(), user.Email) }()
++		wg.Wait()
++		_ = c.Close()
++		_ = p.Close()
++	}
++}

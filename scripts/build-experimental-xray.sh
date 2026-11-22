@@ -20,7 +20,18 @@ patch --batch --forward --fuzz=0 -p1 < "$root/patches/xray/experimental-vless-di
 patch --batch --forward --fuzz=0 -p1 < "$root/patches/xray/experimental-trojan-disconnect.patch"
 patch --batch --forward --fuzz=0 -p1 < "$root/patches/xray/experimental-vmess-disconnect.patch"
 patch --batch --forward --fuzz=0 -p1 < "$root/patches/xray/experimental-shadowsocks-disconnect.patch"
+# Patch the exact dependency whose user maps are shared with authentication.
+sing_version="$(go list -m -f '{{.Version}}' github.com/sagernet/sing-shadowsocks)"
+if [ "$sing_version" != 'v0.2.7' ]; then echo "unexpected sing-shadowsocks module $sing_version" >&2; exit 1; fi
+go mod download github.com/sagernet/sing-shadowsocks
+sing_dir="$(go list -m -f '{{.Dir}}' github.com/sagernet/sing-shadowsocks)"
+mkdir "$work/phoenix-sing-shadowsocks"
+cp -R "$sing_dir"/. "$work/phoenix-sing-shadowsocks/"
+chmod -R u+w "$work/phoenix-sing-shadowsocks"
+(cd "$work/phoenix-sing-shadowsocks" && patch --batch --forward --fuzz=0 -p1 < "$root/patches/xray/experimental-sing-ss2022-snapshot.patch")
+go mod edit -replace github.com/sagernet/sing-shadowsocks=./phoenix-sing-shadowsocks
+patch --batch --forward --fuzz=0 -p1 < "$root/patches/xray/experimental-shadowsocks-2022-disconnect.patch"
 if [ "${PHOENIX_XRAY_RUN_TESTS:-0}" = 1 ]; then
-  GOWORK=off go test -mod=mod -race ./proxy/vless/inbound ./proxy/trojan ./proxy/vmess/inbound ./proxy/shadowsocks ./app/proxyman/inbound -run '^TestPhoenix(Vless|Trojan|Vmess|Shadowsocks|UDP)' -count=1
+  GOWORK=off go test -mod=mod -race ./proxy/vless/inbound ./proxy/trojan ./proxy/vmess/inbound ./proxy/shadowsocks ./proxy/shadowsocks_2022 ./app/proxyman/inbound -run '^TestPhoenix(Vless|Trojan|Vmess|Shadowsocks|SS2022|UDP)' -count=1
 fi
 GOWORK=off go build -mod=mod -o "$output" ./main
