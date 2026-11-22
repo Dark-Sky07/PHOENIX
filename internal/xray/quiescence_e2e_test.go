@@ -1,6 +1,7 @@
 package xray
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	statsService "github.com/xtls/xray-core/app/stats/command"
 )
 
 // This characterizes the pinned core, not a quiescence implementation. It is
@@ -70,7 +72,7 @@ func TestXrayRemoveUserDoesNotDrainEstablishedVLESS(t *testing.T) {
 		// VLESS. Allow only the local test echo port, not general private access.
 		"outbounds": []any{map[string]any{"protocol": "freedom", "settings": map[string]any{"finalRules": []any{map[string]any{"action": "allow", "network": "tcp", "ip": []string{"127.0.0.1/32"}, "port": strconv.Itoa(echo.Addr().(*net.TCPAddr).Port)}}}, "tag": "direct"}},
 		"routing":   map[string]any{"rules": []any{map[string]any{"type": "field", "inboundTag": []string{"api"}, "outboundTag": "api"}}},
-		"policy":    map[string]any{"levels": map[string]any{"0": map[string]any{"statsUserOnline": true}}}, "stats": map[string]any{},
+		"policy":    map[string]any{"levels": map[string]any{"0": map[string]any{"statsUserOnline": true, "statsUserUplink": true, "statsUserDownlink": true}}}, "stats": map[string]any{},
 	}
 	body, err := json.Marshal(cfg)
 	if err != nil {
@@ -134,6 +136,19 @@ func TestXrayRemoveUserDoesNotDrainEstablishedVLESS(t *testing.T) {
 	if _, err := io.ReadFull(other, otherResp); err != nil || string(otherResp[2:]) != "other" {
 		t.Fatalf("second stream failed: %x %v", otherResp, err)
 	}
+	// This bounded experiment checks that traffic sent after an initial poll
+	// remains queryable after removal; it does not prove all writers stopped.
+	var beforePoll map[string]int64
+	if os.Getenv("XRAY_EXPECT_EXPERIMENTAL_DRAIN") == "1" {
+		beforePoll = rawTestUserCounters(t, &api, "quiescence@example.test")
+		if _, err := conn.Write([]byte("unpolled")); err != nil {
+			t.Fatal(err)
+		}
+		echoed := make([]byte, len("unpolled"))
+		if _, err := io.ReadFull(conn, echoed); err != nil || string(echoed) != "unpolled" {
+			t.Fatalf("unpolled echo %q: %v", echoed, err)
+		}
+	}
 	if err := api.RemoveUser("user-in", "quiescence@example.test"); err != nil {
 		t.Fatal(err)
 	}
@@ -145,6 +160,12 @@ func TestXrayRemoveUserDoesNotDrainEstablishedVLESS(t *testing.T) {
 		t.Fatalf("unrelated user disconnected: %q %v", alive, err)
 	}
 	if os.Getenv("XRAY_EXPECT_EXPERIMENTAL_DRAIN") == "1" {
+		afterPoll := rawTestUserCounters(t, &api, "quiescence@example.test")
+		for _, dir := range []string{"uplink", "downlink"} {
+			if afterPoll[dir]-beforePoll[dir] < int64(len("unpolled")) {
+				t.Fatalf("%s counter lost unpolled traffic: before=%d after=%d", dir, beforePoll[dir], afterPoll[dir])
+			}
+		}
 		if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
 			t.Fatal(err)
 		}
@@ -355,4 +376,27 @@ func trojanTestHeader(password string, port int) []byte {
 	key := sha256.Sum224([]byte(password))
 	header := []byte(hex.EncodeToString(key[:]))
 	return append(header, '\r', '\n', 1, 1, 127, 0, 0, 1, byte(port>>8), byte(port), '\r', '\n')
+}
+
+// Query raw counters without resetting or advancing PHOENIX's baseline.
+func rawTestUserCounters(t *testing.T, api *XrayAPI, email string) map[string]int64 {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resp, err := (*api.StatsServiceClient).QueryStats(ctx, &statsService.QueryStatsRequest{Reset_: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := make(map[string]int64)
+	for _, stat := range resp.GetStat() {
+		for _, dir := range []string{"uplink", "downlink"} {
+			if stat.GetName() == "user>>>"+email+">>>traffic>>>"+dir {
+				values[dir] = stat.GetValue()
+			}
+		}
+	}
+	if len(values) != 2 {
+		t.Fatalf("missing user counters: %v", values)
+	}
+	return values
 }
