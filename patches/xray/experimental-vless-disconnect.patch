@@ -138,7 +138,7 @@
 +}
 --- /dev/null
 +++ b/proxy/vless/inbound/phoenix_user_sessions_test.go
-@@ -0,0 +1,161 @@
+@@ -0,0 +1,199 @@
 +package inbound
 +
 +import (
@@ -207,6 +207,15 @@
 +	}
 +	if err := h.AddUser(context.Background(), &protocol.MemoryUser{Email: "different@test", Account: a.Account}); err == nil {
 +		t.Fatal("same credential was re-added under another email")
++	}
++	// The validator ignores UUID bytes six and seven for VLESS routing.
++	// Those variants must remain fenced too, not only byte-identical IDs.
++	variantID := a.Account.(*vless.MemoryAccount).ID.UUID()
++	variantID[6] ^= 1
++	variantID[7] ^= 1
++	variant := &protocol.MemoryUser{Email: "variant@test", Account: &vless.MemoryAccount{ID: protocol.NewID(variantID)}}
++	if err := h.AddUser(context.Background(), variant); err == nil {
++		t.Fatal("normalized credential variant bypassed removal fence")
 +	}
 +	// Closing transports alone must not complete the handler-scope barrier.
 +	select {
@@ -298,5 +307,34 @@
 +	}
 +	if err := h.AddUser(context.Background(), &protocol.MemoryUser{Email: "different@test", Account: u.Account}); err == nil {
 +		t.Fatal("failed removal allowed credential re-addition under another email")
++	}
++}
++
++type phoenixFailCloseConn struct{ net.Conn }
++
++func (c *phoenixFailCloseConn) Close() error { return io.ErrUnexpectedEOF }
++
++func TestPhoenixVlessCloseFailureKeepsFence(t *testing.T) {
++	h := &Handler{validator: new(vless.MemoryValidator)}
++	u := testPhoenixUser("failure@test")
++	if err := h.AddUser(context.Background(), u); err != nil {
++		t.Fatal(err)
++	}
++	conn, peer := net.Pipe()
++	defer conn.Close()
++	defer peer.Close()
++	done, ok := h.trackUserConnection(u, &phoenixFailCloseConn{conn})
++	if !ok {
++		t.Fatal("track failed")
++	}
++	if err := h.RemoveUser(context.Background(), u.Email); err == nil {
++		t.Fatal("close failure reported as success")
++	}
++	done()
++	if err := h.AddUser(context.Background(), testPhoenixUser("FAILURE@test")); err == nil {
++		t.Fatal("close failure allowed email reuse")
++	}
++	if err := h.AddUser(context.Background(), &protocol.MemoryUser{Email: "different@test", Account: u.Account}); err == nil {
++		t.Fatal("close failure allowed credential reuse")
 +	}
 +}
