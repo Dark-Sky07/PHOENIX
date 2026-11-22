@@ -284,8 +284,10 @@ func (r *Remote) AddInbound(ctx context.Context, ib *model.Inbound) error {
 func (r *Remote) DelInbound(ctx context.Context, ib *model.Inbound) error {
 	id, err := r.resolveRemoteID(ctx, ib.Tag)
 	if err != nil {
-		logger.Warning("remote DelInbound: tag", ib.Tag, "not found on", r.node.Name)
-		return nil
+		// Failure to resolve a node's inbound is not evidence that it was
+		// removed. In particular, authentication/network errors and stale or
+		// incomplete lists must remain visible to the caller.
+		return fmt.Errorf("remote DelInbound: resolve tag %q: %w", ib.Tag, err)
 	}
 	if _, err := r.do(ctx, http.MethodPost, "panel/api/inbounds/del/"+strconv.Itoa(id), nil); err != nil {
 		return err
@@ -339,18 +341,17 @@ func (r *Remote) DeleteUser(ctx context.Context, ib *model.Inbound, email string
 	}
 	id, err := r.resolveRemoteID(ctx, ib.Tag)
 	if err != nil {
-		return nil
+		return fmt.Errorf("remote DeleteUser: resolve tag %q: %w", ib.Tag, err)
 	}
 	body := map[string]any{"inboundIds": []int{id}}
 	_, err = r.do(ctx, http.MethodPost,
 		"panel/api/clients/"+url.PathEscape(email)+"/detach", body)
-	if err == nil {
-		return nil
+	// A generic "not found" is not a typed, authenticated proof that an
+	// active session is gone; it may refer to the endpoint, node, or user.
+	if err != nil {
+		return fmt.Errorf("remote DeleteUser: %w", err)
 	}
-	if strings.Contains(strings.ToLower(err.Error()), "not found") {
-		return nil
-	}
-	return err
+	return nil
 }
 
 func (r *Remote) UpdateUser(ctx context.Context, ib *model.Inbound, oldEmail string, payload model.Client) error {

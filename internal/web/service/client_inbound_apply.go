@@ -999,8 +999,10 @@ func (s *ClientService) DelInboundClientByEmail(inboundSvc *InboundService, inbo
 	needRestart := false
 	markDirty := false
 
-	if len(email) > 0 && !emailShared {
-		if !keepTraffic {
+	if len(email) > 0 {
+		// Statistics are shared across inbounds, but authentication is not.
+		// Retain shared counters while still removing this inbound's user.
+		if !emailShared && !keepTraffic {
 			traffic, err := inboundSvc.GetClientTrafficByEmail(email)
 			if err != nil {
 				return false, err
@@ -1044,7 +1046,7 @@ func (s *ClientService) DelInboundClientByEmail(inboundSvc *InboundService, inbo
 
 	if err := db.Save(oldInbound).Error; err != nil {
 		// A local runtime removal may have succeeded before persistence failed.
-		return needRestart || (needApiDel && !emailShared && oldInbound.NodeID == nil), err
+		return needRestart || (needApiDel && oldInbound.NodeID == nil), err
 	}
 	if err := reconcilePPPVPNRuntime(oldInbound); err != nil {
 		logger.Warning("l2tp: synchronous client deletion reconcile failed:", err)
