@@ -191,3 +191,166 @@ func TestCopyTableSkipsNewModelMissingFromLegacySource(t *testing.T) {
 		t.Fatalf("copied %d rows from a nonexistent source table, want 0", copied)
 	}
 }
+
+// Accounting state must survive database export/import together with the
+// traffic rows. The databases here are independent SQLite files; this test does
+// not assert that live writes, journals on disk, or runtimes are quiesced.
+func TestCopyAllModelsPreservesTrafficProtocolEvidence(t *testing.T) {
+	open := func(name string) *gorm.DB {
+		d, err := gorm.Open(sqlite.Open(t.TempDir()+"/"+name+".db"), &gorm.Config{Logger: logger.Discard})
+		if err != nil {
+			t.Fatal(err)
+		}
+		pool, err := d.DB()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = pool.Close() })
+		return d
+	}
+	src, dst := open("source"), open("destination")
+	rows := []any{
+		&model.ResellerNodeCounterIncident{NodeId: 123, Email: "migration@example.test", PreviousUp: 100, ObservedUp: 10},
+		&model.ClientGlobalTraffic{MasterGuid: "master", Email: "migration@example.test", Up: 77},
+		&model.XrayTrafficReceipt{ID: "batch-committed"},
+		&model.XrayTrafficInFlight{ID: "batch-pending"},
+		&model.TrafficSnapshotReceiver{ID: "node-inbound:123", Sender: "sender", Generation: "epoch", LastSequence: 42},
+		&model.TrafficSnapshotSender{ID: "sender-token", Sender: "sender", Generation: "epoch", LastSequence: 43},
+	}
+	for _, row := range rows {
+		if err := src.AutoMigrate(row); err != nil {
+			t.Fatal(err)
+		}
+		if err := src.Create(row).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := copyAllModels(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	var recv model.TrafficSnapshotReceiver
+	if err := dst.First(&recv, "id = ?", "node-inbound:123").Error; err != nil || recv.LastSequence != 42 || recv.Generation != "epoch" {
+		t.Fatalf("receiver: %+v %v", recv, err)
+	}
+	var sender model.TrafficSnapshotSender
+	if err := dst.First(&sender, "id = ?", "sender-token").Error; err != nil || sender.LastSequence != 43 {
+		t.Fatalf("sender: %+v %v", sender, err)
+	}
+	var global model.ClientGlobalTraffic
+	if err := dst.First(&global, "master_guid = ?", "master").Error; err != nil || global.Up != 77 {
+		t.Fatalf("global: %+v %v", global, err)
+	}
+	var receipt model.XrayTrafficReceipt
+	if err := dst.First(&receipt, "id = ?", "batch-committed").Error; err != nil {
+		t.Fatal(err)
+	}
+	var pending model.XrayTrafficInFlight
+	if err := dst.First(&pending, "id = ?", "batch-pending").Error; err != nil {
+		t.Fatal(err)
+	}
+	var incident model.ResellerNodeCounterIncident
+	if err := dst.First(&incident, "node_id = ?", 123).Error; err != nil || incident.PreviousUp != 100 || incident.ObservedUp != 10 {
+		t.Fatalf("incident: %+v %v", incident, err)
+	}
+}
+
+func TestCopyAllModelsRejectsMissingTrafficEvidenceBeforeDestinationChanges(t *testing.T) {
+	src, err := gorm.Open(sqlite.Open(t.TempDir()+"/src.db"), &gorm.Config{Logger: logger.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dst, err := gorm.Open(sqlite.Open(t.TempDir()+"/dst.db"), &gorm.Config{Logger: logger.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []*gorm.DB{src, dst} {
+		pool, err := d.DB()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = pool.Close() })
+	}
+	if err := src.AutoMigrate(&model.TrafficSnapshotReceiver{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dst.AutoMigrate(&model.TrafficSnapshotReceiver{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dst.Create(&model.TrafficSnapshotReceiver{ID: "existing", Sender: "existing", Generation: "g", LastSequence: 9}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := copyAllModels(src, dst); err == nil {
+		t.Fatal("missing evidence tables accepted")
+	}
+	var existing model.TrafficSnapshotReceiver
+	if err := dst.First(&existing, "id = ?", "existing").Error; err != nil || existing.LastSequence != 9 {
+		t.Fatalf("destination changed: %+v %v", existing, err)
+	}
+}
+
+func TestTrafficEvidenceMigrationPostgres(t *testing.T) {
+	dsn := os.Getenv("XUI_TEST_PG_DSN")
+	if dsn == "" {
+		t.Skip("XUI_TEST_PG_DSN not set")
+	}
+	dir := t.TempDir()
+	srcPath := dir + "/source.db"
+	src, err := gorm.Open(sqlite.Open(srcPath), &gorm.Config{Logger: logger.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range migrationModels() {
+		if err := src.AutoMigrate(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, row := range []any{
+		&model.TrafficSnapshotReceiver{ID: "node-inbound:313", Sender: "migration-sender", Generation: "g", LastSequence: 71},
+		&model.TrafficSnapshotSender{ID: "node-sender", Sender: "migration-sender", Generation: "g", LastSequence: 72},
+		&model.ResellerNodeCounterIncident{NodeId: 313, Email: "migration@test", PreviousUp: 80, ObservedUp: 10},
+		&model.XrayTrafficReceipt{ID: "migration-receipt"}, &model.XrayTrafficInFlight{ID: "migration-inflight"},
+	} {
+		if err := src.Create(row).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if pool, err := src.DB(); err == nil {
+		_ = pool.Close()
+	}
+	if err := MigrateData(srcPath, dsn); err != nil {
+		t.Fatal(err)
+	}
+	dstPath := dir + "/export.db"
+	if err := ExportPostgresToSQLite(dsn, dstPath); err != nil {
+		t.Fatal(err)
+	}
+	dst, err := gorm.Open(sqlite.Open(dstPath), &gorm.Config{Logger: logger.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool, err := dst.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	var receiver model.TrafficSnapshotReceiver
+	if err := dst.First(&receiver, "id = ?", "node-inbound:313").Error; err != nil || receiver.LastSequence != 71 {
+		t.Fatalf("receiver: %+v %v", receiver, err)
+	}
+	var sender model.TrafficSnapshotSender
+	if err := dst.First(&sender, "id = ?", "node-sender").Error; err != nil || sender.LastSequence != 72 {
+		t.Fatalf("sender: %+v %v", sender, err)
+	}
+	var receipt model.XrayTrafficReceipt
+	if err := dst.First(&receipt, "id = ?", "migration-receipt").Error; err != nil {
+		t.Fatal(err)
+	}
+	var inflight model.XrayTrafficInFlight
+	if err := dst.First(&inflight, "id = ?", "migration-inflight").Error; err != nil {
+		t.Fatal(err)
+	}
+	var incident model.ResellerNodeCounterIncident
+	if err := dst.First(&incident, "node_id = ?", 313).Error; err != nil || incident.PreviousUp != 80 || incident.ObservedUp != 10 {
+		t.Fatalf("incident: %+v %v", incident, err)
+	}
+}

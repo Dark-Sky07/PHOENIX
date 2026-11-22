@@ -3,6 +3,7 @@ package service
 import (
 	"errors"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
@@ -176,5 +177,65 @@ func TestResellerNodeBaselinePostgres(t *testing.T) {
 	}
 	if err := validateResellerNodeBaselines(tx, 90002); err != nil {
 		t.Fatalf("incident affected another reseller: %v", err)
+	}
+}
+
+// PostgreSQL coverage for remote evidence that survives a missing association.
+func TestResellerRemoteGuardOrphanedEvidencePostgres(t *testing.T) {
+	dsn := os.Getenv("PHOENIX_TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("PHOENIX_TEST_POSTGRES_DSN not set")
+	}
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{DisableForeignKeyConstraintWhenMigrating: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := db.AutoMigrate(&model.ClientRecord{}, &model.ResellerClient{}, &model.ResellerInbound{}, &model.Inbound{}, &model.ClientInbound{}, &model.NodeClientTraffic{}); err != nil {
+		t.Fatal(err)
+	}
+	tx := db.Begin()
+	if tx.Error != nil {
+		t.Fatal(tx.Error)
+	}
+	defer tx.Rollback()
+	const reseller = 987659
+	client := model.ClientRecord{Email: uuid.NewString() + "@guard.test"}
+	if err := tx.Create(&client).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Create(&model.ResellerClient{ResellerId: reseller, Email: client.Email}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectResellerUnverifiedNodes(tx, reseller); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Create(&model.ResellerInbound{ResellerId: reseller, InboundId: 999999991}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectResellerUnverifiedNodes(tx, reseller); err == nil {
+		t.Fatal("orphaned reseller inbound accepted")
+	}
+	if err := tx.Where("reseller_id = ?", reseller).Delete(&model.ResellerInbound{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Create(&model.ClientInbound{ClientId: client.Id, InboundId: 999999992}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectResellerUnverifiedNodes(tx, reseller); err == nil {
+		t.Fatal("orphaned client link accepted")
+	}
+	if err := tx.Where("client_id = ?", client.Id).Delete(&model.ClientInbound{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Create(&model.NodeClientTraffic{NodeId: 999999, Email: "  " + strings.ToUpper(client.Email) + "  ", Up: 1}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectResellerUnverifiedNodes(tx, reseller); err == nil {
+		t.Fatal("orphaned baseline accepted")
 	}
 }

@@ -556,3 +556,23 @@ manual review. Do not delete a baseline or link merely to unblock quota; use
 runtime and accounting evidence to reconcile first. This cannot detect an
 association or ownership mapping that was already erased, fence external
 writers, or recover bytes never recorded by a runtime.
+
+### Database migration and verified traffic evidence
+
+SQLite-to-PostgreSQL migration and PostgreSQL-to-SQLite export now include
+counter incidents, global overlays, Xray batch receipts and in-flight markers,
+and verified snapshot sender/receiver sequence state. A source missing any of
+these tables or their columns is rejected before destination data is cleared;
+upgrade and investigate its history before retrying. Creating missing tables
+does not restore any evidence already lost. Earlier exports or migrations that
+omitted these tables require manual review: never reset a stream or assume
+missing receipts mean no old batches exist.
+
+On PostgreSQL import, clearing and copying destination rows now commit in one
+transaction; a copy error rolls the row changes back. Schema changes precede
+that transaction. SQLite export still replaces the destination file and can
+leave an incomplete file on failure; use a new path and verify it before use.
+The copy is not an online consistency or runtime fencing protocol. Stop writes
+and runtimes, preserve and reconcile on-disk journals/fallbacks separately,
+and take consistent backups before migration; an incomplete copy, concurrent
+writer, prior data loss, or database rollback cannot be corrected by this change.

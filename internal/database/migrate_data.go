@@ -49,6 +49,12 @@ func migrationModels() []any {
 		&model.ClientInbound{},
 		&model.InboundFallback{},
 		&model.NodeClientTraffic{},
+		&model.ResellerNodeCounterIncident{},
+		&model.ClientGlobalTraffic{},
+		&model.XrayTrafficReceipt{},
+		&model.XrayTrafficInFlight{},
+		&model.TrafficSnapshotReceiver{},
+		&model.TrafficSnapshotSender{},
 		&model.PPPClientTrafficCounter{},
 		&model.OutboundSubscription{},
 		&model.Reseller{},
@@ -67,6 +73,27 @@ func migrationModels() []any {
 		&model.AuditLog{},
 		&model.ResellerVoucher{},
 	}
+}
+
+// Missing safety tables are not equivalent to empty tables: the source may
+// have lost replay or incident evidence. Require an upgraded source and review
+// before copying rather than silently resetting its accounting safeguards.
+func validateTrafficEvidenceTables(src *gorm.DB) error {
+	for _, m := range []any{&model.ResellerNodeCounterIncident{}, &model.ClientGlobalTraffic{}, &model.XrayTrafficReceipt{}, &model.XrayTrafficInFlight{}, &model.TrafficSnapshotReceiver{}, &model.TrafficSnapshotSender{}} {
+		if !src.Migrator().HasTable(m) {
+			return fmt.Errorf("source missing traffic safety table %T; upgrade and reconcile before migration", m)
+		}
+		stmt := &gorm.Statement{DB: src}
+		if err := stmt.Parse(m); err != nil {
+			return err
+		}
+		for _, column := range stmt.Schema.DBNames {
+			if !src.Migrator().HasColumn(m, column) {
+				return fmt.Errorf("source traffic safety table %T missing column %s; upgrade and reconcile before migration", m, column)
+			}
+		}
+	}
+	return nil
 }
 
 // MigrateData copies every row from the configured SQLite file at srcPath into
@@ -94,6 +121,9 @@ func MigrateData(srcPath, dstDSN string) error {
 		return err
 	}
 	defer srcSQL.Close()
+	if err := validateTrafficEvidenceTables(src); err != nil {
+		return err
+	}
 
 	dst, err := gorm.Open(postgres.Open(dstDSN), &gorm.Config{Logger: logger.Discard})
 	if err != nil {
@@ -126,18 +156,24 @@ func MigrateData(srcPath, dstDSN string) error {
 	// panel start, and a partially-failed earlier run leaves rows behind. Either
 	// way a plain INSERT with explicit ids would collide on users_pkey, so clear
 	// our tables (only) before copying.
-	if err := truncatePostgresTables(dst, migrationModels()); err != nil {
-		return fmt.Errorf("clear destination tables: %w", err)
-	}
-
+	// Truncate and copy must commit together: a failed copy must not leave
+	// an apparently migrated destination with empty or partial safety state.
 	totalRows := 0
-	for _, m := range migrationModels() {
-		n, err := copyTable(src, dst, m)
-		if err != nil {
-			return fmt.Errorf("copy %T: %w", m, err)
+	if err := dst.Transaction(func(tx *gorm.DB) error {
+		if err := truncatePostgresTables(tx, migrationModels()); err != nil {
+			return fmt.Errorf("clear destination tables: %w", err)
 		}
-		totalRows += n
-		log.Printf("  %-32s %d rows", reflect.TypeOf(m).Elem().Name(), n)
+		for _, m := range migrationModels() {
+			n, err := copyTable(src, tx, m)
+			if err != nil {
+				return fmt.Errorf("copy %T: %w", m, err)
+			}
+			totalRows += n
+			log.Printf("  %-32s %d rows", reflect.TypeOf(m).Elem().Name(), n)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	if err := resetPostgresSequences(dst); err != nil {
@@ -160,11 +196,6 @@ func ExportPostgresToSQLite(srcDSN, dstPath string) error {
 	if err := os.MkdirAll(path.Dir(dstPath), 0755); err != nil {
 		return err
 	}
-	// Start from an empty file so AutoMigrate creates the canonical schema.
-	if err := os.Remove(dstPath); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-
 	src, err := gorm.Open(postgres.Open(srcDSN), &gorm.Config{Logger: logger.Discard})
 	if err != nil {
 		return fmt.Errorf("open postgres source: %w", err)
@@ -174,6 +205,13 @@ func ExportPostgresToSQLite(srcDSN, dstPath string) error {
 		return err
 	}
 	defer srcSQL.Close()
+	if err := validateTrafficEvidenceTables(src); err != nil {
+		return err
+	}
+	// Never overwrite an existing export before source safety checks pass.
+	if err := os.Remove(dstPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
 
 	// No WAL: keep all data in the main file so it is complete once closed.
 	dst, err := gorm.Open(sqlite.Open(dstPath+"?_busy_timeout=10000"), &gorm.Config{Logger: logger.Discard})
@@ -192,6 +230,9 @@ func ExportPostgresToSQLite(srcDSN, dstPath string) error {
 // copyAllModels (re)creates the schema on dst and copies every migrated table
 // from src to dst in FK-safe order. src/dst may be any gorm backend.
 func copyAllModels(src, dst *gorm.DB) error {
+	if err := validateTrafficEvidenceTables(src); err != nil {
+		return err
+	}
 	for _, m := range migrationModels() {
 		if err := dst.AutoMigrate(m); err != nil {
 			return fmt.Errorf("AutoMigrate %T: %w", m, err)
