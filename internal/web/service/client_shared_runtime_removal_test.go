@@ -193,3 +193,68 @@ func TestTrafficRemovalNotFoundRequestsRestart(t *testing.T) {
 		t.Fatal("uncertain removal failed to request recovery")
 	}
 }
+
+func TestBulkDetachRemovesNormalizedEmailAndPreservesRestartOnSaveFailure(t *testing.T) {
+	for _, saveFailure := range []bool{false, true} {
+		name := "success"
+		if saveFailure {
+			name = "save-failure"
+		}
+		t.Run(name, func(t *testing.T) {
+			setupConflictDB(t)
+			db := database.GetDB()
+			client := model.ClientRecord{Email: "bulk-detach@example.test", Enable: true}
+			ib := model.Inbound{UserId: 1, Port: 19184, Protocol: model.VLESS, Tag: "bulk-detach", Settings: `{"clients":[{"email":"BULK-DETACH@example.test","id":"a17e367c-2074-4d3e-aaeb-fbef5dfde7e7","enable":true}]}`}
+			for _, v := range []any{&client, &ib} {
+				if err := db.Create(v).Error; err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := db.Create(&model.ClientInbound{ClientId: client.Id, InboundId: ib.Id}).Error; err != nil {
+				t.Fatal(err)
+			}
+			if saveFailure {
+				if err := db.Exec("CREATE TRIGGER reject_detach_save BEFORE UPDATE ON inbounds BEGIN SELECT RAISE(ABORT, 'injected failure'); END").Error; err != nil {
+					t.Fatal(err)
+				}
+			}
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			server := grpc.NewServer()
+			recorder := &recordingRemovalServer{requests: make(chan *command.AlterInboundRequest, 2)}
+			command.RegisterHandlerServiceServer(server, recorder)
+			go func() { _ = server.Serve(listener) }()
+			defer server.Stop()
+			old := runtime.GetManager()
+			runtime.SetManager(runtime.NewManager(runtime.LocalDeps{APIPort: func() int { return listener.Addr().(*net.TCPAddr).Port }}))
+			t.Cleanup(func() { runtime.SetManager(old) })
+			result, restart, err := (&ClientService{}).BulkDetach(&InboundService{}, []string{client.Email}, []int{ib.Id})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if saveFailure {
+				if !restart || len(result.Errors) == 0 || len(result.Detached) != 0 {
+					t.Fatalf("lost partial failure: restart=%v result=%+v", restart, result)
+				}
+			} else if restart || len(result.Errors) != 0 || len(result.Detached) != 1 {
+				t.Fatalf("unexpected result: restart=%v result=%+v", restart, result)
+			}
+			select {
+			case req := <-recorder.requests:
+				op, err := req.Operation.GetInstance()
+				if err != nil {
+					t.Fatal(err)
+				}
+				removed, ok := op.(*command.RemoveUserOperation)
+				if !ok || removed.Email != "BULK-DETACH@example.test" || req.Tag != ib.Tag {
+					t.Fatalf("wrong runtime removal: %v", req)
+				}
+			default:
+				t.Fatal("bulk detach skipped runtime removal for missing traffic row")
+			}
+		})
+	}
+}

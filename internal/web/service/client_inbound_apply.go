@@ -90,8 +90,8 @@ func (s *ClientService) delInboundClients(inboundSvc *InboundService, inboundId 
 	// entry carrying a wanted email, independent of credential drift.
 	wanted := make(map[string]struct{}, len(recs))
 	for _, rec := range recs {
-		if rec.Email != "" {
-			wanted[rec.Email] = struct{}{}
+		if key := transferEmailKey(rec.Email); key != "" {
+			wanted[key] = struct{}{}
 		}
 	}
 
@@ -112,7 +112,7 @@ func (s *ClientService) delInboundClients(inboundSvc *InboundService, inboundId 
 			continue
 		}
 		email, _ := c["email"].(string)
-		if _, hit := wanted[email]; hit && email != "" {
+		if _, hit := wanted[transferEmailKey(email)]; hit && transferEmailKey(email) != "" {
 			enable, _ := c["enable"].(bool)
 			removed = append(removed, removedClient{email: email, needApiDel: enable})
 			continue
@@ -153,29 +153,25 @@ func (s *ClientService) delInboundClients(inboundSvc *InboundService, inboundId 
 
 	needRestart := false
 	markDirty := false
+	localRemovalAttempted := false
 	for _, r := range removed {
 		email := r.email
 		emailShared := sharedSet[strings.ToLower(strings.TrimSpace(email))]
 		if !emailShared && !keepTraffic {
 			if err := inboundSvc.DelClientIPs(db, email); err != nil {
 				logger.Error("Error in delete client IPs")
-				return needRestart, err
+				return needRestart || localRemovalAttempted, err
 			}
 		}
 		if len(email) > 0 {
-			var enables []bool
-			if err := db.Model(xray.ClientTraffic{}).Where("LOWER(TRIM(email)) = LOWER(TRIM(?))", strings.TrimSpace(email)).Limit(1).Pluck("enable", &enables).Error; err != nil {
-				logger.Error("Get stats error")
-				return needRestart, err
-			}
-			notDepleted := len(enables) > 0 && enables[0]
 			if !emailShared && !keepTraffic {
 				if err := inboundSvc.DelClientStat(db, email); err != nil {
 					logger.Error("Delete stats Data Error")
-					return needRestart, err
+					return needRestart || localRemovalAttempted, err
 				}
 			}
-			if r.needApiDel && notDepleted && oldInbound.NodeID == nil {
+			if r.needApiDel && oldInbound.NodeID == nil {
+				localRemovalAttempted = true
 				rt, rterr := inboundSvc.runtimeFor(oldInbound)
 				if rterr != nil {
 					needRestart = true
@@ -187,7 +183,7 @@ func (s *ClientService) delInboundClients(inboundSvc *InboundService, inboundId 
 		if oldInbound.NodeID != nil && len(email) > 0 {
 			rt, push, dirty, perr := inboundSvc.nodePushPlan(oldInbound)
 			if perr != nil {
-				return needRestart, perr
+				return needRestart || localRemovalAttempted, perr
 			}
 			if dirty {
 				markDirty = true
@@ -202,7 +198,7 @@ func (s *ClientService) delInboundClients(inboundSvc *InboundService, inboundId 
 	}
 
 	if err := db.Save(oldInbound).Error; err != nil {
-		return needRestart, err
+		return needRestart || localRemovalAttempted, err
 	}
 	if err := reconcilePPPVPNRuntime(oldInbound); err != nil {
 		logger.Warning("PPP VPN: synchronous client removal reconcile failed:", err)
@@ -210,10 +206,10 @@ func (s *ClientService) delInboundClients(inboundSvc *InboundService, inboundId 
 	}
 	finalClients, gcErr := inboundSvc.GetClients(oldInbound)
 	if gcErr != nil {
-		return needRestart, gcErr
+		return needRestart || localRemovalAttempted, gcErr
 	}
 	if err := s.SyncInbound(db, inboundId, finalClients); err != nil {
-		return needRestart, err
+		return needRestart || localRemovalAttempted, err
 	}
 	if markDirty && oldInbound.NodeID != nil {
 		if dErr := (&NodeService{}).MarkNodeDirty(*oldInbound.NodeID); dErr != nil {

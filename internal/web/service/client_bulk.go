@@ -199,6 +199,7 @@ func (s *ClientService) BulkDetach(inboundSvc *InboundService, emails []string, 
 		}
 		delete(recsByInbound, ibId)
 		nr, err := s.delInboundClients(inboundSvc, ibId, recs, true)
+		needRestart = needRestart || nr
 		if err != nil {
 			recordErr("inbound %d: %v", ibId, err)
 			for _, rec := range recs {
