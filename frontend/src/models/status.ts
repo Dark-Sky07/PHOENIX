@@ -1,5 +1,5 @@
 import { NumberFormatter } from '@/utils';
-import { CounterIncidentStatusSchema } from '@/schemas/status';
+import { CounterIncidentStatusSchema, NodeSnapshotSafetyStatusSchema } from '@/schemas/status';
 
 export class CurTotal {
   current: number;
@@ -73,8 +73,14 @@ export interface CounterIncidentStatus {
   pendingInProcess: boolean;
 }
 
+export interface NodeSnapshotSafetyStatus {
+  available: boolean;
+  nodeCount: number;
+}
+
 interface StatusInput {
   counterIncidents?: CounterIncidentStatus;
+  nodeSnapshotSafety?: NodeSnapshotSafetyStatus;
   cpu?: number;
   cpuCores?: number;
   logicalPro?: number;
@@ -98,6 +104,7 @@ interface StatusInput {
 
 export class Status {
   counterIncidents?: CounterIncidentStatus;
+  nodeSnapshotSafety?: NodeSnapshotSafetyStatus;
   cpu: CurTotal = new CurTotal(0, 0);
   cpuCores = 0;
   logicalPro = 0;
@@ -125,6 +132,8 @@ export class Status {
     // never silently interpreted as a clean incident status.
     const incidents = CounterIncidentStatusSchema.safeParse(data.counterIncidents);
     this.counterIncidents = incidents.success ? incidents.data : undefined;
+    const nodeSafety = NodeSnapshotSafetyStatusSchema.safeParse(data.nodeSnapshotSafety);
+    this.nodeSnapshotSafety = nodeSafety.success ? nodeSafety.data : undefined;
 
     this.cpu = new CurTotal(data.cpu ?? 0, 100);
     this.cpuCores = data.cpuCores ?? 0;

@@ -486,3 +486,14 @@ until the receiver is registered. Neither endpoint overwrites existing state or
 resets a sequence; token rotation, generation changes, backup rollback, existing
 usage and incidents require manual reconciliation. There is no management UI or
 remote-readiness handshake yet. Unregistered peers still use legacy paths.
+
+The administrator dashboard now warns about every registered node, including
+disabled nodes and nodes with verified outgoing global pushes, because incoming
+node snapshots do not yet have an authenticated ordered protocol. The warning
+links to the existing node inventory conceptually (all registered nodes are
+affected); it does not list credentials or client identities. If node status
+cannot be read, the dashboard warns rather than treating it as clear. A zero
+node count is not proof that all historical or unpolled traffic is complete.
+This is visibility only: the broader legacy-node accounting guard is not yet
+implemented, and the experimental verified push is not a proof of safe incoming
+node accounting.

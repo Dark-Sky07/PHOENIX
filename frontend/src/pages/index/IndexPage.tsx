@@ -352,6 +352,18 @@ export default function IndexPage() {
                     />
                   )}
 
+                  {(!status.nodeSnapshotSafety?.available || status.nodeSnapshotSafety.nodeCount > 0) && (
+                    <Alert
+                      className="node-traffic-safety-warning"
+                      type="warning"
+                      showIcon
+                      message={t('pages.index.nodeSnapshotSafetyTitle')}
+                      description={status.nodeSnapshotSafety?.available
+                        ? t('pages.index.nodeSnapshotSafetyDescription', { count: status.nodeSnapshotSafety.nodeCount })
+                        : t('pages.index.nodeSnapshotSafetyUnavailable')}
+                    />
+                  )}
+
                   <section className="dash-resources phoenix-rise phoenix-rise-1" aria-label={t('pages.index.resources', 'Resources')}>
                     <ResourceTile
                       label={t('pages.index.cpu')}

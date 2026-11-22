@@ -140,6 +140,9 @@
     },
     "index": {
       "title": "Overview",
+      "nodeSnapshotSafetyTitle": "Remote node traffic requires review",
+      "nodeSnapshotSafetyDescription": "All {{count}} registered nodes, including disabled nodes, lack authenticated and ordered incoming traffic snapshots. Verified outbound pushes do not resolve this. Review nodes and reconcile reseller usage before relying on totals.",
+      "nodeSnapshotSafetyUnavailable": "Node traffic safety status is unavailable. Do not assume remote accounting is complete; investigate the database and node status.",
       "counterIncidentTitle": "Traffic accounting needs administrator review",
       "counterIncidentDescription": "Detected {{count}} database incident or in-flight Xray poll marker(s), a local fallback or journal, or a pending observation. Active polls may clear shortly. Investigate persistent markers before clearing them; saved totals may be incomplete.",
       "counterIncidentUnavailable": "Incident status is unavailable. Do not assume traffic accounting is complete; investigate the database, journal and fallback storage.",

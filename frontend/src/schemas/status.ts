@@ -48,8 +48,14 @@ export const CounterIncidentStatusSchema = z.object({
   pendingInProcess: z.boolean(),
 });
 
+export const NodeSnapshotSafetyStatusSchema = z.object({
+  available: z.boolean(),
+  nodeCount: z.number().int().nonnegative(),
+});
+
 export const StatusSchema = z.object({
   counterIncidents: CounterIncidentStatusSchema.optional(),
+  nodeSnapshotSafety: NodeSnapshotSafetyStatusSchema.optional(),
   cpu: z.number().optional(),
   cpuCores: z.number().optional(),
   logicalPro: z.number().optional(),

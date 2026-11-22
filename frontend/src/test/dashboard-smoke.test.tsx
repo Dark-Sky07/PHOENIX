@@ -121,6 +121,7 @@ vi.mock('@/api/queries/useNodesQuery', () => ({
 
 const statusObj = {
   counterIncidents: { available: true, databaseCount: 0, fallbackPresent: false, pendingInProcess: false },
+  nodeSnapshotSafety: { available: true, nodeCount: 0 },
   cpu: 5.8, cpuCores: 4, logicalPro: 8, cpuSpeedMhz: 2900,
   disk: { current: 65820373811.2, total: 171798691840 },
   loads: [0.42, 0.51, 0.47],
@@ -197,6 +198,7 @@ describe('smoke: redesigned pages', () => {
   });
   afterEach(() => {
     statusObj.counterIncidents = { available: true, databaseCount: 0, fallbackPresent: false, pendingInProcess: false };
+    statusObj.nodeSnapshotSafety = { available: true, nodeCount: 0 };
     cleanup();
     vi.restoreAllMocks();
   });
@@ -233,6 +235,19 @@ describe('smoke: redesigned pages', () => {
     statusObj.counterIncidents = { available: true, databaseCount: 0, fallbackPresent: false, pendingInProcess: false };
     const { container } = wrap(<IndexPage />);
     expect(container.querySelector('.ant-alert-error')).toBeNull();
+  });
+
+  it('warns about all registered remote nodes or unavailable node safety status', async () => {
+    const { default: IndexPage } = await import('@/pages/index/IndexPage');
+    for (const state of [{ available: true, nodeCount: 2 }, { available: false, nodeCount: 0 }, undefined, { available: true, nodeCount: -1 }]) {
+      statusObj.nodeSnapshotSafety = state as never;
+      const { container } = wrap(<IndexPage />);
+      expect(container.querySelector('.node-traffic-safety-warning')).toBeTruthy();
+      cleanup();
+    }
+    statusObj.nodeSnapshotSafety = { available: true, nodeCount: 0 };
+    const { container } = wrap(<IndexPage />);
+    expect(container.querySelector('.node-traffic-safety-warning')).toBeNull();
   });
 
   it('treats absent or malformed incident data as unavailable', async () => {
