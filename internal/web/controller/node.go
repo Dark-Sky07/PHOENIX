@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
 	"github.com/Dark-Sky07/phoenix/internal/web/middleware"
 	"github.com/Dark-Sky07/phoenix/internal/web/service"
@@ -44,6 +45,7 @@ func (a *NodeController) initRouter(g *gin.RouterGroup) {
 	g.POST("/probe/:id", a.probe)
 	g.POST("/trafficSnapshot/receiver", a.registerTrafficReceiver)
 	g.POST("/trafficSnapshot/sender/:id", a.registerTrafficSender)
+	g.GET("/trafficSnapshot/sender/:id", a.getTrafficSender)
 	g.POST("/updatePanel", a.updatePanel)
 	g.GET("/history/:id/:metric/:bucket", a.history)
 }
@@ -102,7 +104,24 @@ func (a *NodeController) registerTrafficSender(c *gin.Context) {
 		jsonMsg(c, "verified traffic sender registration failed", err)
 		return
 	}
-	jsonObj(c, state, nil)
+	jsonObj(c, gin.H{"sender": state.Sender, "generation": state.Generation, "lastSequence": state.LastSequence}, nil)
+}
+
+func (a *NodeController) getTrafficSender(c *gin.Context) {
+	if !canProvisionTrafficPeers(c) {
+		return
+	}
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		c.AbortWithStatus(http.StatusBadRequest)
+		return
+	}
+	var state model.TrafficSnapshotSender
+	if err := database.GetDB().First(&state, "id = ?", fmt.Sprintf("node:%d", id)).Error; err != nil {
+		jsonMsg(c, "verified traffic sender not available", err)
+		return
+	}
+	jsonObj(c, gin.H{"sender": state.Sender, "generation": state.Generation, "lastSequence": state.LastSequence}, nil)
 }
 
 func (a *NodeController) list(c *gin.Context) {

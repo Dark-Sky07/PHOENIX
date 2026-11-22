@@ -8170,6 +8170,45 @@
       }
     },
     "/panel/api/nodes/trafficSnapshot/sender/{id}": {
+      "get": {
+        "tags": [
+          "Nodes"
+        ],
+        "summary": "Read a provisioned sender identity, generation and last reserved sequence. Interactive superadmin session only; no token secret is returned.",
+        "operationId": "get_panel_api_nodes_trafficSnapshot_sender_id",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Local node ID.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
       "post": {
         "tags": [
           "Nodes"

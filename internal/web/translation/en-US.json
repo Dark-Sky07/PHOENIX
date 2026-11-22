@@ -1016,6 +1016,27 @@
       "removeFromGroupResult": "Removed {count} client(s) from {name}."
     },
     "nodes": {
+      "trafficPeers": {
+        "title": "Verified traffic peers (experimental)",
+        "warningTitle": "Review accounting before registration",
+        "warning": "Interactive superadmin only. Sender registration immediately enables verified outbound pushes; they fail until the receiver is configured. This does not verify incoming node traffic, recover unpolled usage, or lift reseller quota blocks. Sequence resets and token rotation require manual reconciliation.",
+        "senderTab": "Sender",
+        "receiverTab": "Receiver",
+        "node": "Remote node",
+        "confirm": "I reviewed and reconciled the accounting, identity and rollout risks; I understand that this does not prove traffic completeness.",
+        "registerSender": "Register and enable sender",
+        "readSender": "Read existing sender",
+        "senderSaved": "Sender registered; configure the receiver separately",
+        "transferTitle": "Transfer these values securely to the receiver panel",
+        "transferHint": "Register the receiver there using its own API token ID. Do not reset sequence state.",
+        "sequence": "Last reserved sequence: {{count}}",
+        "tokenId": "Receiver panel API token ID",
+        "senderIdentity": "Sender panel GUID",
+        "generation": "Sender generation",
+        "registerReceiver": "Register receiver",
+        "receiverSaved": "Receiver registered",
+        "required": "This field is required"
+      },
       "title": "Nodes",
       "addNode": "Add Node",
       "editNode": "Edit Node",

@@ -3,6 +3,7 @@ package controller
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -84,4 +85,35 @@ func TestTrafficPeerProvisioningRequiresSuperadminSession(t *testing.T) {
 	if err := db.Model(&model.TrafficSnapshotReceiver{}).Count(&count).Error; err != nil || count != 1 {
 		t.Fatalf("registrations: %d %v", count, err)
 	}
+	state := model.TrafficSnapshotSender{ID: "node:99", Sender: "panel-guid", Generation: "epoch", LastSequence: 4}
+	if err := db.Create(&state).Error; err != nil {
+		t.Fatal(err)
+	}
+	read := func(withToken bool) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/panel/api/nodes/trafficSnapshot/sender/99", nil)
+		if withToken {
+			req.Header.Set("Authorization", "Bearer "+token.Token)
+		} else {
+			req.Header.Set("X-Test-Admin", "1")
+		}
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w
+	}
+	if w := read(true); w.Code != http.StatusForbidden {
+		t.Fatalf("token read peer state: %d", w.Code)
+	}
+	w := read(false)
+	var got struct {
+		Success bool `json:"success"`
+		Obj     struct {
+			Sender       string `json:"sender"`
+			Generation   string `json:"generation"`
+			LastSequence int64  `json:"lastSequence"`
+		} `json:"obj"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || !got.Success || got.Obj.Sender != state.Sender || got.Obj.Generation != state.Generation || got.Obj.LastSequence != 4 {
+		t.Fatalf("sender read: %s %v", fmt.Sprint(w.Body), err)
+	}
+
 }

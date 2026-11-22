@@ -925,6 +925,12 @@ export const sections: readonly Section[] = [
         response: '{\n  "success": true,\n  "obj": {\n    "webCertFile": "/root/cert/example.com/fullchain.pem",\n    "webKeyFile": "/root/cert/example.com/privkey.pem"\n  }\n}',
       },
       {
+        method: 'GET',
+        path: '/panel/api/nodes/trafficSnapshot/sender/:id',
+        summary: 'Read a provisioned sender identity, generation and last reserved sequence. Interactive superadmin session only; no token secret is returned.',
+        params: [{ name: 'id', in: 'path', type: 'integer', desc: 'Local node ID.' }],
+      },
+      {
         method: 'POST',
         path: '/panel/api/nodes/trafficSnapshot/sender/:id',
         summary: 'Experimental: register a new verified snapshot sender for a node. Interactive superadmin session only; reconciled must be true. This enables verified mode immediately without attesting that the peer is ready; it never resets an existing sequence.',

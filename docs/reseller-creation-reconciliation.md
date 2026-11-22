@@ -452,8 +452,8 @@ back to the old endpoint after a verification, provisioning, transport or
 receiver failure. Ordinary node edits preserve the mode. Unmarked nodes still
 use the legacy endpoint; unregistered sender identities are not protected by
 the registered-sender downgrade guard.
-The verified mode is not automatically provisioned and has no administration
-UI. Do not enable it until both peers, their identities, generations, sequence
+Verified mode is not automatically provisioned. The Nodes page provides an
+experimental interactive superadmin setup dialog. Do not enable it until both peers, their identities, generations, sequence
 state and token are configured and reconciled under a reviewed procedure.
 
 The agreed rollout is **not complete**: legacy snapshots for reseller
@@ -484,8 +484,9 @@ peer is ready. The sender endpoint returns the sender GUID and generation for
 secure out-of-band transfer to the receiver. Prepare for verified sends to fail
 until the receiver is registered. Neither endpoint overwrites existing state or
 resets a sequence; token rotation, generation changes, backup rollback, existing
-usage and incidents require manual reconciliation. There is no management UI or
-remote-readiness handshake yet. Unregistered peers still use legacy paths.
+usage and incidents require manual reconciliation. The Nodes page exposes
+these registration operations and can reread an existing sender identity and
+generation, but it does not implement a remote-readiness handshake. Unregistered peers still use legacy paths.
 
 The administrator dashboard now warns about every registered node, including
 disabled nodes and nodes with verified outgoing global pushes, because incoming
