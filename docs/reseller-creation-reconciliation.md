@@ -660,3 +660,10 @@ separate investigation. `Close` does not prove final counters were polled or
 committed, and removal cannot retract traffic already accepted in a race. Do
 not use this patch to lift quota blocks, delete reseller accounting evidence, or
 claim safe final consumption; release and upgrade flows still use upstream Xray.
+
+An analogous experimental Trojan patch is also built in CI. Its TCP test checks
+that deleting one authenticated user closes that user's stream while another
+user's stream remains usable, and a race test covers stale authentication and
+registration. Trojan UDP-over-TCP is not independently tested. As with the
+VLESS prototype, neither patch supplies a final counter flush or a durable fence,
+and neither is enabled in release or quota reconciliation.

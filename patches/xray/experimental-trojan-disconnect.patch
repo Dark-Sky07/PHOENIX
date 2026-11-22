@@ -1,0 +1,194 @@
+--- a/proxy/trojan/server.go
++++ b/proxy/trojan/server.go
+@@ -7,0 +8 @@
++	"sync"
+@@ -37,0 +39,2 @@
++	userSessionMu sync.Mutex
++	userSessions  map[*protocol.MemoryUser]map[*trackedUserConnection]struct{}
+@@ -119,0 +123,2 @@
++	s.userSessionMu.Lock()
++	defer s.userSessionMu.Unlock()
+@@ -125 +130,22 @@
+-	return s.validator.Del(e)
++	s.userSessionMu.Lock()
++	u := s.validator.GetByEmail(e)
++	err := s.validator.Del(e)
++	if err != nil {
++		s.userSessionMu.Unlock()
++		return err
++	}
++	connections := make([]*trackedUserConnection, 0, len(s.userSessions[u]))
++	for c := range s.userSessions[u] {
++		connections = append(connections, c)
++	}
++	s.userSessionMu.Unlock()
++	var closeErr error
++	for _, c := range connections {
++		if err := c.connection.Close(); err != nil && closeErr == nil {
++			closeErr = err
++		}
++	}
++	if closeErr != nil {
++		return errors.New("failed to close removed trojan user connection").Base(closeErr)
++	}
++	return nil
+@@ -207,0 +234,7 @@
++
++	// Reject stale authentication and register before any forwarding.
++	untrack, ok := s.trackUserConnection(user, conn)
++	if !ok {
++		return errors.New("trojan user removed during authentication")
++	}
++	defer untrack()
+--- /dev/null
++++ b/proxy/trojan/phoenix_user_sessions.go
+@@ -0,0 +1,43 @@
++package trojan
++
++import (
++	"net"
++
++	"github.com/xtls/xray-core/common/protocol"
++)
++
++// trackedUserConnection holds the exact authenticated transport. It is not
++// a count of substreams, a persistent epoch, or proof that traffic was flushed.
++type trackedUserConnection struct{ connection net.Conn }
++
++func (h *Server) trackUserConnection(user *protocol.MemoryUser, conn net.Conn) (func(), bool) {
++	if user == nil || conn == nil {
++		return nil, false
++	}
++	// Users without email cannot be addressed by RemoveUser. Preserve upstream
++	// behavior, but never claim this experimental facility covers them.
++	if user.Email == "" {
++		return func() {}, true
++	}
++	h.userSessionMu.Lock()
++	defer h.userSessionMu.Unlock()
++	if h.validator.GetByEmail(user.Email) != user {
++		return nil, false
++	}
++	if h.userSessions == nil {
++		h.userSessions = make(map[*protocol.MemoryUser]map[*trackedUserConnection]struct{})
++	}
++	if h.userSessions[user] == nil {
++		h.userSessions[user] = make(map[*trackedUserConnection]struct{})
++	}
++	entry := &trackedUserConnection{connection: conn}
++	h.userSessions[user][entry] = struct{}{}
++	return func() {
++		h.userSessionMu.Lock()
++		defer h.userSessionMu.Unlock()
++		delete(h.userSessions[user], entry)
++		if len(h.userSessions[user]) == 0 {
++			delete(h.userSessions, user)
++		}
++	}, true
++}
+--- /dev/null
++++ b/proxy/trojan/phoenix_user_sessions_test.go
+@@ -0,0 +1,103 @@
++package trojan
++
++import (
++	"context"
++	"io"
++	"net"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/xtls/xray-core/common/protocol"
++)
++
++func testPhoenixUser(email string) *protocol.MemoryUser {
++	account, err := (&Account{Password: email}).AsAccount()
++	if err != nil {
++		panic(err)
++	}
++	return &protocol.MemoryUser{Email: email, Account: account}
++}
++
++func TestPhoenixTrojanRemovalClosesOnlyRemovedUserAndRejectsStaleAuthentication(t *testing.T) {
++	h := &Server{validator: new(Validator)}
++	a, b := testPhoenixUser("a@test"), testPhoenixUser("b@test")
++	for _, u := range []*protocol.MemoryUser{a, b} {
++		if err := h.AddUser(context.Background(), u); err != nil {
++			t.Fatal(err)
++		}
++	}
++	aConn, aPeer := net.Pipe()
++	defer aPeer.Close()
++	bConn, bPeer := net.Pipe()
++	defer bConn.Close()
++	defer bPeer.Close()
++	doneA, ok := h.trackUserConnection(a, aConn)
++	if !ok {
++		t.Fatal("failed tracking a")
++	}
++	defer doneA()
++	doneB, ok := h.trackUserConnection(b, bConn)
++	if !ok {
++		t.Fatal("failed tracking b")
++	}
++	defer doneB()
++	if err := h.RemoveUser(context.Background(), "a@test"); err != nil {
++		t.Fatal(err)
++	}
++	_ = aPeer.SetReadDeadline(time.Now().Add(time.Second))
++	var buf [1]byte
++	if _, err := aPeer.Read(buf[:]); err != io.EOF {
++		t.Fatalf("removed session remains open: %v", err)
++	}
++	_ = bPeer.SetReadDeadline(time.Now().Add(25 * time.Millisecond))
++	if _, err := bPeer.Read(buf[:]); err == nil {
++		t.Fatal("unexpected data")
++	} else if nerr, ok := err.(net.Error); !ok || !nerr.Timeout() {
++		t.Fatalf("other user's session closed: %v", err)
++	}
++	// Re-adding the email does not admit a connection authenticated against
++	// the old user object before it was removed.
++	replacement := testPhoenixUser("a@test")
++	if err := h.AddUser(context.Background(), replacement); err != nil {
++		t.Fatal(err)
++	}
++	stale, stalePeer := net.Pipe()
++	defer stale.Close()
++	defer stalePeer.Close()
++	if _, ok := h.trackUserConnection(a, stale); ok {
++		t.Fatal("stale authentication accepted")
++	}
++}
++
++func TestPhoenixTrojanRemovalRacesWithConnectionRegistration(t *testing.T) {
++	for round := 0; round < 100; round++ {
++		h := &Server{validator: new(Validator)}
++		u := testPhoenixUser("race@test")
++		if err := h.AddUser(context.Background(), u); err != nil {
++			t.Fatal(err)
++		}
++		conn, peer := net.Pipe()
++		var wg sync.WaitGroup
++		wg.Add(2)
++		go func() {
++			defer wg.Done()
++			if untrack, ok := h.trackUserConnection(u, conn); ok {
++				defer untrack()
++				_ = conn.SetReadDeadline(time.Now().Add(time.Second))
++				var b [1]byte
++				_, _ = conn.Read(b[:])
++			}
++		}()
++		go func() { defer wg.Done(); _ = h.RemoveUser(context.Background(), u.Email) }()
++		wg.Wait()
++		_ = conn.Close()
++		_ = peer.Close()
++		check, checkPeer := net.Pipe()
++		if _, ok := h.trackUserConnection(u, check); ok {
++			t.Fatal("removed user admitted")
++		}
++		_ = check.Close()
++		_ = checkPeer.Close()
++	}
++}

@@ -1,7 +1,9 @@
 package xray
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net"
@@ -166,4 +168,157 @@ func TestXrayRemoveUserDoesNotDrainEstablishedVLESS(t *testing.T) {
 	if string(after) != "after" {
 		t.Fatalf("unexpected response %q", after)
 	}
+}
+
+func TestXrayRemoveUserDoesNotDrainEstablishedTrojan(t *testing.T) {
+	bin := os.Getenv("XRAY_E2E_BINARY")
+	if bin == "" {
+		t.Skip("set XRAY_E2E_BINARY to the pinned Xray binary")
+	}
+	echo, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer echo.Close()
+	go func() {
+		for {
+			conn, err := echo.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				buf := make([]byte, 4096)
+				for {
+					n, err := conn.Read(buf)
+					if n > 0 {
+						if _, writeErr := conn.Write(buf[:n]); writeErr != nil {
+							return
+						}
+					}
+					if err != nil {
+						return
+					}
+				}
+			}()
+		}
+	}()
+	apiPort, userPort := freePort(t), freePort(t)
+	for userPort == apiPort {
+		userPort = freePort(t)
+	}
+	userPassword, otherPassword := "first-password", "second-password"
+	cfg := map[string]any{
+		"log": map[string]any{"loglevel": "warning"},
+		"api": map[string]any{"services": []string{"HandlerService", "StatsService"}, "tag": "api"},
+		"inbounds": []any{
+			map[string]any{"listen": "127.0.0.1", "port": apiPort, "protocol": "tunnel", "settings": map[string]any{"rewriteAddress": "127.0.0.1"}, "tag": "api"},
+			map[string]any{"listen": "127.0.0.1", "port": userPort, "protocol": "trojan", "settings": map[string]any{"clients": []any{map[string]any{"password": userPassword, "email": "quiescence@example.test"}, map[string]any{"password": otherPassword, "email": "other@example.test"}}}, "tag": "user-in"},
+		},
+		// The pinned Xray core blocks private destinations by default for
+		// VLESS. Allow only the local test echo port, not general private access.
+		"outbounds": []any{map[string]any{"protocol": "freedom", "settings": map[string]any{"finalRules": []any{map[string]any{"action": "allow", "network": "tcp", "ip": []string{"127.0.0.1/32"}, "port": strconv.Itoa(echo.Addr().(*net.TCPAddr).Port)}}}, "tag": "direct"}},
+		"routing":   map[string]any{"rules": []any{map[string]any{"type": "field", "inboundTag": []string{"api"}, "outboundTag": "api"}}},
+		"policy":    map[string]any{"levels": map[string]any{"0": map[string]any{"statsUserOnline": true}}}, "stats": map[string]any{},
+	}
+	body, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(t.TempDir(), "xray.json")
+	if err := os.WriteFile(config, body, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bin, "-c", config)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() }()
+	waitForPort(t, apiPort)
+	waitForPort(t, userPort)
+	api := XrayAPI{}
+	if err := api.Init(apiPort); err != nil {
+		t.Fatal(err)
+	}
+	defer api.Close()
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(userPort)), 3*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	echoPort := echo.Addr().(*net.TCPAddr).Port
+	// Trojan: hex SHA-224 password, CRLF, TCP, IPv4 address, port, CRLF.
+	header := trojanTestHeader(userPassword, echoPort)
+	if _, err := conn.Write(append(header, []byte("before")...)); err != nil {
+		t.Fatal(err)
+	}
+	response := make([]byte, len("before"))
+	if _, err := io.ReadFull(conn, response); err != nil {
+		t.Fatal(err)
+	}
+	if string(response) != "before" {
+		t.Fatalf("unexpected Trojan response %x", response)
+	}
+	// A second user's live stream must survive removing the first user.
+	other, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(userPort)), 3*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	if err := other.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	otherHeader := trojanTestHeader(otherPassword, echoPort)
+	if _, err := other.Write(append(otherHeader, []byte("other")...)); err != nil {
+		t.Fatal(err)
+	}
+	otherResp := make([]byte, len("other"))
+	if _, err := io.ReadFull(other, otherResp); err != nil || string(otherResp) != "other" {
+		t.Fatalf("second stream failed: %x %v", otherResp, err)
+	}
+	if err := api.RemoveUser("user-in", "quiescence@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := other.Write([]byte("alive")); err != nil {
+		t.Fatal(err)
+	}
+	alive := make([]byte, len("alive"))
+	if _, err := io.ReadFull(other, alive); err != nil || string(alive) != "alive" {
+		t.Fatalf("unrelated user disconnected: %q %v", alive, err)
+	}
+	if os.Getenv("XRAY_EXPECT_EXPERIMENTAL_DRAIN") == "1" {
+		if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		var b [1]byte
+		_, err := conn.Read(b[:])
+		if err == nil {
+			t.Fatal("experimental core did not close the deleted user's connection")
+		}
+		if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
+			t.Fatalf("experimental core left the deleted user's connection open: %v", err)
+		}
+		return
+	}
+	if _, err := conn.Write([]byte("after")); err != nil {
+		t.Fatal(err)
+	}
+	after := make([]byte, len("after"))
+	if _, err := io.ReadFull(conn, after); err != nil {
+		t.Fatalf("pinned core changed existing-session behavior: %v", err)
+	}
+	if string(after) != "after" {
+		t.Fatalf("unexpected response %q", after)
+	}
+}
+
+func trojanTestHeader(password string, port int) []byte {
+	key := sha256.Sum224([]byte(password))
+	header := []byte(hex.EncodeToString(key[:]))
+	return append(header, '\r', '\n', 1, 1, 127, 0, 0, 1, byte(port>>8), byte(port), '\r', '\n')
 }
