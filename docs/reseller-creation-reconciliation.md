@@ -514,3 +514,15 @@ and an evidence-based migration exist; it does not shut down the node. It is
 not a complete perimeter: direct administrator/runtime/database writes,
 unrepresented or lost associations, upstream global-only traffic and other
 nonparticipating paths may bypass it. Existing totals can still be incomplete.
+
+The experimental node-to-master snapshot endpoint
+`POST /panel/api/inbounds/verifiedNodeSnapshot` requires a full bearer token and
+an independently provisioned `node-snapshot:api-token:<id>` sender state. It
+captures local database traffic without the global overlay, uses a distinct
+node-snapshot key, and reserves its sequence while holding the allocation lock.
+It rejects missing traffic, ambiguous identities, malformed settings, nested
+nodes, and other-admin inbounds rather than signing a partial view. It does not
+poll Xray or establish completeness of historical or unpolled usage. The node
+sender provisioning UI, secure fetching/dispatch, downgrade protection and manual
+reconciliation workflow are not yet implemented; this endpoint does not lift
+reseller quota blocks. Sequence state must never be reset to clear an error.

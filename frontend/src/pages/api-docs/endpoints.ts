@@ -208,6 +208,11 @@ export const sections: readonly Section[] = [
       },
       {
         method: 'POST',
+        path: '/panel/api/inbounds/verifiedNodeSnapshot',
+        summary: 'Experimental signed node snapshot for a separately provisioned bearer-token sender stream. Fails closed on incomplete local data; does not poll the runtime or prove historical completeness.',
+      },
+      {
+        method: 'POST',
         path: '/panel/api/inbounds/trafficReadiness',
         summary: 'Experimental authenticated readiness challenge for an already registered global snapshot receiver. Does not activate a sender or attest reconciliation.',
         params: [

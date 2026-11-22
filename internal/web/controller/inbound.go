@@ -100,6 +100,7 @@ func (a *InboundController) initRouter(g *gin.RouterGroup) {
 	g.POST("/pushClientTraffics", a.pushClientTraffics)
 	g.POST("/pushVerifiedClientTraffics", a.pushVerifiedClientTraffics)
 	g.POST("/trafficReadiness", a.trafficReadiness)
+	g.POST("/verifiedNodeSnapshot", a.verifiedNodeSnapshot)
 }
 
 // getInbounds retrieves the list of inbounds for the logged-in user.
@@ -451,6 +452,31 @@ func (a *InboundController) pushClientTraffics(c *gin.Context) {
 		return
 	}
 	jsonMsg(c, "success", nil)
+}
+
+// verifiedNodeSnapshot is experimental and serves only a pre-provisioned
+// token-specific sender stream. It never provisions or resets a sequence.
+func (a *InboundController) verifiedNodeSnapshot(c *gin.Context) {
+	if !rejectResellerInboundWrite(c) {
+		return
+	}
+	if !c.GetBool("api_authed") || c.GetInt("api_token_id") <= 0 {
+		c.AbortWithStatus(http.StatusForbidden)
+		return
+	}
+	token, ok := strings.CutPrefix(c.GetHeader("Authorization"), "Bearer ")
+	user := session.GetLoginUser(c)
+	if !ok || user == nil || user.Id <= 0 {
+		c.AbortWithStatus(http.StatusForbidden)
+		return
+	}
+	envelope, err := a.inboundService.PrepareVerifiedInboundSnapshot(c.GetInt("api_token_id"), user.Id, token)
+	if err != nil {
+		jsonMsg(c, "verified node snapshot unavailable", err)
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	jsonObj(c, envelope, nil)
 }
 
 // trafficReadiness proves that the bearer token is bound to the requested

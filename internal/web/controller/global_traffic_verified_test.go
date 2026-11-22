@@ -11,6 +11,7 @@ import (
 
 	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
+	"github.com/Dark-Sky07/phoenix/internal/web/service"
 	"github.com/Dark-Sky07/phoenix/internal/web/service/panel"
 	"github.com/Dark-Sky07/phoenix/internal/web/trafficprotocol"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
@@ -50,6 +51,43 @@ func TestVerifiedGlobalEndpointBindsBearerTokenAndRegisteredSender(t *testing.T)
 	group := r.Group("/panel/api")
 	group.Use((&APIController{}).checkAPIAuth)
 	NewInboundController(group.Group("/inbounds"))
+	guid, err := (&service.SettingService{}).GetPanelGuid()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&model.TrafficSnapshotSender{ID: fmt.Sprintf("node-snapshot:api-token:%d", one.Id), Sender: guid, Generation: "node-epoch"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	fetchNodeSnapshot := func(token string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/panel/api/inbounds/verifiedNodeSnapshot", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w
+	}
+	var produced struct {
+		Success bool                     `json:"success"`
+		Obj     trafficprotocol.Envelope `json:"obj"`
+	}
+	wNode := fetchNodeSnapshot(one.Token)
+	if err := json.Unmarshal(wNode.Body.Bytes(), &produced); err != nil || !produced.Success || wNode.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("node snapshot: %d %s %v", wNode.Code, wNode.Body.String(), err)
+	}
+	nodeKey, err := trafficprotocol.NodeSnapshotKeyFromAPIToken(one.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := trafficprotocol.Verify(produced.Obj, nodeKey, trafficprotocol.Expected{Sender: guid, Generation: "node-epoch"}); err != nil {
+		t.Fatal(err)
+	}
+	otherNode := fetchNodeSnapshot(two.Token)
+	var rejected struct {
+		Success bool `json:"success"`
+	}
+	_ = json.Unmarshal(otherNode.Body.Bytes(), &rejected)
+	if rejected.Success {
+		t.Fatal("unprovisioned token obtained snapshot")
+	}
 	payload, err := json.Marshal([]*xray.ClientTraffic{{Email: "verified@example.test", Up: 123}})
 	if err != nil {
 		t.Fatal(err)

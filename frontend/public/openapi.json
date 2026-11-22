@@ -3878,6 +3878,36 @@
         }
       }
     },
+    "/panel/api/inbounds/verifiedNodeSnapshot": {
+      "post": {
+        "tags": [
+          "Inbounds"
+        ],
+        "summary": "Experimental signed node snapshot for a separately provisioned bearer-token sender stream. Fails closed on incomplete local data; does not poll the runtime or prove historical completeness.",
+        "operationId": "post_panel_api_inbounds_verifiedNodeSnapshot",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/panel/api/inbounds/trafficReadiness": {
       "post": {
         "tags": [
