@@ -535,7 +535,14 @@ func (x *XrayAPI) AddUser(Protocol string, inboundTag string, user map[string]an
 // were terminated, that another writer cannot re-add the user, or that final
 // traffic has been polled. Do not use it alone to release accounting quota.
 func (x *XrayAPI) RemoveUser(inboundTag, email string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	return x.RemoveUserContext(context.Background(), inboundTag, email)
+}
+
+// RemoveUserContext bounds the RPC and respects an earlier caller deadline.
+// Cancellation or timeout is an uncertain outcome: the core may already have
+// removed the credential or may still be stopping its sessions.
+func (x *XrayAPI) RemoveUserContext(parent context.Context, inboundTag, email string) error {
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
 
 	op := &command.RemoveUserOperation{Email: email}

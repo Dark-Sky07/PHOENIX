@@ -282,12 +282,12 @@ func (l *Local) AddUser(_ context.Context, ib *model.Inbound, userMap map[string
 	})
 }
 
-func (l *Local) RemoveUser(_ context.Context, ib *model.Inbound, email string) error {
+func (l *Local) RemoveUser(ctx context.Context, ib *model.Inbound, email string) error {
 	if ib.Protocol == model.OpenVPN || ib.Protocol == model.MTProto || ib.Protocol == model.AmneziaWG || ib.Protocol == model.L2TP || ib.Protocol == model.SSTP || ib.Protocol == model.PPTP || ib.Protocol == model.TUIC {
 		return nil
 	}
 	return l.withAPI(func(api *xray.XrayAPI) error {
-		return api.RemoveUser(ib.Tag, email)
+		return api.RemoveUserContext(ctx, ib.Tag, email)
 	})
 }
 

@@ -5,6 +5,7 @@ import (
 	"net"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
 	"github.com/xtls/xray-core/app/proxyman/command"
@@ -49,5 +50,50 @@ func TestLocalRemovalFailureCannotAuthorizeReadd(t *testing.T) {
 				t.Fatalf("unexpected add after failed removal: %d requests", handler.requests.Load())
 			}
 		})
+	}
+}
+
+type cancelRemovalServer struct {
+	command.UnimplementedHandlerServiceServer
+	started chan struct{}
+}
+
+func (s *cancelRemovalServer) AlterInbound(ctx context.Context, _ *command.AlterInboundRequest) (*command.AlterInboundResponse, error) {
+	close(s.started)
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestLocalRemoveUserRespectsCallerCancellation(t *testing.T) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lis.Close()
+	server := grpc.NewServer()
+	handler := &cancelRemovalServer{started: make(chan struct{})}
+	command.RegisterHandlerServiceServer(server, handler)
+	go func() { _ = server.Serve(lis) }()
+	defer server.Stop()
+	local := NewLocal(LocalDeps{APIPort: func() int { return lis.Addr().(*net.TCPAddr).Port }})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		result <- local.RemoveUser(ctx, &model.Inbound{Tag: "test", Protocol: model.VLESS}, "alice")
+	}()
+	select {
+	case <-handler.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("removal RPC did not start")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if status.Code(err) != codes.Canceled {
+			t.Fatalf("cancellation reported as %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("removal ignored caller cancellation")
 	}
 }
