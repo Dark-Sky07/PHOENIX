@@ -139,19 +139,27 @@
 +			delete(i.sessions, user)
 +		}
 +	}, true
-@@ -231,2 +277,9 @@
+@@ -204,0 +251,3 @@
++		// Track the original transport: the sing wrapper's Close closes the
++		// same socket several times and can mask an earlier close error.
++		ctx = context.WithValue(ctx, phoenixTransportKey{}, connection)
+@@ -231,2 +280,13 @@
 -	userInt, _ := A.UserFromContext[int](ctx)
 -	user := i.users[userInt]
 +	user, found := A.UserFromContext[*protocol.MemoryUser](ctx)
 +	if !found {
 +		return errors.New("missing authenticated Shadowsocks 2022 identity")
 +	}
-+	untrack, ok := i.trackPhoenixUser(user, conn)
++	transport, ok := ctx.Value(phoenixTransportKey{}).(io.Closer)
++	if !ok {
++		return errors.New("missing Shadowsocks 2022 transport")
++	}
++	untrack, ok := i.trackPhoenixUser(user, transport)
 +	if !ok {
 +		return errors.New("Shadowsocks 2022 user removed during authentication")
 +	}
 +	defer untrack()
-@@ -255,2 +308,9 @@
+@@ -255,2 +315,9 @@
 -	userInt, _ := A.UserFromContext[int](ctx)
 -	user := i.users[userInt]
 +	user, found := A.UserFromContext[*protocol.MemoryUser](ctx)
