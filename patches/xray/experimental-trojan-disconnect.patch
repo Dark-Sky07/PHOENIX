@@ -88,7 +88,7 @@
 +}
 --- /dev/null
 +++ b/proxy/trojan/phoenix_user_sessions_test.go
-@@ -0,0 +1,103 @@
+@@ -0,0 +1,114 @@
 +package trojan
 +
 +import (
@@ -128,6 +128,13 @@
 +		t.Fatal("failed tracking a")
 +	}
 +	defer doneA()
++	second, secondPeer := net.Pipe()
++	defer secondPeer.Close()
++	doneSecond, ok := h.trackUserConnection(a, second)
++	if !ok {
++		t.Fatal("failed tracking second a session")
++	}
++	defer doneSecond()
 +	doneB, ok := h.trackUserConnection(b, bConn)
 +	if !ok {
 +		t.Fatal("failed tracking b")
@@ -140,6 +147,10 @@
 +	var buf [1]byte
 +	if _, err := aPeer.Read(buf[:]); err != io.EOF {
 +		t.Fatalf("removed session remains open: %v", err)
++	}
++	_ = secondPeer.SetReadDeadline(time.Now().Add(time.Second))
++	if _, err := secondPeer.Read(buf[:]); err != io.EOF {
++		t.Fatalf("second removed session remains open: %v", err)
 +	}
 +	_ = bPeer.SetReadDeadline(time.Now().Add(25 * time.Millisecond))
 +	if _, err := bPeer.Read(buf[:]); err == nil {

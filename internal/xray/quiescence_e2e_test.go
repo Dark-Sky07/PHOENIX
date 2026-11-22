@@ -156,6 +156,23 @@ func TestXrayRemoveUserDoesNotDrainEstablishedVLESS(t *testing.T) {
 		if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
 			t.Fatalf("experimental core left the deleted user's connection open: %v", err)
 		}
+		// A fresh connection using the removed credential must not receive an echo.
+		retry, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(userPort)), 3*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer retry.Close()
+		if err := retry.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := retry.Write(append(header, []byte("retry")...)); err != nil {
+			return
+		}
+		if _, err := retry.Read(b[:]); err == nil {
+			t.Fatal("removed credential received data on a new connection")
+		} else if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
+			t.Fatalf("removed credential connection did not terminate: %v", err)
+		}
 		return
 	}
 	if _, err := conn.Write([]byte("after")); err != nil {
@@ -302,6 +319,23 @@ func TestXrayRemoveUserDoesNotDrainEstablishedTrojan(t *testing.T) {
 		}
 		if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
 			t.Fatalf("experimental core left the deleted user's connection open: %v", err)
+		}
+		// A fresh connection using the removed credential must not receive an echo.
+		retry, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(userPort)), 3*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer retry.Close()
+		if err := retry.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := retry.Write(append(header, []byte("retry")...)); err != nil {
+			return
+		}
+		if _, err := retry.Read(b[:]); err == nil {
+			t.Fatal("removed credential received data on a new connection")
+		} else if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
+			t.Fatalf("removed credential connection did not terminate: %v", err)
 		}
 		return
 	}
