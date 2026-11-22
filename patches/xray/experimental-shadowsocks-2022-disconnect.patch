@@ -89,9 +89,10 @@
 +	}
 +	return nil
 +}
-@@ -139,12 +163 @@
+@@ -139 +163 @@
 -	ulen := len(i.users)
--
++type phoenixTransportKey struct{}
+@@ -141,10 +165 @@
 -	i.users[idx] = i.users[ulen-1]
 -	i.users[ulen-1] = nil
 -	i.users = i.users[:ulen-1]
@@ -103,7 +104,7 @@
 -		C.Map(i.users, func(it *protocol.MemoryUser) string { return it.Account.(*MemoryAccount).Key }),
 -	)
 +type phoenixSession struct{ connection io.Closer }
-@@ -152 +165,34 @@
+@@ -152 +167,34 @@
 -	return nil
 +// Authentication may have completed against an old service snapshot. The
 +// object identity check prevents registering after deletion or replacement.
@@ -139,11 +140,11 @@
 +			delete(i.sessions, user)
 +		}
 +	}, true
-@@ -204,0 +251,3 @@
+@@ -204,0 +253,3 @@
 +		// Track the original transport: the sing wrapper's Close closes the
 +		// same socket several times and can mask an earlier close error.
 +		ctx = context.WithValue(ctx, phoenixTransportKey{}, connection)
-@@ -231,2 +280,13 @@
+@@ -231,2 +282,13 @@
 -	userInt, _ := A.UserFromContext[int](ctx)
 -	user := i.users[userInt]
 +	user, found := A.UserFromContext[*protocol.MemoryUser](ctx)
@@ -159,7 +160,7 @@
 +		return errors.New("Shadowsocks 2022 user removed during authentication")
 +	}
 +	defer untrack()
-@@ -255,2 +315,9 @@
+@@ -255,2 +317,9 @@
 -	userInt, _ := A.UserFromContext[int](ctx)
 -	user := i.users[userInt]
 +	user, found := A.UserFromContext[*protocol.MemoryUser](ctx)
