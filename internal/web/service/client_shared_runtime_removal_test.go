@@ -597,3 +597,123 @@ func TestBulkDeleteRemoteMutationAndSaveFailureMarksNodeDirty(t *testing.T) {
 		t.Fatalf("failed inbound transaction was not preserved: err=%v", err)
 	}
 }
+
+func TestBulkDetachRemoteMutationAndSaveFailureMarksNodeDirty(t *testing.T) {
+	setupConflictDB(t)
+	db := database.GetDB()
+	requests := make(chan string, 2)
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		requests <- req.URL.Path
+		if req.URL.Path == "/panel/api/inbounds/list" {
+			_, _ = w.Write([]byte(`{"success":true,"obj":[{"id":7,"tag":"remote-test"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"success":true}`))
+	}))
+	defer remote.Close()
+	host, portText, err := net.SplitHostPort(remote.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := model.Node{Name: "remote-bulk-save", Scheme: "http", Address: host, Port: port, ApiToken: "test-token", Enable: true, Status: "online", AllowPrivateAddress: true}
+	if err := db.Create(&node).Error; err != nil {
+		t.Fatal(err)
+	}
+	email := "remote-bulk-save@example.test"
+	client := model.ClientRecord{Email: email, Enable: true}
+	settings := `{"clients":[{"email":"remote-bulk-save@example.test","id":"a17e367c-2074-4d3e-aaeb-fbef5dfde7e7","enable":true}]}`
+	inbound := model.Inbound{UserId: 1, Port: 19187, Protocol: model.VLESS, Tag: "remote-test", NodeID: &node.Id, Settings: settings}
+	for _, v := range []any{&client, &inbound} {
+		if err := db.Create(v).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Create(&model.ClientInbound{ClientId: client.Id, InboundId: inbound.Id}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("CREATE TRIGGER reject_remote_bulk_save BEFORE UPDATE ON inbounds BEGIN SELECT RAISE(ABORT, 'injected failure'); END").Error; err != nil {
+		t.Fatal(err)
+	}
+	old := runtime.GetManager()
+	runtime.SetManager(runtime.NewManager(runtime.LocalDeps{APIPort: func() int { return 0 }}))
+	t.Cleanup(func() { runtime.SetManager(old) })
+	result, _, detachErr := (&ClientService{}).BulkDetach(&InboundService{}, []string{email}, []int{inbound.Id})
+	if detachErr != nil || len(result.Errors) != 1 || len(result.Detached) != 0 {
+		t.Fatalf("failed save not reported: %+v, err=%v", result, detachErr)
+	}
+	if len(requests) != 2 || <-requests != "/panel/api/inbounds/list" || <-requests != "/panel/api/clients/remote-bulk-save@example.test/detach" {
+		t.Fatal("remote removal was not attempted")
+	}
+	var savedNode model.Node
+	if err := db.First(&savedNode, node.Id).Error; err != nil || !savedNode.ConfigDirty {
+		t.Fatalf("remote divergence not marked dirty: node=%+v err=%v", savedNode, err)
+	}
+	var savedInbound model.Inbound
+	if err := db.First(&savedInbound, inbound.Id).Error; err != nil || savedInbound.Settings != settings {
+		t.Fatalf("failed inbound transaction was not preserved: err=%v", err)
+	}
+}
+
+func TestSingleDetachRemoteMutationAndSaveFailureMarksNodeDirty(t *testing.T) {
+	setupConflictDB(t)
+	db := database.GetDB()
+	requests := make(chan string, 2)
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		requests <- req.URL.Path
+		if req.URL.Path == "/panel/api/inbounds/list" {
+			_, _ = w.Write([]byte(`{"success":true,"obj":[{"id":7,"tag":"remote-test"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"success":true}`))
+	}))
+	defer remote.Close()
+	host, portText, err := net.SplitHostPort(remote.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := model.Node{Name: "remote-bulk-save", Scheme: "http", Address: host, Port: port, ApiToken: "test-token", Enable: true, Status: "online", AllowPrivateAddress: true}
+	if err := db.Create(&node).Error; err != nil {
+		t.Fatal(err)
+	}
+	email := "remote-bulk-save@example.test"
+	client := model.ClientRecord{Email: email, Enable: true}
+	settings := `{"clients":[{"email":"remote-bulk-save@example.test","id":"a17e367c-2074-4d3e-aaeb-fbef5dfde7e7","enable":true}]}`
+	inbound := model.Inbound{UserId: 1, Port: 19187, Protocol: model.VLESS, Tag: "remote-test", NodeID: &node.Id, Settings: settings}
+	for _, v := range []any{&client, &inbound} {
+		if err := db.Create(v).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Create(&model.ClientInbound{ClientId: client.Id, InboundId: inbound.Id}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("CREATE TRIGGER reject_remote_bulk_save BEFORE UPDATE ON inbounds BEGIN SELECT RAISE(ABORT, 'injected failure'); END").Error; err != nil {
+		t.Fatal(err)
+	}
+	old := runtime.GetManager()
+	runtime.SetManager(runtime.NewManager(runtime.LocalDeps{APIPort: func() int { return 0 }}))
+	t.Cleanup(func() { runtime.SetManager(old) })
+	_, detachErr := (&ClientService{}).DelInboundClientByEmail(&InboundService{}, inbound.Id, email, true)
+	if detachErr == nil {
+		t.Fatal("failed save not reported")
+	}
+	if len(requests) != 2 || <-requests != "/panel/api/inbounds/list" || <-requests != "/panel/api/clients/remote-bulk-save@example.test/detach" {
+		t.Fatal("remote removal was not attempted")
+	}
+	var savedNode model.Node
+	if err := db.First(&savedNode, node.Id).Error; err != nil || !savedNode.ConfigDirty {
+		t.Fatalf("remote divergence not marked dirty: node=%+v err=%v", savedNode, err)
+	}
+	var savedInbound model.Inbound
+	if err := db.First(&savedInbound, inbound.Id).Error; err != nil || savedInbound.Settings != settings {
+		t.Fatalf("failed inbound transaction was not preserved: err=%v", err)
+	}
+}

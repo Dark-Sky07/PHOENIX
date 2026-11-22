@@ -69,7 +69,7 @@ func reconcilePPPVPNRuntime(inbound *model.Inbound) error {
 // whole batch, instead of repeating the full per-client cycle. It mirrors the
 // semantics of DelInboundClientByEmail for each removed client. needRestart is
 // the OR across all removals.
-func (s *ClientService) delInboundClients(inboundSvc *InboundService, inboundId int, recs []*model.ClientRecord, keepTraffic bool) (bool, error) {
+func (s *ClientService) delInboundClients(inboundSvc *InboundService, inboundId int, recs []*model.ClientRecord, keepTraffic bool) (needRestart bool, err error) {
 	if len(recs) == 0 {
 		return false, nil
 	}
@@ -151,9 +151,18 @@ func (s *ClientService) delInboundClients(inboundSvc *InboundService, inboundId 
 		}
 	}
 
-	needRestart := false
 	markDirty := false
 	localRemovalAttempted := false
+	remoteRemovalAttempted := false
+	defer func() {
+		// Runtime calls cannot be rolled back if a later save or sync fails.
+		// Also preserve a dirty plan across any subsequent early return.
+		if oldInbound.NodeID != nil && (markDirty || (err != nil && remoteRemovalAttempted)) {
+			if dErr := (&NodeService{}).MarkNodeDirty(*oldInbound.NodeID); dErr != nil {
+				logger.Warning("mark node dirty after client detach:", dErr)
+			}
+		}
+	}()
 	for _, r := range removed {
 		email := r.email
 		emailShared := sharedSet[strings.ToLower(strings.TrimSpace(email))]
@@ -189,6 +198,7 @@ func (s *ClientService) delInboundClients(inboundSvc *InboundService, inboundId 
 				markDirty = true
 			}
 			if push {
+				remoteRemovalAttempted = true
 				if err1 := rt.DeleteUser(context.Background(), oldInbound, email); err1 != nil {
 					logger.Warning("Error in deleting client on", rt.Name(), ":", err1)
 					markDirty = true
@@ -210,11 +220,6 @@ func (s *ClientService) delInboundClients(inboundSvc *InboundService, inboundId 
 	}
 	if err := s.SyncInbound(db, inboundId, finalClients); err != nil {
 		return needRestart || localRemovalAttempted, err
-	}
-	if markDirty && oldInbound.NodeID != nil {
-		if dErr := (&NodeService{}).MarkNodeDirty(*oldInbound.NodeID); dErr != nil {
-			logger.Warning("mark node dirty failed:", dErr)
-		}
 	}
 	return needRestart, nil
 }
@@ -956,7 +961,7 @@ func (s *ClientService) UpdateInboundClient(inboundSvc *InboundService, data *mo
 	return needRestart, nil
 }
 
-func (s *ClientService) DelInboundClientByEmail(inboundSvc *InboundService, inboundId int, email string, keepTraffic bool) (bool, error) {
+func (s *ClientService) DelInboundClientByEmail(inboundSvc *InboundService, inboundId int, email string, keepTraffic bool) (needRestart bool, err error) {
 	defer lockInbound(inboundId).Unlock()
 
 	oldInbound, err := inboundSvc.GetInbound(inboundId)
@@ -1019,8 +1024,15 @@ func (s *ClientService) DelInboundClientByEmail(inboundSvc *InboundService, inbo
 		}
 	}
 
-	needRestart := false
 	markDirty := false
+	remoteRemovalAttempted := false
+	defer func() {
+		if oldInbound.NodeID != nil && (markDirty || (err != nil && remoteRemovalAttempted)) {
+			if dErr := (&NodeService{}).MarkNodeDirty(*oldInbound.NodeID); dErr != nil {
+				logger.Warning("mark node dirty after client removal:", dErr)
+			}
+		}
+	}()
 
 	if len(email) > 0 {
 		// Statistics are shared across inbounds, but authentication is not.
@@ -1057,6 +1069,7 @@ func (s *ClientService) DelInboundClientByEmail(inboundSvc *InboundService, inbo
 					needRestart = true
 				}
 			} else if push {
+				remoteRemovalAttempted = true
 				if err1 := rt.DeleteUser(context.Background(), oldInbound, email); err1 != nil {
 					logger.Warning("Error in deleting client on", rt.Name(), ":", err1)
 					markDirty = true
@@ -1085,11 +1098,6 @@ func (s *ClientService) DelInboundClientByEmail(inboundSvc *InboundService, inbo
 	}
 	if oldInbound.Protocol == model.TUIC && oldInbound.NodeID == nil {
 		inboundSvc.applyLocalTuic(oldInbound.Id)
-	}
-	if markDirty && oldInbound.NodeID != nil {
-		if dErr := (&NodeService{}).MarkNodeDirty(*oldInbound.NodeID); dErr != nil {
-			logger.Warning("mark node dirty failed:", dErr)
-		}
 	}
 	return needRestart, nil
 }
