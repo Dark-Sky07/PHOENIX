@@ -3,6 +3,9 @@ package service
 import (
 	"context"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -435,5 +438,162 @@ func TestInboundUpdateCommitFailureIsReported(t *testing.T) {
 	}
 	if len(recorder.requests) != 2 {
 		t.Fatalf("expected runtime update before commit failure, got %d calls", len(recorder.requests))
+	}
+}
+
+func TestBulkDeleteSaveFailureAfterSuccessfulRuntimeRemoval(t *testing.T) {
+	setupConflictDB(t)
+	db := database.GetDB()
+	email := "bulk-delete-save@example.test"
+	client := model.ClientRecord{Email: email, Enable: true}
+	settings := `{"clients":[{"email":"bulk-delete-save@example.test","id":"a17e367c-2074-4d3e-aaeb-fbef5dfde7e7","enable":true}]}`
+	inbound := model.Inbound{UserId: 1, Port: 19185, Protocol: model.VLESS, Tag: "bulk-delete-save", Settings: settings}
+	for _, v := range []any{&client, &inbound, &xray.ClientTraffic{Email: email, Enable: true, Up: 123}} {
+		if err := db.Create(v).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Create(&model.ClientInbound{ClientId: client.Id, InboundId: inbound.Id}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("CREATE TRIGGER reject_bulk_delete_save BEFORE UPDATE ON inbounds BEGIN SELECT RAISE(ABORT, 'injected failure'); END").Error; err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	server := grpc.NewServer()
+	recorder := &recordingRemovalServer{requests: make(chan *command.AlterInboundRequest, 2)}
+	command.RegisterHandlerServiceServer(server, recorder)
+	go func() { _ = server.Serve(listener) }()
+	defer server.Stop()
+	old := runtime.GetManager()
+	runtime.SetManager(runtime.NewManager(runtime.LocalDeps{APIPort: func() int { return listener.Addr().(*net.TCPAddr).Port }}))
+	t.Cleanup(func() { runtime.SetManager(old) })
+	result, restart, err := (&ClientService{}).BulkDelete(&InboundService{}, []string{email}, false)
+	if err != nil || !restart || result.Deleted != 0 || len(result.Skipped) != 1 {
+		t.Fatalf("lost partial failure: restart=%v result=%+v err=%v", restart, result, err)
+	}
+	select {
+	case req := <-recorder.requests:
+		op, err := req.Operation.GetInstance()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if removed, ok := op.(*command.RemoveUserOperation); !ok || removed.Email != email {
+			t.Fatalf("unexpected runtime operation: %v", op)
+		}
+	default:
+		t.Fatal("runtime removal was not attempted")
+	}
+	var persisted model.Inbound
+	if err := db.First(&persisted, inbound.Id).Error; err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Settings != settings {
+		t.Fatal("failed transaction changed inbound settings")
+	}
+	var count int64
+	if err := db.Model(&model.ClientRecord{}).Where("id = ?", client.Id).Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("client not preserved: count=%d err=%v", count, err)
+	}
+	var traffic xray.ClientTraffic
+	if err := db.Where("email = ?", email).First(&traffic).Error; err != nil || traffic.Up != 123 {
+		t.Fatalf("traffic not preserved: traffic=%+v err=%v", traffic, err)
+	}
+}
+
+func TestBulkDeleteNodePlanErrorDoesNotRewriteInbound(t *testing.T) {
+	setupConflictDB(t)
+	db := database.GetDB()
+	email := "bulk-node-missing@example.test"
+	client := model.ClientRecord{Email: email, Enable: true}
+	nodeID := 987654
+	settings := `{"clients":[{"email":"bulk-node-missing@example.test","id":"a17e367c-2074-4d3e-aaeb-fbef5dfde7e7","enable":true}]}`
+	inbound := model.Inbound{UserId: 1, Port: 19186, Protocol: model.VLESS, Tag: "bulk-node-missing", NodeID: &nodeID, Settings: settings}
+	for _, v := range []any{&client, &inbound} {
+		if err := db.Create(v).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Create(&model.ClientInbound{ClientId: client.Id, InboundId: inbound.Id}).Error; err != nil {
+		t.Fatal(err)
+	}
+	result := (&ClientService{}).bulkDelInboundClients(&InboundService{}, inbound.Id, []string{email}, map[string]*model.ClientRecord{email: &client}, true)
+	if len(result.perEmailSkipped) != 1 {
+		t.Fatalf("missing node was not reported: %+v", result)
+	}
+	var persisted model.Inbound
+	if err := db.First(&persisted, inbound.Id).Error; err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Settings != settings {
+		t.Fatal("skipped removal unexpectedly rewrote inbound settings")
+	}
+	var count int64
+	if err := db.Model(&model.ClientInbound{}).Where("client_id = ? AND inbound_id = ?", client.Id, inbound.Id).Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("skipped removal lost association: count=%d err=%v", count, err)
+	}
+}
+
+func TestBulkDeleteRemoteMutationAndSaveFailureMarksNodeDirty(t *testing.T) {
+	setupConflictDB(t)
+	db := database.GetDB()
+	requests := make(chan string, 2)
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		requests <- req.URL.Path
+		if req.URL.Path == "/panel/api/inbounds/list" {
+			_, _ = w.Write([]byte(`{"success":true,"obj":[{"id":7,"tag":"remote-test"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"success":true}`))
+	}))
+	defer remote.Close()
+	host, portText, err := net.SplitHostPort(remote.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := model.Node{Name: "remote-bulk-save", Scheme: "http", Address: host, Port: port, ApiToken: "test-token", Enable: true, Status: "online", AllowPrivateAddress: true}
+	if err := db.Create(&node).Error; err != nil {
+		t.Fatal(err)
+	}
+	email := "remote-bulk-save@example.test"
+	client := model.ClientRecord{Email: email, Enable: true}
+	settings := `{"clients":[{"email":"remote-bulk-save@example.test","id":"a17e367c-2074-4d3e-aaeb-fbef5dfde7e7","enable":true}]}`
+	inbound := model.Inbound{UserId: 1, Port: 19187, Protocol: model.VLESS, Tag: "remote-test", NodeID: &node.Id, Settings: settings}
+	for _, v := range []any{&client, &inbound} {
+		if err := db.Create(v).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Create(&model.ClientInbound{ClientId: client.Id, InboundId: inbound.Id}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("CREATE TRIGGER reject_remote_bulk_save BEFORE UPDATE ON inbounds BEGIN SELECT RAISE(ABORT, 'injected failure'); END").Error; err != nil {
+		t.Fatal(err)
+	}
+	old := runtime.GetManager()
+	runtime.SetManager(runtime.NewManager(runtime.LocalDeps{APIPort: func() int { return 0 }}))
+	t.Cleanup(func() { runtime.SetManager(old) })
+	result := (&ClientService{}).bulkDelInboundClients(&InboundService{}, inbound.Id, []string{email}, map[string]*model.ClientRecord{email: &client}, true)
+	if len(result.perEmailSkipped) != 1 {
+		t.Fatalf("failed save not reported: %+v", result)
+	}
+	if len(requests) != 2 || <-requests != "/panel/api/inbounds/list" || <-requests != "/panel/api/clients/remote-bulk-save@example.test/detach" {
+		t.Fatal("remote removal was not attempted")
+	}
+	var savedNode model.Node
+	if err := db.First(&savedNode, node.Id).Error; err != nil || !savedNode.ConfigDirty {
+		t.Fatalf("remote divergence not marked dirty: node=%+v err=%v", savedNode, err)
+	}
+	var savedInbound model.Inbound
+	if err := db.First(&savedInbound, inbound.Id).Error; err != nil || savedInbound.Settings != settings {
+		t.Fatalf("failed inbound transaction was not preserved: err=%v", err)
 	}
 }

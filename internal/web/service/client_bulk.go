@@ -1040,6 +1040,8 @@ func (s *ClientService) bulkDelInboundClients(
 	}
 
 	markDirty := false
+	localRuntimeAttempted := false
+	remoteRuntimeAttempted := false
 	if oldInbound.NodeID == nil {
 		rt, rterr := inboundSvc.runtimeFor(oldInbound)
 		if rterr != nil {
@@ -1053,6 +1055,7 @@ func (s *ClientService) bulkDelInboundClients(
 				if clientEmail == "" {
 					clientEmail = email
 				}
+				localRuntimeAttempted = true
 				err1 := rt.RemoveUser(context.Background(), oldInbound, clientEmail)
 				if err1 == nil {
 					logger.Debug("Client deleted on", rt.Name(), ":", clientEmail)
@@ -1067,8 +1070,10 @@ func (s *ClientService) bulkDelInboundClients(
 		if perr != nil {
 			for email := range foundEmails {
 				res.perEmailSkipped[email] = perr.Error()
-				delete(foundEmails, email)
 			}
+			// Settings were prepared with these users removed. Do not save
+			// them when the node plan could not even be determined.
+			return res
 		} else {
 			if dirty {
 				markDirty = true
@@ -1079,6 +1084,7 @@ func (s *ClientService) bulkDelInboundClients(
 					if clientEmail == "" {
 						clientEmail = email
 					}
+					remoteRuntimeAttempted = true
 					if err1 := rt.DeleteUser(context.Background(), oldInbound, clientEmail); err1 != nil {
 						logger.Warning("Error in deleting client on", rt.Name(), ":", clientEmail, err1)
 						markDirty = true
@@ -1099,6 +1105,15 @@ func (s *ClientService) bulkDelInboundClients(
 		return s.SyncInbound(tx, inboundId, finalClients)
 	})
 	if txErr != nil {
+		// A rolled-back inbound transaction cannot undo a runtime mutation.
+		// A failed commit may also have an uncertain result. Request recovery
+		// without interpreting either signal as proof of drained sessions.
+		res.needRestart = res.needRestart || localRuntimeAttempted
+		if remoteRuntimeAttempted && oldInbound.NodeID != nil {
+			if dErr := (&NodeService{}).MarkNodeDirty(*oldInbound.NodeID); dErr != nil {
+				logger.Warning("mark node dirty after failed bulk deletion:", dErr)
+			}
+		}
 		for email := range foundEmails {
 			if _, skip := res.perEmailSkipped[email]; !skip {
 				res.perEmailSkipped[email] = txErr.Error()
