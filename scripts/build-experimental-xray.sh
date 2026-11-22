@@ -18,7 +18,8 @@ chmod -R u+w "$work"
 cd "$work"
 patch --batch --forward --fuzz=0 -p1 < "$root/patches/xray/experimental-vless-disconnect.patch"
 patch --batch --forward --fuzz=0 -p1 < "$root/patches/xray/experimental-trojan-disconnect.patch"
+patch --batch --forward --fuzz=0 -p1 < "$root/patches/xray/experimental-vmess-disconnect.patch"
 if [ "${PHOENIX_XRAY_RUN_TESTS:-0}" = 1 ]; then
-  GOWORK=off go test -mod=mod -race ./proxy/vless/inbound ./proxy/trojan -run '^TestPhoenix(Vless|Trojan)' -count=1
+  GOWORK=off go test -mod=mod -race ./proxy/vless/inbound ./proxy/trojan ./proxy/vmess/inbound -run '^TestPhoenix(Vless|Trojan|Vmess)' -count=1
 fi
 GOWORK=off go build -mod=mod -o "$output" ./main
