@@ -532,8 +532,9 @@ Transfer the sender and generation securely to the master. On the master,
 configured token, then durably requires verified pulls and blocks legacy merges.
 The probe sequence is fenced and never merged as accounting; subsequent pulls
 must have a higher sequence. The switch is immediate after the probe, failed
-verified requests have no fallback, and sync may still stop if conditions change. Full inbound sync and standard
-HTTPS verification are mandatory. Existing sender/generation streams cannot be
+verified requests have no fallback, and sync may still stop if conditions change.
+The node must have a clean configuration before and after the probe; full inbound
+sync and standard HTTPS verification are mandatory. Existing sender/generation streams cannot be
 reset or replaced, including after token rotation. The shared receiver table
 requires sender identities to be unique even across global and inbound streams;
 conflicts must be investigated, never bypassed by changing identity. The sync

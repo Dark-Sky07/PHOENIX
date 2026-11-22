@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
@@ -52,8 +53,22 @@ func TestNodeSnapshotProvisioningDisablesLegacyWithoutReset(t *testing.T) {
 	if err := registerNodeSnapshotReceiver(context.Background(), node.Id, producer.Sender, producer.Generation, false, probe); err == nil {
 		t.Fatal("unconfirmed receiver accepted")
 	}
+	badProof := proof
+	badProof.MAC = append([]byte(nil), proof.MAC...)
+	badProof.MAC[0] ^= 1
+	badProbe := func(context.Context, *model.Node) (*trafficprotocol.Envelope, error) { return &badProof, nil }
+	if err := registerNodeSnapshotReceiver(context.Background(), node.Id, producer.Sender, producer.Generation, true, badProbe); err == nil {
+		t.Fatal("invalid authentication accepted")
+	}
+	if err := registerNodeSnapshotReceiver(context.Background(), node.Id, producer.Sender, "wrong-generation", true, probe); err == nil {
+		t.Fatal("incorrect stream generation accepted")
+	}
 	if err := registerNodeSnapshotReceiver(context.Background(), node.Id, producer.Sender, producer.Generation, true, probe); err != nil {
 		t.Fatal(err)
+	}
+	var receiver model.TrafficSnapshotReceiver
+	if err := db.First(&receiver, "id = ?", fmt.Sprintf("node-inbound:%d", node.Id)).Error; err != nil || receiver.LastSequence != int64(proof.Sequence) {
+		t.Fatalf("probe sequence not fenced: %+v %v", receiver, err)
 	}
 	if err := registerNodeSnapshotReceiver(context.Background(), node.Id, producer.Sender, "replacement", true, probe); err == nil {
 		t.Fatal("receiver reset accepted")
@@ -92,5 +107,21 @@ func TestNodeSnapshotReceiverRejectsChangedNodeConfiguration(t *testing.T) {
 	}
 	if required, err := NodeInboundVerificationRequired(node.Id); err != nil || required {
 		t.Fatalf("mode changed after race: %v %v", required, err)
+	}
+}
+
+func TestNodeSnapshotReceiverRejectsDirtyConfiguration(t *testing.T) {
+	db := initTrafficTestDB(t)
+	node := model.Node{Name: "node-dirty", Address: "example.com", Port: 443, Scheme: "https", ApiToken: "0123456789012345678901234567890123456789", ConfigDirty: true}
+	if err := db.Create(&node).Error; err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	probe := func(context.Context, *model.Node) (*trafficprotocol.Envelope, error) { called = true; return nil, nil }
+	if err := registerNodeSnapshotReceiver(context.Background(), node.Id, "node", "g", true, probe); err == nil || called {
+		t.Fatal("dirty node was probed or accepted")
+	}
+	if required, err := NodeInboundVerificationRequired(node.Id); err != nil || required {
+		t.Fatalf("mode changed: %v %v", required, err)
 	}
 }

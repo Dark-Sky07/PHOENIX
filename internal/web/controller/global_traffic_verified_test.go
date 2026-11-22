@@ -66,6 +66,20 @@ func TestVerifiedGlobalEndpointBindsBearerTokenAndRegisteredSender(t *testing.T)
 		r.ServeHTTP(w, req)
 		return w
 	}
+	for _, body := range []string{`{}`, `{"challenge":"AA=="}`, `{"challenge":null}`} {
+		req := httptest.NewRequest(http.MethodPost, "/panel/api/inbounds/verifiedNodeSnapshot", bytes.NewBufferString(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+one.Token)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("invalid challenge accepted: %s status %d", body, w.Code)
+		}
+	}
+	var producerBefore model.TrafficSnapshotSender
+	if err := db.First(&producerBefore, "id = ?", fmt.Sprintf("node-snapshot:api-token:%d", one.Id)).Error; err != nil || producerBefore.LastSequence != 0 {
+		t.Fatalf("invalid challenge advanced sequence: %+v %v", producerBefore, err)
+	}
 	var produced struct {
 		Success bool                     `json:"success"`
 		Obj     trafficprotocol.Envelope `json:"obj"`
@@ -80,6 +94,12 @@ func TestVerifiedGlobalEndpointBindsBearerTokenAndRegisteredSender(t *testing.T)
 	}
 	if err := trafficprotocol.Verify(produced.Obj, nodeKey, trafficprotocol.Expected{Sender: guid, Generation: "node-epoch"}); err != nil {
 		t.Fatal(err)
+	}
+	var signedSnapshot struct {
+		Challenge []byte `json:"challenge"`
+	}
+	if err := json.Unmarshal(produced.Obj.Snapshot, &signedSnapshot); err != nil || !bytes.Equal(signedSnapshot.Challenge, make([]byte, 32)) {
+		t.Fatalf("signed challenge mismatch: %v", err)
 	}
 	otherNode := fetchNodeSnapshot(two.Token)
 	var rejected struct {

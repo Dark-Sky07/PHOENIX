@@ -83,8 +83,8 @@ func registerNodeSnapshotReceiver(ctx context.Context, nodeID int, sender, gener
 	if err := db.First(&node, "id = ?", nodeID).Error; err != nil {
 		return err
 	}
-	if node.Scheme != "https" || (node.TlsVerifyMode != "" && node.TlsVerifyMode != "verify") || len(node.ApiToken) < 32 || node.InboundSyncMode == "selected" {
-		return errors.New("receiver requires full inbound sync, HTTPS, standard TLS and a valid token")
+	if node.Scheme != "https" || (node.TlsVerifyMode != "" && node.TlsVerifyMode != "verify") || len(node.ApiToken) < 32 || node.InboundSyncMode == "selected" || node.ConfigDirty {
+		return errors.New("receiver requires a clean node configuration, full inbound sync, HTTPS, standard TLS and a valid token")
 	}
 	required, err := NodeInboundVerificationRequired(nodeID)
 	if err != nil {
@@ -119,7 +119,7 @@ func registerNodeSnapshotReceiver(ctx context.Context, nodeID int, sender, gener
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&current, "id = ?", nodeID).Error; err != nil {
 			return err
 		}
-		if current.Scheme != node.Scheme || current.TlsVerifyMode != node.TlsVerifyMode || current.ApiToken != node.ApiToken || current.Address != node.Address || current.Port != node.Port || current.BasePath != node.BasePath || current.AllowPrivateAddress != node.AllowPrivateAddress || current.InboundSyncMode != node.InboundSyncMode {
+		if current.Scheme != node.Scheme || current.TlsVerifyMode != node.TlsVerifyMode || current.ApiToken != node.ApiToken || current.Address != node.Address || current.Port != node.Port || current.BasePath != node.BasePath || current.AllowPrivateAddress != node.AllowPrivateAddress || current.InboundSyncMode != node.InboundSyncMode || current.ConfigDirty {
 			return errors.New("node configuration changed during readiness probe")
 		}
 		return tx.Create(&model.TrafficSnapshotReceiver{ID: fmt.Sprintf("node-inbound:%d", nodeID), Sender: sender, Generation: generation, LastSequence: int64(envelope.Sequence)}).Error
