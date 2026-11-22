@@ -496,7 +496,8 @@ func (j *CheckClientIpJob) updateInboundClientIps(inboundClientIps *model.Inboun
 			ipLogger.Printf("[LIMIT_IP] Email = %s || Disconnecting OLD IP = %s || Timestamp = %d", clientEmail, ipTime.IP, ipTime.Timestamp)
 		}
 
-		// force xray to drop existing connections from banned ips
+		// Best-effort authentication refresh; Xray RemoveUser does not
+		// guarantee that already established connections are closed.
 		j.disconnectClientTemporarily(inbound, clientEmail, clients)
 	}
 
@@ -523,7 +524,9 @@ func (j *CheckClientIpJob) updateInboundClientIps(inboundClientIps *model.Inboun
 	return shouldCleanLog
 }
 
-// disconnectClientTemporarily removes and re-adds a client to force disconnect banned connections
+// disconnectClientTemporarily briefly removes and re-adds authentication.
+// This is best effort and does not prove existing connections are terminated;
+// it must not be used as evidence for traffic reconciliation or quota release.
 func (j *CheckClientIpJob) disconnectClientTemporarily(inbound *model.Inbound, clientEmail string, clients []model.Client) {
 	var xrayAPI xray.XrayAPI
 	apiPort := j.resolveXrayAPIPort()
@@ -573,14 +576,15 @@ func (j *CheckClientIpJob) disconnectClientTemporarily(inbound *model.Inbound, c
 		}
 	}
 
-	// Remove user to disconnect all connections
+	// Temporarily remove the user from authentication. Existing sessions may
+	// continue; no accounting or quota decision can rely on this call alone.
 	err = xrayAPI.RemoveUser(inbound.Tag, clientEmail)
 	if err != nil {
 		logger.Warningf("[LIMIT_IP] Failed to remove user %s: %v", clientEmail, err)
 		return
 	}
 
-	// Wait a moment for disconnection to take effect
+	// Give the authentication refresh a moment; this is not a drain barrier.
 	time.Sleep(100 * time.Millisecond)
 
 	// Re-add user to allow new connections

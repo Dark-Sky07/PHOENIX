@@ -609,3 +609,27 @@ from deleting an owned client and its baselines across all nodes when the final
 link disappears during synchronization. These checks preserve evidence for
 review, not proof that the remote runtime is inactive; already-erased ownership
 or baseline records remain outside their coverage.
+
+### Quiescence capability investigation
+
+The checked Xray core version (`64fada32b5b9`) does not establish the proposed
+per-user drain through its existing `RemoveUser` RPC. VLESS removes the user
+from its validator and VMess removes it from user maps; neither API path proves
+that already-established connections have stopped. For example:
+
+- https://github.com/XTLS/Xray-core/blob/64fada32b5b9/proxy/vless/inbound/inbound.go#L244-L247
+- https://github.com/XTLS/Xray-core/blob/64fada32b5b9/proxy/vmess/inbound/inbound.go#L177-L185
+
+The online map excludes localhost addresses, and online statistics can be
+disabled or unsupported; an empty list is not proof that all connections have
+ended:
+https://github.com/XTLS/Xray-core/blob/64fada32b5b9/app/stats/online_map.go#L35-L39
+
+Do not use RemoveUser, a fixed delay, an empty online list, a final poll, or an
+operator checkbox as a quiescence certificate. No automatic quota unblocking
+has been enabled. A safe implementation needs a connection-fencing/drain
+capability that accounts for all relevant protocols and sessions, prevents new
+connections and nonparticipating writers throughout final capture and commit,
+and fails closed across crashes and remote nodes; its guarantees must be tested
+against real cores. Externally running cores and already missing usage also need
+independent evidence. The affected-node/no-node-shutdown policy remains intact.

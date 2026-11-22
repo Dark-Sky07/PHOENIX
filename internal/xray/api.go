@@ -530,7 +530,10 @@ func (x *XrayAPI) AddUser(Protocol string, inboundTag string, user map[string]an
 	return err
 }
 
-// RemoveUser removes a user from an inbound in the Xray core by email.
+// RemoveUser removes a user from the inbound's authentication configuration.
+// It is not a quiescence barrier: success does not prove existing connections
+// were terminated, that another writer cannot re-add the user, or that final
+// traffic has been polled. Do not use it alone to release accounting quota.
 func (x *XrayAPI) RemoveUser(inboundTag, email string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -707,6 +710,8 @@ type OnlineUser struct {
 // GetOnlineUsers returns every user with at least one live connection plus their
 // source IPs, via StatsService.GetUsersStats (one RPC covers all users). Requires
 // statsUserOnline enabled in the policy levels; older cores return Unimplemented.
+// Absence from this list is not proof of quiescence: policy/configuration can
+// omit users and Xray's online map excludes localhost source addresses.
 func (x *XrayAPI) GetOnlineUsers() ([]OnlineUser, error) {
 	if x.grpcClient == nil {
 		return nil, common.NewError("xray api is not initialized")
