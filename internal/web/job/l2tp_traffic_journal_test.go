@@ -1,6 +1,7 @@
 package job
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,143 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/web/service"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
 )
+
+func TestL2TPIncidentPublicationFailureDefersReconciliationAfterPoll(t *testing.T) {
+	setupIntegrationDB(t)
+	collector := NewXrayTrafficJob()
+	incident := errors.New("shared incident unavailable")
+	polls := 0
+	publish := func() error { return incident }
+	poll := func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
+		polls++
+		return nil, nil, errEmptyL2TPSample
+	}
+	if _, err := pollL2TPWithIncidentBarrier(collector, publish, poll); !errors.Is(err, incident) || polls != 1 {
+		t.Fatalf("publication error ignored or sample skipped: polls=%d err=%v", polls, err)
+	}
+	if _, err := pollL2TPWithIncidentBarrier(collector, func() error { return nil }, poll); err != nil || polls != 2 {
+		t.Fatalf("reconciliation did not resume after successful publication: polls=%d err=%v", polls, err)
+	}
+}
+
+func TestL2TPIncidentDuringPollDefersReconciliation(t *testing.T) {
+	setupIntegrationDB(t)
+	collector := NewXrayTrafficJob()
+	incident := errors.New("incident appeared during poll")
+	pollComplete := false
+	calls := 0
+	publish := func() error {
+		calls++
+		if pollComplete {
+			return incident
+		}
+		return nil
+	}
+	poll := func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
+		pollComplete = true
+		return nil, nil, errEmptyL2TPSample
+	}
+	if _, err := pollL2TPWithIncidentBarrier(collector, publish, poll); !errors.Is(err, incident) || calls != 2 {
+		t.Fatalf("new incident did not defer reconciliation: calls=%d err=%v", calls, err)
+	}
+}
+
+func TestL2TPLocalIncidentDefersReconciliationAfterEmptyPoll(t *testing.T) {
+	setupIntegrationDB(t)
+	t.Setenv("XUI_BIN_FOLDER", t.TempDir())
+	path := filepath.Join(os.Getenv("XUI_DB_FOLDER"), "l2tp-accounting-incident")
+	if err := os.WriteFile(path, []byte("unreconciled\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	collector := NewXrayTrafficJob()
+	poll := func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
+		return nil, nil, errEmptyL2TPSample
+	}
+	if _, err := pollL2TPWithIncidentBarrier(collector, service.PublishL2TPAccountingIncident, poll); err == nil {
+		t.Fatal("local incident allowed daemon reconciliation")
+	}
+	var incidents int64
+	if err := database.GetDB().Model(&model.ResellerNodeCounterIncident{}).Where("node_id = ?", -2).Count(&incidents).Error; err != nil || incidents != 1 {
+		t.Fatalf("shared incident not published: %d %v", incidents, err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("local incident removed: %v", err)
+	}
+}
+
+func TestL2TPIncidentPublicationWaitsForMarkerRestoration(t *testing.T) {
+	setupIntegrationDB(t)
+	db := database.GetDB()
+	id := "restore-before-publish"
+	if err := db.Create(&model.XrayTrafficInFlight{ID: id}).Error; err != nil {
+		t.Fatal(err)
+	}
+	collector := NewXrayTrafficJob()
+	collector.l2tpHookPollID = id
+	collector.l2tpRestorePoll = true
+	unlocked := false
+	collector.captureUnlock = func() { unlocked = true }
+	incident := errors.New("publication still blocked")
+	publish := func() error {
+		if !unlocked || collector.l2tpRestorePoll {
+			t.Fatal("publication attempted while restoration still holds the lock")
+		}
+		return incident
+	}
+	poll := func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
+		return nil, nil, errEmptyL2TPSample
+	}
+	if _, err := pollL2TPWithIncidentBarrier(collector, publish, poll); !errors.Is(err, incident) || !unlocked {
+		t.Fatalf("restoration skipped publication barrier: unlocked=%v err=%v", unlocked, err)
+	}
+}
+
+func TestL2TPIncidentPublicationWaitsForPendingBatchLock(t *testing.T) {
+	setupIntegrationDB(t)
+	db := database.GetDB()
+	client := model.ClientRecord{Email: "l2tp-barrier@example.test", Enable: true}
+	traffic := xray.ClientTraffic{Email: client.Email, Enable: true}
+	for _, value := range []any{&client, &traffic} {
+		if err := db.Create(value).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Exec("CREATE TRIGGER reject_barrier_batch BEFORE UPDATE ON client_traffics BEGIN SELECT RAISE(ABORT, 'injected failure'); END").Error; err != nil {
+		t.Fatal(err)
+	}
+	collector := NewXrayTrafficJob()
+	poll := func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
+		return nil, []*xray.ClientTraffic{{Email: client.Email, Up: 42}}, nil
+	}
+	if _, err := persistL2TPPoll(collector, poll); err == nil || collector.pending == nil || collector.captureUnlock == nil {
+		t.Fatalf("batch failure did not retain allocation lock: %v", err)
+	}
+	if err := db.Exec("DROP TRIGGER reject_barrier_batch").Error; err != nil {
+		t.Fatal(err)
+	}
+	incident := errors.New("incident after batch capture")
+	publish := func() error {
+		if collector.captureUnlock != nil || collector.pending != nil {
+			t.Fatal("publication attempted before batch released its lock")
+		}
+		// This would deadlock if the collector still owned its allocation lock.
+		unlock, err := service.LockResellerAllocationForXrayRecovery()
+		if err != nil {
+			return err
+		}
+		unlock()
+		return incident
+	}
+	if _, err := pollL2TPWithIncidentBarrier(collector, publish, func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
+		t.Fatal("pending batch was repolled")
+		return nil, nil, nil
+	}); !errors.Is(err, incident) {
+		t.Fatalf("publication barrier not enforced after pending batch: %v", err)
+	}
+	if err := db.First(&traffic, traffic.Id).Error; err != nil || traffic.Up != 42 {
+		t.Fatalf("pending batch not committed: %+v %v", traffic, err)
+	}
+}
 
 func TestL2TPSampledTrafficRetriesWithJournalAndReceipt(t *testing.T) {
 	setupIntegrationDB(t)

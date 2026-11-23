@@ -826,8 +826,13 @@ review, not blind cleanup. Even a session that starts and ends between polls can
 therefore leave an incident when the updated hook runs. The collector,
 sensitive removals and local incident publisher observe the incident; the
 publisher also creates the shared quota barrier. Ordinary disconnects now
-require manual reconciliation, and L2TP sampling is deferred while the incident
-persists. The collected counters are not certified final consumption and are not
+require manual reconciliation. Visible hook incidents defer sampling; a separate
+persisted accounting warning can allow another sample but now always defers
+periodic daemon reconciliation when publication reports an error. Publication
+is checked again after a successful poll, and after an uncertain poll-marker
+restoration or retained batch releases its lock, avoiding recursive lock
+acquisition; hooks can still race the final check. The
+collected counters are not certified final consumption and are not
 automatically credited. Existing running daemons may still use an older hook
 until their configuration is regenerated; a missing/failed hook, interruption
 before its marker is durable, cross-process races, failed incident publication,
@@ -879,9 +884,10 @@ fences sensitive quota operations after the evidence is
 durable; a failed incident write leaves the poll marker in place. This is
 intentionally restrictive: ordinary disconnects of sampled L2TP sessions can
 require manual reconciliation because the existing down hook does not save final
-usage. The node remains running, but L2TP sampling and automatic daemon
-reconciliation are deferred until the incident is resolved; other active L2TP
-sessions can therefore accumulate unsampled traffic during the hold. It cannot
+usage. The node remains running, but automatic daemon reconciliation is deferred
+while local incident publication reports an error; sampling can also be deferred
+when the underlying hook or runtime evidence remains uncertain. Other active
+L2TP sessions can therefore accumulate unsampled traffic during the hold. It cannot
 detect a session that began and ended between polls when no marker remains,
 disappearance after a process restart or runtime replacement, or interface reuse with the same name
 and higher counters. It does not recover unobserved bytes.

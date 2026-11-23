@@ -2,6 +2,7 @@ package job
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 
@@ -74,23 +75,44 @@ func persistL2TPPoll(collector *XrayTrafficJob, poll func() ([]*xray.Traffic, []
 	return restart || disabled, err
 }
 
+// pollL2TPWithIncidentBarrier still samples after an incident publication
+// error so that its poll marker can fence an observed hook or orphan. It never
+// authorizes daemon reconciliation while the publication is unresolved.
+func pollL2TPWithIncidentBarrier(collector *XrayTrafficJob, publish func() error, poll func() ([]*xray.Traffic, []*xray.ClientTraffic, error)) (bool, error) {
+	var publicationErr error
+	// An unapplied batch can also retain the allocation lock across ticks.
+	// Publishing first would recursively acquire that same lock on an incident.
+	skippedPublication := collector.l2tpRestorePoll || collector.captureUnlock != nil
+	if !skippedPublication {
+		publicationErr = publish()
+	}
+	restart, err := persistL2TPPoll(collector, poll)
+	if err != nil {
+		return restart, err
+	}
+	if skippedPublication || publicationErr == nil {
+		// Marker restoration may hold the allocation lock; only publish after
+		// a successful poll has restored the fence and released that lock.
+		// Otherwise recheck for incidents observed during the poll. Hooks are
+		// not synchronized with this check, so it is not a quiescence proof.
+		publicationErr = publish()
+	}
+	if publicationErr != nil {
+		return restart, fmt.Errorf("L2TP incident publication unresolved; reconciliation deferred: %w", publicationErr)
+	}
+	return restart, nil
+}
+
 func (j *L2TPJob) Run() {
 	if !l2tpRunMu.TryLock() {
 		return
 	}
 	defer l2tpRunMu.Unlock()
 	mgr := l2tp.GetManager()
-	// Restoration may be holding the allocation lock across retries; avoid
-	// recursively acquiring it before the collector can restore the marker.
-	if !l2tpJournalCollector.l2tpRestorePoll {
-		if err := service.PublishL2TPAccountingIncident(); err != nil {
-			logger.Warning("l2tp job: accounting incident:", err)
-		}
-	}
 	// Sample and commit before the periodic reconcile may stop or replace the
 	// daemon. Other runtime operations and traffic after the poll remain outside
 	// this barrier; a successful sample is not a final accounting proof.
-	restart, err := persistL2TPPoll(l2tpJournalCollector, func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
+	restart, err := pollL2TPWithIncidentBarrier(l2tpJournalCollector, service.PublishL2TPAccountingIncident, func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
 		inboundDeltas, clientDeltas, err := mgr.CollectTrafficChecked()
 		if err != nil {
 			return nil, nil, err
@@ -115,7 +137,7 @@ func (j *L2TPJob) Run() {
 		j.xrayService.SetToNeedRestart()
 	}
 	if err != nil {
-		logger.Warning("l2tp job: traffic persistence failed; retaining sample for recovery:", err)
+		logger.Warning("l2tp job: poll or accounting barrier failed; reconciliation deferred:", err)
 		return
 	}
 	inbounds, err := j.inboundService.GetAllInbounds()
