@@ -221,6 +221,12 @@ func readSessionPaths() ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("pppvpn: read session claim: %w", err)
 		}
+		// An interrupted claim can be empty before a rename, after one, or
+		// after deletion. The directory alone cannot distinguish these states
+		// or prove that the source and its committed counters survived a crash.
+		if len(entries) == 0 {
+			return nil, fmt.Errorf("pppvpn: empty session claim %q requires manual reconciliation", dir)
+		}
 		for _, entry := range entries {
 			if entry.Name() != "record" || entry.IsDir() {
 				return nil, fmt.Errorf("pppvpn: invalid session claim entry %q", entry.Name())
@@ -302,6 +308,17 @@ func acknowledgeClosedSample(sample closedSample) error {
 	}
 	if err := syncPPPDirectory(root, filepath.Dir(source)); err != nil {
 		return err
+	}
+	// A recovered claim is itself moved into a fresh claim. Remove its now
+	// empty directory only after the destination and source are durable.
+	sourceDir := filepath.Dir(source)
+	if filepath.Dir(sourceDir) == staged && filepath.Base(source) == "record" {
+		if err := root.Remove(sourceDir); err != nil {
+			return fmt.Errorf("pppvpn: remove recovered session claim: %w", err)
+		}
+		if err := syncPPPDirectory(root, staged); err != nil {
+			return err
+		}
 	}
 	current, err := readPPPSessionAt(root, claimed)
 	if err != nil {

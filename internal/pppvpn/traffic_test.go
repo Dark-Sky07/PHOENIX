@@ -199,6 +199,52 @@ func TestAckTrafficRetainsReplacementAndRepolls(t *testing.T) {
 	if err := AckTraffic(retry.Token); err != nil {
 		t.Fatal(err)
 	}
+	if next, err := CollectTraffic(); err != nil || len(next.Clients) != 0 {
+		t.Fatalf("recovered claim left an incomplete directory: %+v %v", next, err)
+	}
+}
+
+func TestEmptySessionClaimRequiresReconciliation(t *testing.T) {
+	root := setupTrafficTest(t)
+	claim := filepath.Join(root, "sessions-staged", "claim-interrupted")
+	if err := os.MkdirAll(claim, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CollectTraffic(); err == nil || !strings.Contains(err.Error(), "empty session claim") {
+		t.Fatalf("empty claim accepted by collector: %v", err)
+	}
+	if err := CheckClientSessionEvidence([]string{"alice"}, nil); err == nil || !strings.Contains(err.Error(), "empty session claim") {
+		t.Fatalf("empty claim accepted by removal check: %v", err)
+	}
+	if _, err := os.Stat(claim); err != nil {
+		t.Fatalf("claim evidence was removed: %v", err)
+	}
+}
+
+func TestAckMissingSourceLeavesBlockingClaim(t *testing.T) {
+	root := setupTrafficTest(t)
+	dir := filepath.Join(root, "sessions", "pptp-7")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "ppp0.closed.session")
+	if err := os.WriteFile(path, []byte("closed\tppp0\talice\t10\t20\tsession\t7\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	batch, err := CollectTraffic()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := AckTraffic(batch.Token); err == nil {
+		t.Fatal("missing source was acknowledged")
+	}
+	trafficCollector = pppTrafficCollector{}
+	if _, err := CollectTraffic(); err == nil || !strings.Contains(err.Error(), "empty session claim") {
+		t.Fatalf("missing source evidence ignored after restart: %v", err)
+	}
 }
 
 func TestAckTrafficRetainsMalformedReplacement(t *testing.T) {
@@ -418,11 +464,20 @@ func TestKilledHookLeavesPendingMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(path)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Env = append(os.Environ(), "IFNAME=lo", "PEERNAME=alice", fmt.Sprintf("PPPD_PID=%d", os.Getpid()))
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+	// The hook may be waiting on an external command. Kill its whole group so
+	// an orphan cannot continue mutating the test spool during cleanup.
+	groupAlive := true
+	defer func() {
+		if groupAlive {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			_ = cmd.Wait()
+		}
+	}()
 	deadline := time.Now().Add(5 * time.Second)
 	var pending string
 	for time.Now().Before(deadline) {
@@ -444,10 +499,11 @@ func TestKilledHookLeavesPendingMarker(t *testing.T) {
 	if pending == "" {
 		t.Fatal("hook did not create pending marker")
 	}
-	if err := cmd.Process.Kill(); err != nil {
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
 		t.Fatal(err)
 	}
 	_ = cmd.Wait()
+	groupAlive = false
 	if _, err := os.Stat(pending); err != nil {
 		t.Fatalf("killed hook lost marker: %v", err)
 	}

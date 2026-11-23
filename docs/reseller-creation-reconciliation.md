@@ -954,9 +954,11 @@ PPP acknowledgement now claims each sampled closed spool file by an atomic
 rename into `sessions-staged` before comparing it with the committed sample.
 Hooks cannot replace that claimed path; a changed or malformed record is kept
 for retry or manual review, and a crash leaves a discoverable claim. The PPP
-poll marker remains until acknowledgement succeeds. Empty claim directories
-can remain after interrupted cleanup and may require housekeeping; do not
-remove nonempty claims without reconciliation. These measures do not fence a
+poll marker remains until acknowledgement succeeds. An empty claim directory
+can represent several interrupted phases, so collection and removal checks fail
+closed until an operator reconciles the source record, database checkpoint and
+poll marker. Do not remove any claim merely because it is empty; its existence
+alone does not prove that the record was safely accounted for. These measures do not fence a
 new hook write after the claim, fix a missing hook, or establish final traffic
 or session drain.
 
