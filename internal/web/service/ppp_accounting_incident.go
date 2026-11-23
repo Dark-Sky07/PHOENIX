@@ -47,6 +47,10 @@ func localPPPAccountingIncident() error {
 		if errors.As(observation, &pending) {
 			return fmt.Errorf("PPP hook is in progress or interrupted: %w", observation)
 		}
+		var claim *pppvpn.ClaimPendingError
+		if errors.As(observation, &claim) {
+			return fmt.Errorf("PPP claim is in progress or interrupted: %w", observation)
+		}
 		detail := observation.Error()
 		notePPPIncidentWrite(detail, false, false)
 		err := persistAccountingEvidence(pppEvidenceDir, detail)

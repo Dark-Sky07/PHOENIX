@@ -47,6 +47,14 @@ func (e *HookPendingError) Error() string {
 	return fmt.Sprintf("pppvpn: hook operation pending at %q", e.Path)
 }
 
+// ClaimPendingError can be a live acknowledgement or an interrupted claim.
+// It fences decisions while observed but does not itself prove an incident.
+type ClaimPendingError struct{ Path string }
+
+func (e *ClaimPendingError) Error() string {
+	return fmt.Sprintf("pppvpn: empty session claim or claim in transition %q requires reconciliation if it persists", e.Path)
+}
+
 // CheckHookIncidents observes visible hook warnings without touching them.
 func CheckHookIncidents() error {
 	paths, err := readSessionPaths()
@@ -217,6 +225,11 @@ func readSessionPaths() ([]string, error) {
 		}
 		dir := filepath.Join(staged, claim.Name())
 		entries, err := readPPPDir(root, dir)
+		if errors.Is(err, os.ErrNotExist) {
+			// A concurrent acknowledgement may have removed the claim after
+			// ReadDir. Do not permanently classify this overlap as an incident.
+			return nil, &ClaimPendingError{Path: dir}
+		}
 		if err != nil {
 			return nil, fmt.Errorf("pppvpn: read session claim: %w", err)
 		}
@@ -224,7 +237,7 @@ func readSessionPaths() ([]string, error) {
 		// after deletion. The directory alone cannot distinguish these states
 		// or prove that the source and its committed counters survived a crash.
 		if len(entries) == 0 {
-			return nil, fmt.Errorf("pppvpn: empty session claim %q requires manual reconciliation", dir)
+			return nil, &ClaimPendingError{Path: dir}
 		}
 		for _, entry := range entries {
 			if entry.Name() != "record" || entry.IsDir() {

@@ -188,6 +188,37 @@ func TestPPPHookIncidentBlocksQuotaAndSurvivesFileRemoval(t *testing.T) {
 	}
 }
 
+func TestPPPInProgressClaimDoesNotCreatePermanentIncident(t *testing.T) {
+	reseller, _ := seedResellerRenewal(t)
+	bin := t.TempDir()
+	t.Setenv("XUI_BIN_FOLDER", bin)
+	claim := filepath.Join(bin, "pppvpn", "sessions-staged", "claim-in-progress")
+	if err := os.MkdirAll(claim, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&ResellerService{}).CheckTrafficQuota(&reseller, 1); err == nil {
+		t.Fatal("empty claim did not block quota")
+	}
+	if status := readCounterIncidentStatus(database.GetDB()); !status.Available || !status.FallbackPresent {
+		t.Fatalf("dashboard missing pending claim: %+v", status)
+	}
+	// Model successful acknowledgement cleanup, not an operator deleting an
+	// interrupted claim without first reconciling the record and marker.
+	if err := os.Remove(claim); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&ResellerService{}).CheckTrafficQuota(&reseller, 1); err != nil {
+		t.Fatalf("completed claim left a permanent warning: %v", err)
+	}
+	entries, err := os.ReadDir(filepath.Join(os.Getenv("XUI_DB_FOLDER"), pppEvidenceDir))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("transient claim persisted as incident: %v", entries)
+	}
+}
+
 func TestPPPInProgressHookDoesNotCreatePermanentIncident(t *testing.T) {
 	reseller, _ := seedResellerRenewal(t)
 	bin := t.TempDir()

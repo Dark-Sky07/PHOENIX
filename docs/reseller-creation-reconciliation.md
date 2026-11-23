@@ -955,10 +955,13 @@ rename into `sessions-staged` before comparing it with the committed sample.
 Hooks cannot replace that claimed path; a changed or malformed record is kept
 for retry or manual review, and a crash leaves a discoverable claim. The PPP
 poll marker remains until acknowledgement succeeds. An empty claim directory
-can represent several interrupted phases, so collection and removal checks fail
-closed until an operator reconciles the source record, database checkpoint and
-poll marker. Do not remove any claim merely because it is empty; its existence
-alone does not prove that the record was safely accounted for. These measures do not fence a
+can represent a live acknowledgement or several interrupted phases. Collection
+and sensitive decisions fail closed while it is observed; a claim that persists
+requires an operator to reconcile the source record, database checkpoint and
+poll marker. A concurrent observer does not create a permanent incident merely
+because a successful acknowledgement temporarily leaves an empty claim. Do not
+remove any claim merely because it is empty; its existence alone does not prove
+that the record was safely accounted for. These measures do not fence a
 new hook write after the claim, fix a missing hook, or establish final traffic
 or session drain.
 

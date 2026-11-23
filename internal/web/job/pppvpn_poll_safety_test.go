@@ -349,6 +349,35 @@ func TestPPPHookIncidentRequiresReviewAfterFileRemoved(t *testing.T) {
 	}
 }
 
+func TestPPPPollRetainsMarkerWhileClaimIsEmpty(t *testing.T) {
+	setupIntegrationDB(t)
+	bin := t.TempDir()
+	t.Setenv("XUI_BIN_FOLDER", bin)
+	claim := filepath.Join(bin, "pppvpn", "sessions-staged", "claim-in-progress")
+	if err := os.MkdirAll(claim, 0700); err != nil {
+		t.Fatal(err)
+	}
+	state := &pppPollState{}
+	if _, _, err := collectAndCommitPPP(state, pppvpn.CollectTraffic, nil, pppvpn.AckTraffic); err == nil || state.marker == "" || state.requiresReview {
+		t.Fatalf("pending claim not fenced: %v", err)
+	}
+	if unlock, err := service.LockResellerAllocation(); err == nil {
+		unlock()
+		t.Fatal("pending claim allowed allocation")
+	}
+	// Simulate a successfully completed concurrent claim. Interrupted claims
+	// must instead be reconciled, not removed merely to unblock this poll.
+	if err := os.Remove(claim); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := collectAndCommitPPP(state, pppvpn.CollectTraffic, nil, pppvpn.AckTraffic); err != nil {
+		t.Fatal(err)
+	}
+	if state.marker != "" {
+		t.Fatal("successful retry left marker")
+	}
+}
+
 func TestPPPPollRetainsMarkerWhenHookStartsDuringAck(t *testing.T) {
 	setupIntegrationDB(t)
 	bin := t.TempDir()
