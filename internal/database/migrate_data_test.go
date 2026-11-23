@@ -313,6 +313,7 @@ func TestTrafficEvidenceMigrationPostgres(t *testing.T) {
 		&model.TrafficSnapshotReceiver{ID: "node-inbound:313", Sender: "migration-sender", Generation: "g", LastSequence: 71},
 		&model.TrafficSnapshotSender{ID: "node-sender", Sender: "migration-sender", Generation: "g", LastSequence: 72},
 		&model.ResellerNodeCounterIncident{NodeId: 313, Email: "migration@test", PreviousUp: 80, ObservedUp: 10},
+		&model.ResellerNodeCounterIncident{NodeId: -2, Email: "", Direction: "l2tp-orphan"},
 		&model.XrayTrafficReceipt{ID: "migration-receipt"}, &model.XrayTrafficInFlight{ID: "migration-inflight"},
 	} {
 		if err := src.Create(row).Error; err != nil {
@@ -357,5 +358,9 @@ func TestTrafficEvidenceMigrationPostgres(t *testing.T) {
 	var incident model.ResellerNodeCounterIncident
 	if err := dst.First(&incident, "node_id = ?", 313).Error; err != nil || incident.PreviousUp != 80 || incident.ObservedUp != 10 {
 		t.Fatalf("incident: %+v %v", incident, err)
+	}
+	var l2tpIncident model.ResellerNodeCounterIncident
+	if err := dst.First(&l2tpIncident, "node_id = ?", -2).Error; err != nil || l2tpIncident.Direction != "l2tp-orphan" {
+		t.Fatalf("L2TP incident: %+v %v", l2tpIncident, err)
 	}
 }
