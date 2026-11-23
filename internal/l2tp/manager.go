@@ -1,6 +1,7 @@
 package l2tp
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -56,36 +57,62 @@ func GetManager() *Manager {
 	return manager
 }
 
-func cleanupOrphanData(exceptID int) {
+// orphanDataError conservatively protects runtime evidence left by a previous
+// panel process. A PID file or process name cannot establish ownership (PIDs
+// can be reused, and strongSwan uses a host-global PID directory). Do not
+// signal or delete an untracked group automatically. The tracked directory is
+// exempt only while this Manager still owns its process handles.
+func orphanDataError(trackedID int) error {
 	entries, err := os.ReadDir(l2tpRoot())
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
 	if err != nil {
-		return
+		return fmt.Errorf("inspect L2TP runtime directories: %w", err)
 	}
 	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
 		id, err := strconv.Atoi(entry.Name())
-		if err != nil || id <= 0 || id == exceptID {
+		if err != nil || id <= 0 {
 			continue
 		}
-		stopOrphan(id)
-		GetNetworkManager().Remove(id)
-		removeStrongSwanRuntime(id)
-		_ = os.RemoveAll(dataDirForID(id))
+		if id == trackedID && entry.Name() == strconv.Itoa(trackedID) {
+			continue
+		}
+		return fmt.Errorf("untracked L2TP runtime directory %q requires manual review; refusing automatic cleanup", entry.Name())
 	}
+	return nil
+}
+
+func (m *Manager) orphanDataErrorLocked() error {
+	trackedID := 0
+	if m.proc != nil {
+		trackedID = m.id
+	}
+	return orphanDataError(trackedID)
 }
 
 // Ensure brings the daemon and firewall toward one desired instance.
 func (m *Manager) Ensure(inst Instance) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.ensureLocked(inst)
+	err := m.ensureLocked(inst)
+	if err != nil {
+		m.lastError = err.Error()
+	} else {
+		m.lastError = ""
+	}
+	return err
 }
 
 func (m *Manager) ensureLocked(inst Instance) error {
 	if err := ValidateSettings(inst); err != nil {
 		return err
+	}
+	if err := m.orphanDataErrorLocked(); err != nil {
+		return err
+	}
+	if m.proc != nil && m.id != inst.Id {
+		return fmt.Errorf("remove tracked L2TP inbound %d before starting inbound %d", m.id, inst.Id)
 	}
 	fp := inst.fingerprint()
 	if m.proc != nil && m.id == inst.Id && m.proc.fingerprint == fp && m.proc.proc.IsRunning() {
@@ -114,9 +141,6 @@ func (m *Manager) ensureLocked(inst Instance) error {
 		m.proc = nil
 		m.id = 0
 	}
-	// The process group and firewall manager are in-memory. Reclaim any
-	// previous group for this id before writing a fresh config after restart.
-	stopOrphan(inst.Id)
 	if m.proc == nil {
 		if err := clearSystemChapSecrets(); err != nil {
 			return err
@@ -151,6 +175,11 @@ func (m *Manager) ensureLocked(inst Instance) error {
 func (m *Manager) Reconcile(desired []Instance) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := m.orphanDataErrorLocked(); err != nil {
+		m.lastError = err.Error()
+		logger.Warningf("l2tp: reconciliation deferred: %v", err)
+		return
+	}
 	if m.manualStop {
 		if m.proc != nil {
 			if err := m.proc.proc.Stop(); err != nil {
@@ -165,7 +194,6 @@ func (m *Manager) Reconcile(desired []Instance) {
 			m.id = 0
 			m.ready = false
 		}
-		cleanupOrphanData(0)
 		GetNetworkManager().RemoveAll()
 		return
 	}
@@ -184,7 +212,6 @@ func (m *Manager) Reconcile(desired []Instance) {
 			m.id = 0
 			m.ready = false
 		}
-		cleanupOrphanData(0)
 		if err := clearSystemChapSecrets(); err != nil {
 			logger.Warningf("l2tp: failed to clear system PPP chap-secrets: %v", err)
 		}
@@ -195,9 +222,6 @@ func (m *Manager) Reconcile(desired []Instance) {
 	}
 	inst := desired[0]
 	err := m.ensureLocked(inst)
-	if err == nil {
-		cleanupOrphanData(inst.Id)
-	}
 	if err != nil {
 		m.lastError = err.Error()
 		if m.proc != nil && time.Since(m.proc.lastErrAt) < time.Minute {
@@ -219,6 +243,10 @@ func (m *Manager) StopManually() error {
 	defer m.mu.Unlock()
 	m.manualStop = true
 	m.lastError = ""
+	if err := m.orphanDataErrorLocked(); err != nil {
+		m.lastError = err.Error()
+		return err
+	}
 	if m.proc != nil {
 		if err := m.proc.proc.Stop(); err != nil {
 			m.lastError = err.Error()
@@ -231,7 +259,6 @@ func (m *Manager) StopManually() error {
 		m.id = 0
 		m.ready = false
 	}
-	cleanupOrphanData(0)
 	GetNetworkManager().RemoveAll()
 	_ = clearSystemChapSecrets()
 	return nil
@@ -252,6 +279,10 @@ func (m *Manager) Restart() error {
 	defer m.mu.Unlock()
 	m.manualStop = false
 	m.lastError = ""
+	if err := m.orphanDataErrorLocked(); err != nil {
+		m.lastError = err.Error()
+		return err
+	}
 	if m.proc != nil {
 		if err := m.proc.proc.Stop(); err != nil {
 			m.lastError = err.Error()
@@ -264,7 +295,6 @@ func (m *Manager) Restart() error {
 		m.id = 0
 		m.ready = false
 	}
-	cleanupOrphanData(0)
 	GetNetworkManager().RemoveAll()
 	_ = clearSystemChapSecrets()
 	return nil
@@ -288,6 +318,10 @@ func (m *Manager) Status() RuntimeStatus {
 func (m *Manager) RemoveChecked(id int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := m.orphanDataErrorLocked(); err != nil {
+		m.lastError = err.Error()
+		return err
+	}
 	if m.proc != nil && (id == 0 || m.id == id) {
 		if err := m.proc.proc.Stop(); err != nil {
 			m.lastError = err.Error()
@@ -301,14 +335,12 @@ func (m *Manager) RemoveChecked(id int) error {
 		m.ready = false
 	}
 	if id == 0 {
-		cleanupOrphanData(0)
 		if err := clearSystemChapSecrets(); err != nil {
 			logger.Warningf("l2tp: failed to clear system PPP chap-secrets: %v", err)
 		}
 		return nil
 	}
 	if m.proc == nil || m.id == id {
-		stopOrphan(id)
 		GetNetworkManager().Remove(id)
 		removeStrongSwanRuntime(id)
 		_ = os.RemoveAll(dataDirForID(id))

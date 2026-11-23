@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -125,66 +124,6 @@ func strongSwanPath() string {
 func xl2tpdPath() string {
 	path, _ := exec.LookPath("xl2tpd")
 	return path
-}
-
-func compiledStrongSwanPIDDir() string {
-	ipsec := strongSwanPath()
-	if ipsec == "" {
-		return ""
-	}
-	output, err := exec.Command(ipsec, "--piddir").Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(output))
-}
-
-func stopPIDFile(path, expected string) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || pid <= 1 {
-		return
-	}
-	cmdline, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
-	if err != nil || !strings.Contains(strings.ToLower(string(cmdline)), expected) {
-		return
-	}
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return
-	}
-	_ = process.Signal(syscall.SIGTERM)
-	deadline := time.Now().Add(gracefulStopTimeout)
-	for time.Now().Before(deadline) {
-		if err := process.Signal(syscall.Signal(0)); err != nil {
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	_ = process.Kill()
-}
-
-// stopOrphan stops a daemon group left behind by a previous panel process.
-// The manager is in-memory, so PID/config discovery is required after a host
-// or panel restart; without it an old xl2tpd would keep UDP 1701 occupied and
-// the old strongSwan starter would own the IKE sockets.
-func stopOrphan(id int) {
-	if runtime.GOOS == "windows" {
-		return
-	}
-	stopPIDFile(xl2tpdPIDPath(id), "xl2tpd")
-	// The distro ipsec wrapper overwrites IPSEC_PIDDIR, so its stop command
-	// cannot address the per-inbound path used by the old implementation. Ask
-	// the wrapper for its compiled PID directory and stop only processes whose
-	// command lines are actually starter/charon; this also reclaims a daemon
-	// left behind after the panel itself was restarted.
-	if pidDir := compiledStrongSwanPIDDir(); pidDir != "" {
-		stopPIDFile(filepath.Join(pidDir, "starter.charon.pid"), "starter")
-		stopPIDFile(filepath.Join(pidDir, "charon.pid"), "charon")
-	}
 }
 
 // Available reports whether both daemon entry points are installed.

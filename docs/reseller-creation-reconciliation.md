@@ -814,8 +814,7 @@ L2TP daemon replacement and checked removal now preserve their tracked process,
 interface baselines and runtime directory if either tracked strongSwan/xl2tpd
 parent exit cannot be observed. Dashboard stop/restart and local runtime removal
 report that error; periodic reconciliation retains state and reports it in the
-runtime status. This protection is process-local: orphan cleanup after a panel
-restart is not covered. Parent exit is not evidence that pppd children, hooks,
+runtime status. Parent exit is not evidence that pppd children, hooks,
 active sessions or outstanding traffic have drained, so it does not authorize
 quota release or claim that removal disconnected every active user.
 
@@ -826,3 +825,20 @@ periodic reconcile is deferred until a successful read. An interface that is
 already gone, a marker removed before the directory scan, or a daemon that has
 stopped can still hide unobserved consumption; this check does not solve those
 loss windows or itself create a durable accounting incident.
+
+After panel restart, numeric L2TP runtime entries not owned by the current
+manager now block L2TP reconciliation, checked removal, dashboard stop and
+restart; the runtime status reports that manual review is required. They are
+not signalled or deleted. The former PID-name-based orphan killer, which also
+used the host-global strongSwan PID directory and could target an unrelated
+service, has been removed. A tracked inbound must be removed before replacing
+it with a different inbound. Other panel services remain running; an existing
+untracked L2TP daemon may also continue running with its prior configuration.
+
+This is a conservative operational barrier, not complete recovery: it does
+not prove process ownership, stop untracked sessions, reconstruct lost usage,
+or create a durable reseller-accounting incident. Missing runtime entries do
+not prove no orphan exists, and the directory check is not a cross-process
+fence. Operators must preserve the evidence and independently reconcile traffic
+and process/session state before resuming; merely deleting the directory is not
+proof of safety. A controlled evidence-backed recovery workflow is still needed.
