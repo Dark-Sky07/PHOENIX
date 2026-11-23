@@ -3,7 +3,6 @@
 
 const {
   REGEX_BACKSLASH,
-  REGEX_REMOVE_BACKSLASH,
   REGEX_SPECIAL_CHARS,
   REGEX_SPECIAL_CHARS_GLOBAL
 } = require('./constants');
@@ -27,10 +26,39 @@ exports.isWindows = () => {
   return false;
 };
 
+// Equivalent to the former bracket-or-backslash replacement without a
+// potentially quadratic search for a closing bracket at every opening bracket.
+// A bracket match needs a non-backslash character before the closing bracket;
+// as with JS regexp dot, line terminators may occur only as that final char.
 exports.removeBackslashes = str => {
-  return str.replace(REGEX_REMOVE_BACKSLASH, match => {
-    return match === '\\' ? '' : match;
-  });
+  const isLineTerminator = char => char === '\n' || char === '\r' || char === '\u2028' || char === '\u2029';
+  const nextClose = new Int32Array(str.length + 1);
+  nextClose[str.length] = -1;
+  let close = -1;
+  for (let i = str.length - 1; i >= 0; i--) {
+    if (isLineTerminator(str[i])) {
+      close = str[i + 1] === ']' ? i + 1 : -1;
+    } else if (str[i] === ']' && i > 0 && str[i - 1] !== '\\') {
+      close = i;
+    }
+    nextClose[i] = close;
+  }
+
+  const parts = [];
+  let start = 0;
+  for (let i = 0; i < str.length;) {
+    if (str[i] === '[' && i + 2 < str.length && nextClose[i + 2] !== -1
+      && (!isLineTerminator(str[i + 1]) || str[i + 2] === ']')) {
+      i = nextClose[i + 2] + 1;
+    } else if (str[i] === '\\' && i + 1 < str.length && !isLineTerminator(str[i + 1])) {
+      parts.push(str.slice(start, i));
+      start = ++i;
+    } else {
+      i++;
+    }
+  }
+  parts.push(str.slice(start));
+  return parts.join('');
 };
 
 exports.escapeLast = (input, char, lastIdx) => {
