@@ -1046,8 +1046,12 @@ malformed records, and unavailable active interfaces now fail the scan instead
 of being silently skipped. A spool record must be bounded valid UTF-8, contain
 one newline-terminated record and no disallowed control characters; an
 unterminated closed record is retained as uncertain evidence rather than
-credited and acknowledged. Legacy closed records that do not meet these rules
-need manual review. This may block allocation and periodic PPP
+credited and acknowledged. Live spool groups must name a canonical PPTP/SSTP
+inbound, and their record's inbound, interface and session identity must match
+the group and filename before sampling or scoped removal checks. Legacy closed
+records that do not meet these rules need manual review. A staged claim does not
+retain its original group, so scoped removals defer while any such claim exists;
+its original attribution cannot be independently verified by the claim name. This may block allocation and periodic PPP
 reconciliation until the issue is corrected. Polling precedes periodic daemon
 reconciliation, but other runtime mutation paths, failed/missing hooks, vanished
 sessions, traffic after the sample, and nonparticipating writers are not

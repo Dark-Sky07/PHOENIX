@@ -74,6 +74,33 @@ func TestPPPReconciliationResumesAfterReviewedIncident(t *testing.T) {
 	}
 }
 
+func TestPPPPollKeepsFenceForMismatchedSpoolInbound(t *testing.T) {
+	setupIntegrationDB(t)
+	bin := t.TempDir()
+	t.Setenv("XUI_BIN_FOLDER", bin)
+	dir := filepath.Join(bin, "pppvpn", "sessions", "pptp-7")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "ppp4.closed.session-uuid")
+	data := "closed\tppp4\talice@example.test\t1200\t2500\tsession-uuid\t8\n"
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	state := &pppPollState{}
+	if _, _, err := collectAndCommitPPP(state, pppvpn.CollectTraffic, (&service.InboundService{}).AddPPPTrafficUnderAllocationLock, pppvpn.AckTraffic); err == nil || state.marker == "" || state.unlock != nil {
+		t.Fatalf("mismatched spool did not retain poll fence: %v", err)
+	}
+	if unlock, err := service.LockResellerAllocation(); err == nil {
+		unlock()
+		t.Fatal("allocation bypassed mismatched PPP evidence")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != data {
+		t.Fatalf("mismatched evidence altered: %q %v", got, err)
+	}
+}
+
 func TestPPPPollKeepsFenceForUnterminatedClosedRecord(t *testing.T) {
 	setupIntegrationDB(t)
 	bin := t.TempDir()

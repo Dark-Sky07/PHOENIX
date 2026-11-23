@@ -343,6 +343,69 @@ func TestAckTrafficRejectsActiveReplacementInClaim(t *testing.T) {
 	}
 }
 
+func TestSessionSpoolIdentityMismatchFailsClosed(t *testing.T) {
+	cases := []struct {
+		name, group, file, record string
+	}{
+		{"wrong-inbound", "pptp-7", "ppp0.closed.session", "closed\tppp0\talice\t10\t20\tsession\t8\n"},
+		{"wrong-interface", "pptp-7", "ppp1.closed.session", "closed\tppp0\talice\t10\t20\tsession\t7\n"},
+		{"wrong-session", "sstp-7", "ppp0.closed.other", "closed\tppp0\talice\t10\t20\tsession\t7\n"},
+		{"wrong-state", "pptp-7", "ppp0", "closed\tppp0\talice\t10\t20\tsession\t7\n"},
+		{"noncanonical-group", "pptp-007", "ppp0.closed.session", "closed\tppp0\talice\t10\t20\tsession\t7\n"},
+		{"unknown-group", "unknown-7", "ppp0.closed.session", "closed\tppp0\talice\t10\t20\tsession\t7\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := setupTrafficTest(t)
+			dir := filepath.Join(root, "sessions", tc.group)
+			if err := os.MkdirAll(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, tc.file)
+			if err := os.WriteFile(path, []byte(tc.record), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if batch, err := CollectTraffic(); err == nil || batch != nil {
+				t.Fatalf("mismatched record accepted: batch=%+v err=%v", batch, err)
+			}
+			if err := CheckClientSessionEvidence([]string{"alice"}, []int{7}); err == nil {
+				t.Fatal("mismatched record bypassed scoped removal check")
+			}
+			if data, err := os.ReadFile(path); err != nil || string(data) != tc.record {
+				t.Fatalf("mismatched evidence changed: %q %v", data, err)
+			}
+		})
+	}
+}
+
+func TestEmptyInvalidSessionGroupIsNotIgnored(t *testing.T) {
+	root := setupTrafficTest(t)
+	if err := os.MkdirAll(filepath.Join(root, "sessions", "pptp-007"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CollectTraffic(); err == nil {
+		t.Fatal("invalid empty session group treated as empty spool")
+	}
+}
+
+func TestStagedClaimBlocksScopedRemovalWithoutTrustedGroup(t *testing.T) {
+	root := setupTrafficTest(t)
+	dir := filepath.Join(root, "sessions-staged", "claim-interrupted")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "record")
+	if err := os.WriteFile(path, []byte("closed\tppp0\tbob\t10\t20\tsession\t8\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckClientSessionEvidence([]string{"alice"}, []int{7}); err == nil {
+		t.Fatal("staged record with unverifiable scope bypassed removal")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("staged evidence removed: %v", err)
+	}
+}
+
 func TestIncompleteClosedRecordCannotBeSampledOrAcknowledged(t *testing.T) {
 	root := setupTrafficTest(t)
 	dir := filepath.Join(root, "sessions", "pptp-7")
@@ -371,10 +434,11 @@ func TestIncompleteClosedRecordCannotBeSampledOrAcknowledged(t *testing.T) {
 
 func TestReadPPPSessionRejectsIncompleteAndInvalidBytes(t *testing.T) {
 	root := setupTrafficTest(t)
-	if err := os.MkdirAll(root, 0700); err != nil {
+	dir := filepath.Join(root, "sessions", "pptp-7")
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(root, "record")
+	path := filepath.Join(dir, "ppp0.closed.session")
 	for name, data := range map[string]string{
 		"unterminated": "closed\tppp0\talice\t10\t20\tsession\t7",
 		"extra-line":   "closed\tppp0\talice\t10\t20\tsession\t7\n\n",
@@ -392,14 +456,21 @@ func TestReadPPPSessionRejectsIncompleteAndInvalidBytes(t *testing.T) {
 			}
 		})
 	}
+	if err := os.WriteFile(path, []byte("closed\tppp0\talice\t10\t20\tsession\t7\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readPPPSession(path); err != nil {
+		t.Fatalf("complete legacy closed record rejected: %v", err)
+	}
 }
 
 func TestReadPPPSessionRejectsExtraRecords(t *testing.T) {
 	root := setupTrafficTest(t)
-	if err := os.MkdirAll(root, 0700); err != nil {
+	dir := filepath.Join(root, "sessions", "pptp-7")
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(root, "record")
+	path := filepath.Join(dir, "ppp0.closed.session")
 	if err := os.WriteFile(path, []byte("closed\tppp0\talice\t10\t20\tsession\t7\nextra\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
