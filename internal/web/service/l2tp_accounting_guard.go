@@ -124,15 +124,28 @@ func RecordL2TPCounterDecreaseUnderAllocationLock(decrease *l2tp.CounterDecrease
 	if decrease == nil {
 		return errors.New("missing L2TP counter observation")
 	}
+	return recordL2TPAccountingIncident(decrease.Error(), "l2tp-counter-decreased")
+}
+
+// RecordL2TPSessionDisappearanceUnderAllocationLock persists the last known
+// sample and a shared barrier; no final byte count is invented.
+func RecordL2TPSessionDisappearanceUnderAllocationLock(missing *l2tp.SessionDisappeared) error {
+	if missing == nil {
+		return errors.New("missing L2TP session observation")
+	}
+	return recordL2TPAccountingIncident(missing.Error(), "l2tp-session-disappeared")
+}
+
+func recordL2TPAccountingIncident(detail, direction string) error {
 	l2tpIncidentPending.Store(true)
-	evidenceErr := persistL2TPCounterEvidence(decrease.Error())
-	markerErr := persistL2TPAccountingIncident("L2TP counter decrease requires reconciliation")
+	evidenceErr := persistL2TPCounterEvidence(detail)
+	markerErr := persistL2TPAccountingIncident("L2TP accounting uncertainty requires reconciliation")
 	db := database.GetDB()
 	var dbErr error
 	if db == nil {
 		dbErr = errors.New("database unavailable")
 	} else {
-		incident := model.ResellerNodeCounterIncident{NodeId: -2, Email: "", Direction: "l2tp-counter-decreased"}
+		incident := model.ResellerNodeCounterIncident{NodeId: -2, Email: "", Direction: direction}
 		dbErr = db.Clauses(clause.OnConflict{DoNothing: true}).Create(&incident).Error
 	}
 	if err := errors.Join(evidenceErr, markerErr, dbErr); err != nil {

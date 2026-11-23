@@ -181,6 +181,38 @@ func TestReadSessionsFailsClosedOnInterfaceLookupError(t *testing.T) {
 	}
 }
 
+func TestCollectTrafficRejectsDisappearedSampleWithoutAdvancingBaselines(t *testing.T) {
+	for _, missing := range []string{"marker", "interface"} {
+		t.Run(missing, func(t *testing.T) {
+			setupTrafficFilesystem(t)
+			writeSession(t, 16, "ppp0", "alice@example.com", "150", "250", true)
+			writeSession(t, 16, "ppp1", "bob@example.com", "80", "90", true)
+			cmd := &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
+			p := &Process{ipsecCmd: cmd, xl2tpdCmd: cmd}
+			last := map[string]interfaceCounter{
+				"ppp0\x00alice@example.com": {rx: 100, tx: 200},
+				"ppp1\x00bob@example.com":   {rx: 50, tx: 60},
+			}
+			m := &Manager{id: 16, proc: &managed{proc: p, tag: "tag", last: last}}
+			path := filepath.Join(sessionDirForID(16), "ppp1")
+			if missing == "interface" {
+				path = filepath.Join(l2tpSysClassNetRoot, "ppp1")
+			}
+			if err := os.RemoveAll(path); err != nil {
+				t.Fatal(err)
+			}
+			inbounds, clients, err := m.CollectTrafficChecked()
+			var disappeared *SessionDisappeared
+			if !errors.As(err, &disappeared) || disappeared.InboundID != 16 || disappeared.Interface != "ppp1" || disappeared.Email != "bob@example.com" || disappeared.PreviousRx != 50 || disappeared.PreviousTx != 60 {
+				t.Fatalf("wrong missing observation: %+v %v", disappeared, err)
+			}
+			if len(inbounds) != 0 || len(clients) != 0 || last["ppp0\x00alice@example.com"].rx != 100 || last["ppp1\x00bob@example.com"].rx != 50 {
+				t.Fatalf("partial sample advanced: %#v %#v %#v", inbounds, clients, last)
+			}
+		})
+	}
+}
+
 func TestCollectTrafficRejectsCounterDecreaseBeforeAdvancingAnyBaseline(t *testing.T) {
 	setupTrafficFilesystem(t)
 	writeSession(t, 16, "ppp0", "alice@example.com", "150", "250", true)

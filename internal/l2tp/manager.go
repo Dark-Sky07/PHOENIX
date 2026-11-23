@@ -412,6 +412,20 @@ func (m *Manager) CollectTrafficChecked() (inbounds []InboundTraffic, clients []
 		// report a false zero. Retry on the next polling tick.
 		return nil, nil, fmt.Errorf("l2tp: failed to read session counters for inbound %d", m.id)
 	}
+	// A missing previously sampled session is not a zero-traffic disconnect:
+	// the down hook discards its marker without recording final counters.
+	previousKeys := make([]string, 0, len(m.proc.last))
+	for key := range m.proc.last {
+		previousKeys = append(previousKeys, key)
+	}
+	sort.Strings(previousKeys)
+	for _, key := range previousKeys {
+		if _, present := current[key]; !present {
+			iface, email, _ := strings.Cut(key, "\x00")
+			previous := m.proc.last[key]
+			return nil, nil, &SessionDisappeared{InboundID: m.id, Interface: iface, Email: email, PreviousRx: previous.rx, PreviousTx: previous.tx}
+		}
+	}
 	// Validate the entire snapshot before changing any baseline. A lower
 	// counter can reflect interface reuse or reset, neither of which proves
 	// the missing interval was zero or that the observed counter is new usage.

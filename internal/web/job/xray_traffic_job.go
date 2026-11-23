@@ -155,10 +155,19 @@ func (j *XrayTrafficJob) prepareXrayBatch(
 		traffic, clients, err := poll()
 		if err != nil {
 			var l2tpDecrease *l2tp.CounterDecrease
-			if errors.As(err, &l2tpDecrease) {
+			var l2tpMissing *l2tp.SessionDisappeared
+			isDecrease := errors.As(err, &l2tpDecrease)
+			isMissing := errors.As(err, &l2tpMissing)
+			if isDecrease || isMissing {
 				// The baseline was not changed. Persist both local evidence and
 				// the shared incident before removing the committed poll marker.
-				if recordErr := service.RecordL2TPCounterDecreaseUnderAllocationLock(l2tpDecrease); recordErr != nil {
+				var recordErr error
+				if isDecrease {
+					recordErr = service.RecordL2TPCounterDecreaseUnderAllocationLock(l2tpDecrease)
+				} else {
+					recordErr = service.RecordL2TPSessionDisappearanceUnderAllocationLock(l2tpMissing)
+				}
+				if recordErr != nil {
 					unlock()
 					return fmt.Errorf("L2TP counter incident; poll marker %s retained: %v; persist evidence: %w", id, err, recordErr)
 				}

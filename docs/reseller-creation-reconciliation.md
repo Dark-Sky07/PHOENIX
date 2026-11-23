@@ -810,6 +810,20 @@ shared with these L2TP samples. A real session/counter drain and durable
 session baselines remain necessary before reconciliation or quota release. Do
 not infer missing bytes or treat a stopped parent daemon as proof of completeness.
 
+When an L2TP session that was sampled in this process disappears from the next
+snapshot, including when its marker remains but its interface is gone, polling
+now preserves all baselines and records the last observed counters as evidence.
+A shared incident fences sensitive quota operations after the evidence is
+durable; a failed incident write leaves the poll marker in place. This is
+intentionally restrictive: ordinary disconnects of sampled L2TP sessions can
+require manual reconciliation because the existing down hook does not save final
+usage. The node remains running, but L2TP sampling and automatic daemon
+reconciliation are deferred until the incident is resolved; other active L2TP
+sessions can therefore accumulate unsampled traffic during the hold. It cannot
+detect a session that began and ended between polls, disappearance after a
+process restart or runtime replacement, or interface reuse with the same name
+and higher counters. It does not recover unobserved bytes.
+
 L2TP daemon replacement and checked removal now preserve their tracked process,
 interface baselines and runtime directory if either tracked strongSwan/xl2tpd
 parent exit cannot be observed. Dashboard stop/restart and local runtime removal
