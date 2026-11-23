@@ -91,7 +91,10 @@ settings or canonical links. Local daemon inbound edits now reject a failed
 traffic-filter query instead of applying raw, unfiltered credentials; creation
 uses the same rule. TUIC, OpenVPN and PPP daemon filters omit credentials with
 missing or ambiguous normalized traffic identities rather than stopping the
-entire node. Runtime apply failures request recovery. Updating an existing client traffic row to
+entire node. The dashboard reports a point-in-time count for enabled local
+daemon configurations and warns when that diagnostic is unavailable; it does not
+inventory old sessions, disabled inbounds, remote hosts or historical usage.
+Runtime apply failures request recovery. Updating an existing client traffic row to
 an enabled state also checks the proposed quota and expiry against local and
 upstream counters, rejecting exhausted or corrupt values rather than silently
 reactivating it. This check does not establish complete historical usage.

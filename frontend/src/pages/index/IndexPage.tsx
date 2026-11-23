@@ -352,6 +352,18 @@ export default function IndexPage() {
                     />
                   )}
 
+                  {status.counterIncidents?.available && (status.counterIncidents.daemonIdentityCount === undefined || status.counterIncidents.daemonIdentityCount > 0) && (
+                    <Alert
+                      className="daemon-identity-warning"
+                      type="warning"
+                      showIcon
+                      message={t('pages.index.daemonIdentityTitle')}
+                      description={status.counterIncidents.daemonIdentityCount === undefined
+                        ? t('pages.index.daemonIdentityUnavailable')
+                        : t('pages.index.daemonIdentityDescription', { count: status.counterIncidents.daemonIdentityCount })}
+                    />
+                  )}
+
                   {(!status.nodeSnapshotSafety?.available || status.nodeSnapshotSafety.nodeCount > 0) && (
                     <Alert
                       className="node-traffic-safety-warning"

@@ -5,6 +5,7 @@ import { cleanup, render, screen, waitFor } from '@testing-library/react';
 
 import { ThemeProvider } from '@/hooks/useTheme';
 import { Status } from '@/models/status';
+import type { CounterIncidentStatus } from '@/models/status';
 import { DBInbound } from '@/models/dbinbound';
 
 const GB = 1024 ** 3;
@@ -120,7 +121,7 @@ vi.mock('@/api/queries/useNodesQuery', () => ({
 }));
 
 const statusObj = {
-  counterIncidents: { available: true, databaseCount: 0, fallbackPresent: false, pendingInProcess: false },
+  counterIncidents: { available: true, databaseCount: 0, fallbackPresent: false, pendingInProcess: false } as CounterIncidentStatus,
   nodeSnapshotSafety: { available: true, nodeCount: 0 },
   cpu: 5.8, cpuCores: 4, logicalPro: 8, cpuSpeedMhz: 2900,
   disk: { current: 65820373811.2, total: 171798691840 },
@@ -235,6 +236,19 @@ describe('smoke: redesigned pages', () => {
     statusObj.counterIncidents = { available: true, databaseCount: 0, fallbackPresent: false, pendingInProcess: false };
     const { container } = wrap(<IndexPage />);
     expect(container.querySelector('.ant-alert-error')).toBeNull();
+  });
+
+  it('warns about missing or unavailable daemon identity diagnostics', async () => {
+    const { default: IndexPage } = await import('@/pages/index/IndexPage');
+    for (const daemonIdentityCount of [2, undefined]) {
+      statusObj.counterIncidents = { available: true, databaseCount: 0, fallbackPresent: false, pendingInProcess: false, daemonIdentityCount };
+      const { container } = wrap(<IndexPage />);
+      expect(container.querySelector('.daemon-identity-warning')).toBeTruthy();
+      cleanup();
+    }
+    statusObj.counterIncidents = { available: true, databaseCount: 0, fallbackPresent: false, pendingInProcess: false, daemonIdentityCount: 0 };
+    const { container } = wrap(<IndexPage />);
+    expect(container.querySelector('.daemon-identity-warning')).toBeNull();
   });
 
   it('warns about all registered remote nodes or unavailable node safety status', async () => {

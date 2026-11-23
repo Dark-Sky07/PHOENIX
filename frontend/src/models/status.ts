@@ -71,6 +71,7 @@ export interface CounterIncidentStatus {
   databaseCount: number;
   fallbackPresent: boolean;
   pendingInProcess: boolean;
+  daemonIdentityCount?: number;
 }
 
 export interface NodeSnapshotSafetyStatus {

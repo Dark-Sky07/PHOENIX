@@ -7,7 +7,33 @@ import (
 
 	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
+	"github.com/Dark-Sky07/phoenix/internal/xray"
 )
+
+func TestCounterIncidentStatusReportsDaemonIdentityProblems(t *testing.T) {
+	setupConflictDB(t)
+	db := database.GetDB()
+	inbound := model.Inbound{Tag: "daemon-identities", Protocol: model.TUIC, Enable: true,
+		Settings: `{"clients":[{"email":"ok@example.test","enable":true},{"email":"missing@example.test","enable":true},{"email":"same@example.test","enable":true},{"email":"","enable":true},{"email":"disabled-missing@example.test","enable":false}]}`}
+	if err := db.Create(&inbound).Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range []xray.ClientTraffic{{Email: "ok@example.test", Enable: true}, {Email: "same@example.test", Enable: true}, {Email: "SAME@example.test", Enable: false}} {
+		if err := db.Create(&row).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := readCounterIncidentStatus(db)
+	if !got.Available || got.DaemonIdentityCount != 3 {
+		t.Fatalf("missing, ambiguous, or blank identities not reported: %+v", got)
+	}
+	if err := db.Model(&inbound).Update("settings", "not-json").Error; err != nil {
+		t.Fatal(err)
+	}
+	if got := readCounterIncidentStatus(db); got.Available {
+		t.Fatalf("malformed configuration reported clear: %+v", got)
+	}
+}
 
 func TestCounterIncidentStatusDoesNotTreatUnavailableAsClear(t *testing.T) {
 	_, client := seedResellerRenewal(t)

@@ -46,6 +46,7 @@ export const CounterIncidentStatusSchema = z.object({
   databaseCount: z.number().int().nonnegative(),
   fallbackPresent: z.boolean(),
   pendingInProcess: z.boolean(),
+  daemonIdentityCount: z.number().int().nonnegative().optional(),
 });
 
 export const NodeSnapshotSafetyStatusSchema = z.object({

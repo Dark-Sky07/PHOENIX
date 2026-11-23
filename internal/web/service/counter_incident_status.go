@@ -13,10 +13,11 @@ import (
 // CounterIncidentStatus is a panel-wide operational summary, not proof that
 // traffic is complete. It contains no client identities or counter values.
 type CounterIncidentStatus struct {
-	Available        bool  `json:"available"`
-	DatabaseCount    int64 `json:"databaseCount"`
-	FallbackPresent  bool  `json:"fallbackPresent"`
-	PendingInProcess bool  `json:"pendingInProcess"`
+	Available           bool  `json:"available"`
+	DatabaseCount       int64 `json:"databaseCount"`
+	FallbackPresent     bool  `json:"fallbackPresent"`
+	PendingInProcess    bool  `json:"pendingInProcess"`
+	DaemonIdentityCount int64 `json:"daemonIdentityCount"`
 }
 
 func readCounterIncidentStatus(db *gorm.DB) CounterIncidentStatus {
@@ -55,6 +56,10 @@ func readCounterIncidentStatus(db *gorm.DB) CounterIncidentStatus {
 		return status
 	}
 	status.DatabaseCount += polls
+	status.DaemonIdentityCount, err = countDaemonIdentityProblems(db.WithContext(ctx))
+	if err != nil {
+		return status
+	}
 	status.Available = true
 	return status
 }
