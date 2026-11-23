@@ -32,6 +32,25 @@ state. Do not simply delete or merge counters without determining their origin
 and preserving consumed bytes. Archives produced before this guard may already
 contain an inflated snapshot and require evidence-based reconciliation.
 
+## Local TUIC shutdown journal
+
+For retained TUIC shutdown batches, a nonzero sample now needs an existing,
+unique client-traffic row identified by its recorded row ID. Missing IDs,
+deleted rows, ambiguous case variants and negative deltas retain the journal
+instead of silently discarding or multiplying those bytes. Supported row renames
+continue to use the row ID. Unexpected or incomplete journal entries also stop
+replay, and the local dashboard and participating allocation checks report or
+block on any TUIC journal entry or inspection error. Periodic TUIC reconciliation
+is deferred while replay fails; listeners are not deliberately stopped.
+
+These are local safeguards, not a shared cross-host marker or a complete TUIC
+accounting protocol. They do not prove generation or reseller ownership, protect
+unpolled in-memory traffic against a crash, or bind old TUIC receipts to their
+payloads. Other hosts cannot see this host's journal. Normal periodic TUIC polls
+still use the existing non-journaled path, and a crash or uncertain commit can
+lose or duplicate those deltas. Operators must preserve evidence and reconcile
+rather than deleting a journal or inventing usage.
+
 ## Xray poll identity capture
 
 For journaled Xray and L2TP deltas, a nonzero sample with a blank identity or

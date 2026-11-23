@@ -11,8 +11,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/Dark-Sky07/phoenix/internal/config"
 	"github.com/Dark-Sky07/phoenix/internal/tuic"
+	"github.com/Dark-Sky07/phoenix/internal/web/service"
 )
 
 var tuicJournalMu sync.Mutex
@@ -22,7 +22,7 @@ type tuicTrafficBatch struct {
 	Deltas []tuic.ClientTrafficDelta `json:"deltas"`
 }
 
-func tuicJournalDir() string { return filepath.Join(config.GetDBFolderPath(), "tuic-traffic-journal") }
+func tuicJournalDir() string { return service.TuicTrafficJournalDir() }
 
 func syncJournalDir(dir string) error {
 	if runtime.GOOS == "windows" {
@@ -82,7 +82,7 @@ func (j *TuicJob) replayTuicJournal() error {
 	}
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
-			continue
+			return fmt.Errorf("unexpected TUIC journal entry %q; manual reconciliation required", entry.Name())
 		}
 		path := filepath.Join(tuicJournalDir(), entry.Name())
 		data, err := os.ReadFile(path)
@@ -95,6 +95,11 @@ func (j *TuicJob) replayTuicJournal() error {
 		}
 		if batch.ID+".json" != entry.Name() {
 			return fmt.Errorf("TUIC journal batch ID mismatch")
+		}
+		for _, delta := range batch.Deltas {
+			if delta.Up < 0 || delta.Down < 0 {
+				return fmt.Errorf("TUIC journal %s has negative traffic", entry.Name())
+			}
 		}
 		if err := j.inboundService.AddTuicTrafficBatch(batch.ID, aggregateTuicClientTraffic(batch.Deltas, nil)); err != nil {
 			return err

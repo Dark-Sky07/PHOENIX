@@ -2,6 +2,7 @@ package job
 
 import (
 	"fmt"
+	"math"
 	"sync"
 	"time"
 
@@ -32,7 +33,8 @@ func (j *TuicJob) Run() {
 	journalErr := j.replayTuicJournal()
 	tuicJournalMu.Unlock()
 	if journalErr != nil {
-		logger.Warning("tuic job: recover traffic journal failed:", journalErr)
+		logger.Warning("tuic job: recover traffic journal failed; reconciliation deferred:", journalErr)
+		return
 	}
 
 	desired, err := j.inboundService.DesiredTuicInstances()
@@ -111,6 +113,18 @@ func (j *TuicJob) FlushStoppedTraffic() error {
 	return j.flushTuicJournal()
 }
 
+// Saturate counters rather than wrap a large valid total into a small delta.
+// A negative input remains negative so accounting rejects the batch.
+func addTuicTrafficBytes(current, delta int64) int64 {
+	if current < 0 || delta < 0 {
+		return -1
+	}
+	if current > math.MaxInt64-delta {
+		return math.MaxInt64
+	}
+	return current + delta
+}
+
 func aggregateTuicClientTraffic(clientDeltas []tuic.ClientTrafficDelta, onlineEmails []string) []*xray.ClientTraffic {
 	clientTrafficMap := make(map[string]*xray.ClientTraffic, len(clientDeltas)+len(onlineEmails))
 	for _, cd := range clientDeltas {
@@ -126,8 +140,8 @@ func aggregateTuicClientTraffic(clientDeltas []tuic.ClientTrafficDelta, onlineEm
 			traffic = &xray.ClientTraffic{Email: cd.Email, TuicTrafficID: cd.TrafficID, TuicUUID: cd.UUID, TuicInboundId: cd.InboundID}
 			clientTrafficMap[key] = traffic
 		}
-		traffic.Up += cd.Up
-		traffic.Down += cd.Down
+		traffic.Up = addTuicTrafficBytes(traffic.Up, cd.Up)
+		traffic.Down = addTuicTrafficBytes(traffic.Down, cd.Down)
 	}
 	for _, email := range onlineEmails {
 		if _, exists := clientTrafficMap[email]; !exists {

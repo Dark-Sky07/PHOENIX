@@ -82,6 +82,29 @@ func TestCounterIncidentStatusIncludesXrayPollMarkers(t *testing.T) {
 	}
 }
 
+func TestCounterIncidentStatusShowsOrCannotInspectTuicJournal(t *testing.T) {
+	setupConflictDB(t)
+	db := database.GetDB()
+	if err := os.MkdirAll(TuicTrafficJournalDir(), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(TuicTrafficJournalDir(), ".pending-incomplete"), []byte("partial"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := readCounterIncidentStatus(db); !got.Available || !got.FallbackPresent {
+		t.Fatalf("incomplete TUIC journal hidden: %+v", got)
+	}
+	if err := os.RemoveAll(TuicTrafficJournalDir()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(TuicTrafficJournalDir(), []byte("not a directory"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := readCounterIncidentStatus(db); got.Available {
+		t.Fatalf("failed TUIC journal inspection reported available: %+v", got)
+	}
+}
+
 func TestCounterIncidentStatusShowsOrCannotInspectXrayJournal(t *testing.T) {
 	setupConflictDB(t)
 	db := database.GetDB()
