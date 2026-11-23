@@ -60,6 +60,20 @@ func TestPPPRemovalGuardPostgres(t *testing.T) {
 	if err := rejectUnprovenPPPRemoval(tx, []string{email}, nil); err == nil {
 		t.Fatal("linked L2TP removal accepted")
 	}
+	// The only evidence is now the link, whose email has whitespace SQL
+	// TRIM does not remove. The guard must still match the Go-normalized key.
+	if err := tx.Model(&ib).Update("settings", `{"clients":[]}`).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Model(&client).Update("email", "\t"+email+"\n").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectUnprovenPPPRemoval(tx, []string{email}, nil); err == nil {
+		t.Fatal("Go-normalized link accepted by PostgreSQL guard")
+	}
+	if err := tx.Model(&ib).Update("settings", string(payload)).Error; err != nil {
+		t.Fatal(err)
+	}
 	if err := tx.Where("client_id = ?", client.Id).Delete(&model.ClientInbound{}).Error; err != nil {
 		t.Fatal(err)
 	}

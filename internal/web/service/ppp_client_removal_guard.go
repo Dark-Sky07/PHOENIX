@@ -50,13 +50,16 @@ func rejectUnprovenPPPRemoval(db *gorm.DB, emails []string, scope []int) error {
 		return err
 	}
 	for _, inbound := range inbounds {
-		for _, batch := range chunkStrings(keys, sqlInChunk) {
-			var count int64
-			err := db.Table("client_inbounds").Joins("JOIN clients ON clients.id = client_inbounds.client_id").Where("client_inbounds.inbound_id = ? AND LOWER(TRIM(clients.email)) IN ?", inbound.Id, batch).Count(&count).Error
-			if err != nil {
-				return err
-			}
-			if count > 0 {
+		// SQL LOWER/TRIM does not match transferEmailKey for all Unicode case
+		// and whitespace. Inspect linked identities in Go, otherwise a stale
+		// link hidden by SQL normalization could authorize unsafe removal.
+		var linkedEmails []string
+		if err := db.Table("client_inbounds").Joins("JOIN clients ON clients.id = client_inbounds.client_id").
+			Where("client_inbounds.inbound_id = ?", inbound.Id).Pluck("clients.email", &linkedEmails).Error; err != nil {
+			return err
+		}
+		for _, email := range linkedEmails {
+			if seen[transferEmailKey(email)] {
 				return fmt.Errorf("PPP inbound %d requires verified disconnect and accounting before client removal", inbound.Id)
 			}
 		}

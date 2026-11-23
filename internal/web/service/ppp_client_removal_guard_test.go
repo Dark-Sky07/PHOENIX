@@ -258,6 +258,29 @@ func TestL2TPRemovalAndUnassignmentStayBlockedBeforeMutation(t *testing.T) {
 	}
 }
 
+func TestPPPRemovalGuardFindsGoNormalizedLinkedIdentity(t *testing.T) {
+	for _, protocol := range []model.Protocol{model.PPTP, model.SSTP, model.L2TP} {
+		for _, pair := range [][2]string{{"\tALICE@example.test\n", "alice@example.test"}, {"ÜSER@example.test", "üser@example.test"}} {
+			t.Run(string(protocol)+pair[1], func(t *testing.T) {
+				ib, client, _ := seedPPPRemovalGuard(t)
+				db := database.GetDB()
+				if err := db.Model(ib).Updates(map[string]any{"protocol": protocol, "settings": `{"clients":[]}`}).Error; err != nil {
+					t.Fatal(err)
+				}
+				if err := db.Model(client).Update("email", pair[0]).Error; err != nil {
+					t.Fatal(err)
+				}
+				if err := rejectUnprovenPPPRemoval(db, []string{pair[1]}, []int{ib.Id}); err == nil {
+					t.Fatal("linked Go-normalized identity allowed unsafe removal")
+				}
+				if err := rejectUnprovenPPPRemoval(db, []string{"unrelated@example.test"}, []int{ib.Id}); err != nil {
+					t.Fatalf("unrelated identity blocked: %v", err)
+				}
+			})
+		}
+	}
+}
+
 func TestL2TPRemovalGuardCatchesOrphanSessionMarker(t *testing.T) {
 	ib, client, _ := seedPPPRemovalGuard(t)
 	db := database.GetDB()
