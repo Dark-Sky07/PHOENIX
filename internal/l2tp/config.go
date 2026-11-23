@@ -45,6 +45,15 @@ func l2tpBinDir() string {
 // tests. It remains empty in production, so runtime paths stay under the
 // configured panel binary directory.
 var l2tpRootOverride string
+var strongSwanRootOverride string
+var systemChapSecretsPathOverride string
+
+func systemChapSecretsFile() string {
+	if systemChapSecretsPathOverride != "" {
+		return systemChapSecretsPathOverride
+	}
+	return systemChapSecretsPath
+}
 
 func l2tpRoot() string {
 	if l2tpRootOverride != "" {
@@ -58,7 +67,11 @@ func dataDirForID(id int) string {
 }
 
 func strongSwanDirForID(id int) string {
-	return filepath.Join(strongSwanRuntimeRoot, fmt.Sprintf("%d", id))
+	root := strongSwanRuntimeRoot
+	if strongSwanRootOverride != "" {
+		root = strongSwanRootOverride
+	}
+	return filepath.Join(root, fmt.Sprintf("%d", id))
 }
 
 func ipsecConfigPath(id int) string  { return filepath.Join(dataDirForID(id), "ipsec.conf") }
@@ -341,7 +354,7 @@ func renderSystemChapSecrets(existing string, inst Instance) string {
 }
 
 func writeSystemChapSecrets(contents string) error {
-	dir := filepath.Dir(systemChapSecretsPath)
+	dir := filepath.Dir(systemChapSecretsFile())
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err
 	}
@@ -362,14 +375,14 @@ func writeSystemChapSecrets(contents string) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpName, systemChapSecretsPath); err != nil {
+	if err := os.Rename(tmpName, systemChapSecretsFile()); err != nil {
 		return err
 	}
 	return nil
 }
 
 func reconcileSystemChapSecrets(inst Instance) error {
-	existing, err := os.ReadFile(systemChapSecretsPath)
+	existing, err := os.ReadFile(systemChapSecretsFile())
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -381,7 +394,7 @@ func reconcileSystemChapSecrets(inst Instance) error {
 }
 
 func clearSystemChapSecrets() error {
-	existing, err := os.ReadFile(systemChapSecretsPath)
+	existing, err := os.ReadFile(systemChapSecretsFile())
 	if os.IsNotExist(err) {
 		return nil
 	}
@@ -397,28 +410,12 @@ func clearSystemChapSecrets() error {
 	return writeSystemChapSecrets(cleaned)
 }
 
-// removeLegacyRuntimeRoots deletes strongSwan runtime directories left behind
-// by earlier releases that used a different runtime root name. Matching is
-// structural (any "*-l2tp" directory beside the current root), so no legacy
-// name is embedded in the binary. Best effort: failures are ignored.
-func removeLegacyRuntimeRoots() {
-	legacy, err := filepath.Glob(filepath.Join(filepath.Dir(strongSwanRuntimeRoot), "*-l2tp"))
-	if err != nil {
-		return
-	}
-	for _, dir := range legacy {
-		if dir == strongSwanRuntimeRoot {
-			continue
-		}
-		_ = os.RemoveAll(dir)
-	}
-}
-
 func writeConfig(inst Instance) error {
 	if err := ValidateSettings(inst); err != nil {
 		return err
 	}
-	removeLegacyRuntimeRoots()
+	// Other strongSwan roots, even those ending in -l2tp, may belong to an
+	// unrelated service or contain unreconciled evidence. Do not delete them.
 	dir := dataDirForID(inst.Id)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err

@@ -907,8 +907,10 @@ manager now block L2TP reconciliation, checked removal, dashboard stop and
 restart; the runtime status reports that manual review is required. They are
 not signalled or deleted. The former PID-name-based orphan killer, which also
 used the host-global strongSwan PID directory and could target an unrelated
-service, has been removed. A tracked inbound must be removed before replacing
-it with a different inbound. Other panel services remain running; an existing
+service, has been removed. Configuration generation also no longer deletes
+other `*-l2tp` strongSwan directories based only on their names; they may belong
+to another service or hold unreconciled evidence and require manual review.
+A tracked inbound must be removed before replacing it with a different inbound. Other panel services remain running; an existing
 untracked L2TP daemon may also continue running with its prior configuration.
 
 This is a conservative operational barrier, not complete recovery: it does

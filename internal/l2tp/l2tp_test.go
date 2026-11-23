@@ -30,6 +30,35 @@ func validInstance() Instance {
 	}
 }
 
+func TestWriteConfigDoesNotRemoveOtherStrongSwanRoots(t *testing.T) {
+	setupTrafficFilesystem(t)
+	parent := t.TempDir()
+	other := filepath.Join(parent, "other-service-l2tp")
+	if err := os.MkdirAll(other, 0700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(other, "evidence")
+	if err := os.WriteFile(marker, []byte("preserve"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	strongSwanRootOverride = filepath.Join(parent, "phoenix-l2tp")
+	systemChapSecretsPathOverride = filepath.Join(t.TempDir(), "chap-secrets")
+	t.Cleanup(func() {
+		strongSwanRootOverride = ""
+		systemChapSecretsPathOverride = ""
+	})
+	if err := writeConfig(validInstance()); err != nil {
+		t.Fatalf("write managed configuration: %v", err)
+	}
+	if _, err := os.Stat(ipsecSecretsPath(validInstance().Id)); err != nil {
+		t.Fatalf("managed configuration not written: %v", err)
+	}
+	data, err := os.ReadFile(marker)
+	if err != nil || string(data) != "preserve" {
+		t.Fatalf("unrelated strongSwan root was altered: %q %v", data, err)
+	}
+}
+
 func TestValidateSettings(t *testing.T) {
 	if err := ValidateSettings(validInstance()); err != nil {
 		t.Fatalf("valid L2TP settings rejected: %v", err)
