@@ -1029,9 +1029,10 @@ are installed; failure to create or sync the initial spool still cannot be
 reported reliably by the hook. Unexpected hidden files in session directories
 are inspected rather than silently skipped (the hook lock directory is excluded).
 
-Until a per-client SSTP/PPTP drain and final accounting protocol exists, known
-local PPP attachments block client deletion and detach, including disabled
-inbounds. Matching active, closed, or staged PPP spool records also block
+Until per-client SSTP/PPTP/L2TP drain and final accounting protocols exist,
+known local attachments for these protocols block client deletion and detach,
+including disabled inbounds. Matching active, closed, or staged SSTP/PPTP
+spool records also block
 removal even if database associations have drifted. Admin bulk deletion
 preflights its whole batch; lower-level detach and reseller archive/unassignment
 paths recheck the guard. This is an intentionally restrictive interim fence: it
@@ -1039,8 +1040,10 @@ does **not** disconnect the user, and there is not yet an automated verified
 reconciliation/override flow to resume these removals. Do not remove records or
 associations merely to bypass it. An absent spool or association is not proof
 that no session exists; nonparticipating writers, concurrent hook/attachment
-changes and remote nodes remain outside this local check. Other protocols and
-other removal routes still need their own drain and accounting guarantees.
+changes and remote nodes remain outside this local check. Unlike SSTP/PPTP,
+L2TP session markers are not checked by this removal guard if both the database
+association and settings credential have already disappeared. Other protocols
+and other removal routes still need their own drain and accounting guarantees.
 
 PPP spool directory creation, scans, record reads, claim renames, deletion and
 directory sync now use a root-confined filesystem handle. Paths or symlinks

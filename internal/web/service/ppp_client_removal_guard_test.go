@@ -80,6 +80,73 @@ func TestPPPRemovalAndUnassignmentStayBlockedBeforeMutation(t *testing.T) {
 	}
 }
 
+func TestL2TPRemovalAndUnassignmentStayBlockedBeforeMutation(t *testing.T) {
+	ib, client, reseller := seedPPPRemovalGuard(t)
+	db := database.GetDB()
+	if err := db.Model(ib).Update("protocol", model.L2TP).Error; err != nil {
+		t.Fatal(err)
+	}
+	svc := &ClientService{}
+	inboundSvc := &InboundService{}
+	for _, check := range []struct {
+		name string
+		run  func() error
+	}{
+		{"delete", func() error { _, err := svc.Delete(inboundSvc, client.Id, false); return err }},
+		{"delete by email", func() error { _, err := svc.DeleteByEmail(inboundSvc, client.Email, false); return err }},
+		{"scoped delete", func() error {
+			_, err := svc.DeleteByEmailForInbounds(inboundSvc, client.Email, false, []int{ib.Id})
+			return err
+		}},
+		{"detach", func() error { _, err := svc.Detach(inboundSvc, client.Id, []int{ib.Id}); return err }},
+		{"inbound delete", func() error {
+			_, err := svc.DelInboundClientByEmail(inboundSvc, ib.Id, client.Email, false)
+			return err
+		}},
+		{"bulk delete", func() error { _, _, err := svc.BulkDelete(inboundSvc, []string{client.Email}, false); return err }},
+		{"unassign", func() error { return (&ResellerService{}).UnassignClient(reseller.Id, client.Email) }},
+		{"delete reseller", func() error { return (&ResellerService{}).Delete(reseller.Id) }},
+	} {
+		t.Run(check.name, func(t *testing.T) {
+			if err := check.run(); err == nil || !strings.Contains(err.Error(), "PPP") {
+				t.Fatalf("unsafe L2TP removal allowed: %v", err)
+			}
+		})
+	}
+	for _, item := range []struct {
+		obj   any
+		where string
+		arg   any
+	}{
+		{&model.ClientRecord{}, "id = ?", client.Id}, {&model.Reseller{}, "id = ?", reseller.Id}, {&model.ResellerClient{}, "reseller_id = ?", reseller.Id}, {&model.ClientInbound{}, "client_id = ?", client.Id}, {&xray.ClientTraffic{}, "email = ?", client.Email},
+	} {
+		var count int64
+		if err := db.Model(item.obj).Where(item.where, item.arg).Count(&count).Error; err != nil || count != 1 {
+			t.Fatalf("L2TP evidence changed for %T: %d %v", item.obj, count, err)
+		}
+	}
+	var saved model.Inbound
+	if err := db.First(&saved, ib.Id).Error; err != nil || saved.Settings != ib.Settings {
+		t.Fatalf("L2TP inbound altered: %v", err)
+	}
+	// A missing join row does not make a retained settings credential safe.
+	if err := db.Where("client_id = ?", client.Id).Delete(&model.ClientInbound{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(ib).Update("enable", false).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectUnprovenPPPRemoval(db, []string{client.Email}, nil); err == nil {
+		t.Fatal("disabled L2TP settings-only attachment accepted")
+	}
+	if err := rejectUnprovenPPPRemoval(db, []string{"other@example.test"}, nil); err != nil {
+		t.Fatalf("unrelated client blocked: %v", err)
+	}
+	if err := rejectUnprovenPPPRemoval(db, []string{client.Email}, []int{}); err != nil {
+		t.Fatalf("empty scope blocked: %v", err)
+	}
+}
+
 func TestPPPRemovalGuardCatchesSettingsDriftAndSpool(t *testing.T) {
 	ib, client, _ := seedPPPRemovalGuard(t)
 	db := database.GetDB()

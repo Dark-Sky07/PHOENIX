@@ -13,7 +13,8 @@ import (
 // rejectUnprovenPPPRemoval is a conservative interim fence, not a drain
 // protocol. Scope nil means all local inbounds, an empty non-nil scope none.
 // Parent daemon exit and absence of spool files cannot prove children stopped
-// or all usage was committed, so known local PPP attachments stay blocked.
+// or all usage was committed, so known local PPTP, SSTP and L2TP attachments
+// stay blocked. L2TP has no final-counter spool to prove safe disconnection.
 func rejectUnprovenPPPRemoval(db *gorm.DB, emails []string, scope []int) error {
 	if scope != nil && len(scope) == 0 {
 		return nil
@@ -36,7 +37,7 @@ func rejectUnprovenPPPRemoval(db *gorm.DB, emails []string, scope []int) error {
 	if err := pppvpn.CheckClientSessionEvidence(keys, scope); err != nil {
 		return fmt.Errorf("PPP client removal requires reconciliation: %w", err)
 	}
-	q := db.Where("node_id IS NULL AND protocol IN ?", []model.Protocol{model.PPTP, model.SSTP})
+	q := db.Where("node_id IS NULL AND protocol IN ?", []model.Protocol{model.PPTP, model.SSTP, model.L2TP})
 	if scope != nil {
 		q = q.Where("id IN ?", scope)
 	}

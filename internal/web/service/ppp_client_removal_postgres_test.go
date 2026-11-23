@@ -54,6 +54,12 @@ func TestPPPRemovalGuardPostgres(t *testing.T) {
 	if err := rejectUnprovenPPPRemoval(tx, []string{email}, nil); err == nil {
 		t.Fatal("linked PPP removal accepted")
 	}
+	if err := tx.Model(&ib).Update("protocol", model.L2TP).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectUnprovenPPPRemoval(tx, []string{email}, nil); err == nil {
+		t.Fatal("linked L2TP removal accepted")
+	}
 	if err := tx.Where("client_id = ?", client.Id).Delete(&model.ClientInbound{}).Error; err != nil {
 		t.Fatal(err)
 	}
