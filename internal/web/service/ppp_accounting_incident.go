@@ -90,6 +90,13 @@ func checkPPPAccountingIncident(db *gorm.DB) error {
 	return nil
 }
 
+// CheckPPPAccountingIncidents reports local or shared PPP uncertainty to
+// callers outside a transaction. A clean result is only an observation; hooks
+// and other panels are not synchronized with the caller's later operations.
+func CheckPPPAccountingIncidents() error {
+	return checkPPPAccountingIncident(database.GetDB())
+}
+
 // recordPPPCounterDecrease is called only after the traffic transaction has
 // ended. The evidence is kept locally even if acquiring the allocation lock or
 // writing the shared record fails. No byte count is inferred from the error.

@@ -993,6 +993,16 @@ reset, and the transaction does not advance its checkpoint. Checkpoints are
 retained indefinitely, so storage grows; migration requires and copies their
 table rather than silently starting empty.
 
+After each successful SSTP/PPTP poll, periodic daemon reconciliation now checks
+both local PPP evidence and the shared PPP incident before proceeding. Existing
+incidents, an uninspectable local store or an unavailable shared incident table
+therefore defer reconciliation even if the current poll is empty. Other hosts
+sharing the database can also defer their PPP configuration changes, but running
+daemons are not stopped by this check. Polling can continue, and a committed
+client-disable result still invalidates the dashboard. This check is not a
+lock on PPP hooks or a proof that sessions have drained; a new incident can
+appear after the check.
+
 These changes only protect the same session ID and participating checkpoint
 writers. Different sessions or other traffic writers updating the same client across
 processes still need independent serialization. The session ID alone does not

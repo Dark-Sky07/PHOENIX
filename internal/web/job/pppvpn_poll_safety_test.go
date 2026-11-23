@@ -14,6 +14,66 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/xray"
 )
 
+func TestPPPIncidentDefersReconciliationAfterEmptyPoll(t *testing.T) {
+	for _, mode := range []string{"local", "shared", "unavailable"} {
+		t.Run(mode, func(t *testing.T) {
+			setupIntegrationDB(t)
+			t.Setenv("XUI_BIN_FOLDER", t.TempDir())
+			db := database.GetDB()
+			switch mode {
+			case "local":
+				dir := filepath.Join(os.Getenv("XUI_DB_FOLDER"), "ppp-accounting-evidence")
+				if err := os.MkdirAll(dir, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "incident.txt"), []byte("uncertain"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "shared":
+				if err := db.Create(&model.ResellerNodeCounterIncident{NodeId: -3, Email: "", Direction: "ppp-counter-decreased"}).Error; err != nil {
+					t.Fatal(err)
+				}
+			case "unavailable":
+				if err := db.Migrator().DropTable(&model.ResellerNodeCounterIncident{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			state := &pppPollState{}
+			collect := func() (*pppvpn.TrafficBatch, error) { return &pppvpn.TrafficBatch{Token: 1}, nil }
+			ack := func(uint64) error { return nil }
+			if _, _, err := collectAndCommitPPP(state, collect, nil, ack); err != nil {
+				t.Fatalf("empty sample unexpectedly failed: %v", err)
+			}
+			reconciled := false
+			err := reconcilePPPWithAccountingBarrier(service.CheckPPPAccountingIncidents, func() bool { reconciled = true; return true })
+			if err == nil || reconciled {
+				t.Fatalf("%s uncertainty allowed reconciliation: %v", mode, err)
+			}
+		})
+	}
+}
+
+func TestPPPReconciliationResumesAfterReviewedIncident(t *testing.T) {
+	setupIntegrationDB(t)
+	t.Setenv("XUI_BIN_FOLDER", t.TempDir())
+	incident := model.ResellerNodeCounterIncident{NodeId: -3, Email: "", Direction: "ppp-counter-decreased"}
+	if err := database.GetDB().Create(&incident).Error; err != nil {
+		t.Fatal(err)
+	}
+	reconciled := false
+	reconcile := func() bool { reconciled = true; return true }
+	if err := reconcilePPPWithAccountingBarrier(service.CheckPPPAccountingIncidents, reconcile); err == nil || reconciled {
+		t.Fatalf("shared incident ignored: %v", err)
+	}
+	// Simulate operator review; the production code never clears incidents.
+	if err := database.GetDB().Delete(&incident).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := reconcilePPPWithAccountingBarrier(service.CheckPPPAccountingIncidents, reconcile); err != nil || !reconciled {
+		t.Fatalf("reviewed incident still blocks reconciliation: %v", err)
+	}
+}
+
 func TestPPPPollRetriesAmbiguousCommitAndFencesAllocation(t *testing.T) {
 	setupIntegrationDB(t)
 	db := database.GetDB()

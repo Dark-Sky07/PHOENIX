@@ -175,6 +175,17 @@ func (j *PPPVPNJob) reconcile() bool {
 	return true
 }
 
+// A successful sample does not resolve an earlier PPP incident. Check after
+// collection releases its allocation lock so daemon reconciliation is deferred
+// without preventing continued attempts to collect and persist traffic.
+func reconcilePPPWithAccountingBarrier(check func() error, reconcile func() bool) error {
+	if err := check(); err != nil {
+		return fmt.Errorf("PPP accounting incident; reconciliation deferred: %w", err)
+	}
+	reconcile()
+	return nil
+}
+
 func (j *PPPVPNJob) Run() { j.runOnce(j.run) }
 
 func (j *PPPVPNJob) runOnce(run func()) {
@@ -196,8 +207,11 @@ func (j *PPPVPNJob) run() {
 		logger.Warning("pppvpn job: PPP collection or persistence failed:", err)
 		return
 	}
-	j.reconcile()
 	if clientsDisabled {
+		// The traffic transaction has committed even if reconciliation must wait.
 		websocket.BroadcastInvalidate(websocket.MessageTypeInbounds)
+	}
+	if err := reconcilePPPWithAccountingBarrier(service.CheckPPPAccountingIncidents, j.reconcile); err != nil {
+		logger.Warning("pppvpn job:", err)
 	}
 }

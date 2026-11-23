@@ -39,6 +39,9 @@ func TestPPPIncidentAcrossPostgresProcesses(t *testing.T) {
 			if err := checkPPPAccountingIncident(database.GetDB()); err == nil {
 				t.Fatal("shared PPP incident not observed")
 			}
+			if err := CheckPPPAccountingIncidents(); err == nil {
+				t.Fatal("reconciliation barrier missed shared PPP incident")
+			}
 			unlock, err := LockResellerAllocation()
 			if err != nil {
 				t.Fatalf("unrelated polling blocked: %v", err)
