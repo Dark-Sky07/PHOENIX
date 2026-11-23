@@ -53,13 +53,20 @@ func rejectUnprovenPPPRemoval(db *gorm.DB, emails []string, scope []int) error {
 		// SQL LOWER/TRIM does not match transferEmailKey for all Unicode case
 		// and whitespace. Inspect linked identities in Go, otherwise a stale
 		// link hidden by SQL normalization could authorize unsafe removal.
-		var linkedEmails []string
-		if err := db.Table("client_inbounds").Joins("JOIN clients ON clients.id = client_inbounds.client_id").
-			Where("client_inbounds.inbound_id = ?", inbound.Id).Pluck("clients.email", &linkedEmails).Error; err != nil {
+		var links []struct {
+			ClientID int     `gorm:"column:client_id"`
+			Email    *string `gorm:"column:email"`
+		}
+		if err := db.Table("client_inbounds").Select("client_inbounds.client_id, clients.email").
+			Joins("LEFT JOIN clients ON clients.id = client_inbounds.client_id").
+			Where("client_inbounds.inbound_id = ?", inbound.Id).Scan(&links).Error; err != nil {
 			return err
 		}
-		for _, email := range linkedEmails {
-			if seen[transferEmailKey(email)] {
+		for _, link := range links {
+			if link.Email == nil || transferEmailKey(*link.Email) == "" {
+				return fmt.Errorf("PPP inbound %d has an unresolved client link %d; manual reconciliation required", inbound.Id, link.ClientID)
+			}
+			if seen[transferEmailKey(*link.Email)] {
 				return fmt.Errorf("PPP inbound %d requires verified disconnect and accounting before client removal", inbound.Id)
 			}
 		}
@@ -75,6 +82,9 @@ func rejectUnprovenPPPRemoval(db *gorm.DB, emails []string, scope []int) error {
 				return fmt.Errorf("PPP inbound %d client list cannot be verified: %w", inbound.Id, err)
 			}
 			for _, client := range clients {
+				if transferEmailKey(client.Email) == "" {
+					return fmt.Errorf("PPP inbound %d has a client without an accounting identity; manual reconciliation required", inbound.Id)
+				}
 				if seen[transferEmailKey(client.Email)] {
 					return fmt.Errorf("PPP inbound %d requires verified disconnect and accounting before client removal", inbound.Id)
 				}

@@ -258,6 +258,47 @@ func TestL2TPRemovalAndUnassignmentStayBlockedBeforeMutation(t *testing.T) {
 	}
 }
 
+func TestPPPRemovalGuardRejectsUnresolvedAttachments(t *testing.T) {
+	for _, protocol := range []model.Protocol{model.PPTP, model.SSTP, model.L2TP} {
+		for _, condition := range []string{"orphan-link", "blank-linked-email", "blank-settings-email", "null-settings-client"} {
+			t.Run(string(protocol)+"/"+condition, func(t *testing.T) {
+				ib, client, _ := seedPPPRemovalGuard(t)
+				db := database.GetDB()
+				if err := db.Model(ib).Updates(map[string]any{"protocol": protocol, "settings": `{"clients":[]}`}).Error; err != nil {
+					t.Fatal(err)
+				}
+				switch condition {
+				case "orphan-link":
+					if err := db.Delete(client).Error; err != nil {
+						t.Fatal(err)
+					}
+				case "blank-linked-email":
+					if err := db.Model(client).Update("email", " \t ").Error; err != nil {
+						t.Fatal(err)
+					}
+				case "blank-settings-email", "null-settings-client":
+					if err := db.Where("client_id = ?", client.Id).Delete(&model.ClientInbound{}).Error; err != nil {
+						t.Fatal(err)
+					}
+					settings := `{"clients":[{"email":" "}]}`
+					if condition == "null-settings-client" {
+						settings = `{"clients":[null]}`
+					}
+					if err := db.Model(ib).Update("settings", settings).Error; err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := rejectUnprovenPPPRemoval(db, []string{"unrelated@example.test"}, []int{ib.Id}); err == nil || !strings.Contains(err.Error(), "manual reconciliation") {
+					t.Fatalf("unresolved attachment accepted: %v", err)
+				}
+				if err := rejectUnprovenPPPRemoval(db, []string{"unrelated@example.test"}, []int{}); err != nil {
+					t.Fatalf("empty scope blocked: %v", err)
+				}
+			})
+		}
+	}
+}
+
 func TestPPPRemovalGuardFindsGoNormalizedLinkedIdentity(t *testing.T) {
 	for _, protocol := range []model.Protocol{model.PPTP, model.SSTP, model.L2TP} {
 		for _, pair := range [][2]string{{"\tALICE@example.test\n", "alice@example.test"}, {"ÜSER@example.test", "üser@example.test"}} {

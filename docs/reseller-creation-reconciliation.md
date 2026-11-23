@@ -91,7 +91,10 @@ verified stop-and-final-accounting proof for the whole inbound, and a missing
 session marker alone is insufficient. An operator must reconcile it; no
 automatic resume path is provided yet. Inbound edits retain an omitted daemon
 client list before normalization and reject unproven PPP client removal from
-settings or canonical links. Local daemon inbound edits now reject a failed
+settings or canonical links. A missing linked client or blank identity in a
+scoped PPP inbound also blocks removal pending manual reconciliation, even when
+the requested email is different; its ownership cannot be inferred. Local daemon
+inbound edits now reject a failed
 traffic-filter query instead of applying raw, unfiltered credentials; creation
 uses the same rule. TUIC, OpenVPN and PPP daemon filters omit credentials with
 missing, ambiguous, or SQL-unresolvable normalized traffic identities rather than stopping the

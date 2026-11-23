@@ -83,4 +83,16 @@ func TestPPPRemovalGuardPostgres(t *testing.T) {
 	if err := rejectUnprovenPPPRemoval(tx, []string{id + "-unrelated@test"}, nil); err != nil {
 		t.Fatalf("unrelated identity blocked: %v", err)
 	}
+	if err := tx.Model(&ib).Update("settings", `{"clients":[]}`).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Delete(&client).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Create(&model.ClientInbound{ClientId: client.Id, InboundId: ib.Id}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectUnprovenPPPRemoval(tx, []string{id + "-unrelated@test"}, []int{ib.Id}); err == nil {
+		t.Fatal("orphan link allowed removal with unknown identity")
+	}
 }
