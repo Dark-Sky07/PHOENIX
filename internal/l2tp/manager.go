@@ -1,6 +1,7 @@
 package l2tp
 
 import (
+	"fmt"
 	"os"
 	"sort"
 	"strconv"
@@ -311,13 +312,20 @@ func (m *Manager) StopAll() {
 // stable email-to-interface mapping without inventing a profile or requiring a
 // RADIUS accounting server.
 func (m *Manager) CollectTraffic() (inbounds []InboundTraffic, clients []ClientTrafficDelta) {
+	inbounds, clients, _ = m.CollectTrafficChecked()
+	return inbounds, clients
+}
+
+// CollectTrafficChecked reports a failed read without advancing baselines, so
+// the caller can defer a destructive reconciliation until the next sample.
+func (m *Manager) CollectTrafficChecked() (inbounds []InboundTraffic, clients []ClientTrafficDelta, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.proc == nil || !m.proc.proc.IsRunning() {
 		if m.proc != nil {
 			m.proc.online = map[string]bool{}
 		}
-		return nil, nil
+		return nil, nil, nil
 	}
 	if m.proc.last == nil {
 		m.proc.last = make(map[string]interfaceCounter)
@@ -329,7 +337,7 @@ func (m *Manager) CollectTraffic() (inbounds []InboundTraffic, clients []ClientT
 	if !countersOK {
 		// A transient marker/interface read failure must not clear baselines or
 		// report a false zero. Retry on the next polling tick.
-		return nil, nil
+		return nil, nil, fmt.Errorf("l2tp: failed to read session counters for inbound %d", m.id)
 	}
 	newOnline := make(map[string]bool, len(current))
 	deltaByEmail := make(map[string]ClientTrafficDelta)
@@ -363,7 +371,7 @@ func (m *Manager) CollectTraffic() (inbounds []InboundTraffic, clients []ClientT
 	if totalUp > 0 || totalDown > 0 {
 		inbounds = append(inbounds, InboundTraffic{InboundId: m.id, Tag: m.proc.tag, Up: totalUp, Down: totalDown})
 	}
-	return inbounds, sortedClientDeltas(deltaByEmail)
+	return inbounds, sortedClientDeltas(deltaByEmail), nil
 }
 
 // OnlineEmails returns the currently connected L2TP usernames, deduplicated

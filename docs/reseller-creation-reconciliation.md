@@ -793,11 +793,19 @@ pretending the parent exited. This is **not** a barrier for pppd children,
 active sessions, hook spool files, or counters; the unchecked periodic removal
 path logs failures and remains a recovery backstop.
 
-L2TP accounting has a separate unresolved loss window: its job reconciles the
-daemon before sampling, the manager holds interface baselines only in memory,
-and `CollectTraffic` advances them before `AddTraffic` commits. A process
-change, missed ip-down counter, database failure, or crash can therefore lose
-usage; blindly retrying a delta after an uncertain commit could double-count.
-A durable, identity-bound, idempotent journal and a real session/counter drain
-are needed before this path can support reconciliation or quota release. Do not
-infer missing bytes or treat a stopped parent daemon as proof of completeness.
+L2TP sampled deltas now use the existing identity-bound Xray journal format,
+transactional receipt and durable in-flight marker under the participating
+allocation lock. Cron and dashboard job instances serialize the sample and its
+retry, retain a failed sample, and sample before their own periodic daemon
+reconciliation. Tests cover failed writes, an uncertain committed retry and
+journal replay after simulated process restart. A failed interface-counter read
+also defers the periodic reconcile without advancing the baseline.
+
+This only protects observed deltas. L2TP interface baselines are still held in
+memory; a process change, missed ip-down counter, crash before journal creation,
+concurrent runtime mutation or usage after the sample can leave consumption
+unknown. A marker without a receipt or journal requires manual review. Journal
+replay on another host is not guaranteed, and the Xray-named marker/journal is
+shared with these L2TP samples. A real session/counter drain and durable
+session baselines remain necessary before reconciliation or quota release. Do
+not infer missing bytes or treat a stopped parent daemon as proof of completeness.

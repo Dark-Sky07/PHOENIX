@@ -1,7 +1,9 @@
 package job
 
 import (
+	"errors"
 	"strings"
+	"sync"
 
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
 	"github.com/Dark-Sky07/phoenix/internal/l2tp"
@@ -47,7 +49,68 @@ func (j *L2TPJob) enabledClientsForInbound(ib *model.Inbound) ([]model.Client, b
 	return out, true
 }
 
+// Multiple scheduler instances and dashboard actions share one collector.
+// Keep any uncommitted sample and allocation lock across all of them.
+var l2tpRunMu sync.Mutex
+var l2tpJournalCollector = NewXrayTrafficJob()
+var errEmptyL2TPSample = errors.New("no observed L2TP traffic")
+
+// persistL2TPPoll uses the same identity-checked journal, durable in-flight
+// marker and transactional receipt as Xray. It covers only sampled bytes: the
+// L2TP runtime can still lose traffic before a sample or during shutdown.
+func persistL2TPPoll(collector *XrayTrafficJob, poll func() ([]*xray.Traffic, []*xray.ClientTraffic, error)) (bool, error) {
+	if collector.pending == nil {
+		if err := collector.replayXrayJournal(); err != nil {
+			return false, err
+		}
+	}
+	if err := collector.prepareXrayBatch(poll, collector.inboundService.CaptureXrayTrafficIdentities); err != nil {
+		if errors.Is(err, errEmptyL2TPSample) {
+			return false, nil
+		}
+		return false, err
+	}
+	restart, disabled, err := collector.applyPending(collector.applyJournaledXrayBatch)
+	return restart || disabled, err
+}
+
 func (j *L2TPJob) Run() {
+	if !l2tpRunMu.TryLock() {
+		return
+	}
+	defer l2tpRunMu.Unlock()
+	mgr := l2tp.GetManager()
+	// Sample and commit before the periodic reconcile may stop or replace the
+	// daemon. Other runtime operations and traffic after the poll remain outside
+	// this barrier; a successful sample is not a final accounting proof.
+	restart, err := persistL2TPPoll(l2tpJournalCollector, func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
+		inboundDeltas, clientDeltas, err := mgr.CollectTrafficChecked()
+		if err != nil {
+			return nil, nil, err
+		}
+		if len(inboundDeltas) == 0 && len(clientDeltas) == 0 {
+			// No observed delta to apply. Clear the in-flight marker instead of
+			// retaining an empty receipt every tick; this does not establish
+			// that closed sessions had no unobserved traffic.
+			return nil, nil, errEmptyL2TPSample
+		}
+		traffics := make([]*xray.Traffic, 0, len(inboundDeltas))
+		for _, delta := range inboundDeltas {
+			traffics = append(traffics, &xray.Traffic{IsInbound: true, Tag: delta.Tag, Up: delta.Up, Down: delta.Down})
+		}
+		clients := make([]*xray.ClientTraffic, 0, len(clientDeltas))
+		for _, delta := range clientDeltas {
+			clients = append(clients, &xray.ClientTraffic{InboundId: delta.InboundId, Email: delta.Email, Enable: true, Up: delta.Up, Down: delta.Down})
+		}
+		return traffics, clients, nil
+	})
+	if restart {
+		j.xrayService.SetToNeedRestart()
+	}
+	if err != nil {
+		logger.Warning("l2tp job: traffic persistence failed; retaining sample for recovery:", err)
+		return
+	}
 	inbounds, err := j.inboundService.GetAllInbounds()
 	if err != nil {
 		logger.Warning("l2tp job: get inbounds failed:", err)
@@ -73,32 +136,5 @@ func (j *L2TPJob) Run() {
 		inst.XrayRelayPort = j.xrayService.DaemonRelayPort(ib.Tag)
 		wanted = append(wanted, inst)
 	}
-	mgr := l2tp.GetManager()
 	mgr.Reconcile(wanted)
-	inboundDeltas, clientDeltas := mgr.CollectTraffic()
-	if len(inboundDeltas) == 0 && len(clientDeltas) == 0 {
-		return
-	}
-	traffics := make([]*xray.Traffic, 0, len(inboundDeltas))
-	for _, delta := range inboundDeltas {
-		traffics = append(traffics, &xray.Traffic{
-			IsInbound: true,
-			Tag:       delta.Tag,
-			Up:        delta.Up,
-			Down:      delta.Down,
-		})
-	}
-	clientTraffics := make([]*xray.ClientTraffic, 0, len(clientDeltas))
-	for _, delta := range clientDeltas {
-		clientTraffics = append(clientTraffics, &xray.ClientTraffic{
-			InboundId: delta.InboundId,
-			Email:     delta.Email,
-			Enable:    true,
-			Up:        delta.Up,
-			Down:      delta.Down,
-		})
-	}
-	if _, _, err := j.inboundService.AddTraffic(traffics, clientTraffics); err != nil {
-		logger.Warning("l2tp job: add traffic failed:", err)
-	}
 }

@@ -2,6 +2,7 @@ package l2tp
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -97,5 +98,25 @@ func TestReadCounterParsesUnsignedValuesWithoutNegativeWrap(t *testing.T) {
 	}
 	if value, ok := readCounter(path); ok || value != 0 {
 		t.Fatalf("negative counter was accepted: (%d, %v)", value, ok)
+	}
+}
+
+func TestCollectTrafficCheckedFailurePreservesBaselines(t *testing.T) {
+	setupTrafficFilesystem(t)
+	writeSession(t, 12, "ppp0", "alice@example.com", "bad", "200", true)
+	cmd := &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
+	p := &Process{ipsecCmd: cmd, xl2tpdCmd: cmd}
+	baseline := map[string]interfaceCounter{"ppp0\x00alice@example.com": {rx: 50, tx: 100}}
+	m := &Manager{id: 12, proc: &managed{proc: p, tag: "tag", last: baseline}}
+	if _, _, err := m.CollectTrafficChecked(); err == nil {
+		t.Fatal("counter failure was not reported")
+	}
+	if got := baseline["ppp0\x00alice@example.com"]; got.rx != 50 || got.tx != 100 {
+		t.Fatalf("baseline changed after failure: %+v", got)
+	}
+	writeSession(t, 12, "ppp0", "alice@example.com", "80", "160", true)
+	_, clients, err := m.CollectTrafficChecked()
+	if err != nil || len(clients) != 1 || clients[0].Up != 30 || clients[0].Down != 60 {
+		t.Fatalf("retry delta: %+v err=%v", clients, err)
 	}
 }
