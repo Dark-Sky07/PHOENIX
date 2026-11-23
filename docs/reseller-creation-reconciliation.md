@@ -89,7 +89,11 @@ automatic resume path is provided yet. Inbound edits retain an omitted daemon
 client list before normalization and reject unproven PPP client removal from
 settings or canonical links. Local daemon inbound edits now reject a failed
 traffic-filter query instead of applying raw, unfiltered credentials; runtime
-apply failures request recovery. Runtime and database updates remain separate.
+apply failures request recovery. Updating an existing client traffic row to
+an enabled state also checks the proposed quota and expiry against local and
+upstream counters, rejecting exhausted or corrupt values rather than silently
+reactivating it. This check does not establish complete historical usage.
+Runtime and database updates remain separate.
 Node status counts use overflow-safe
 local totals but do not replace global enforcement.
 Ordinary cleanup failures release the lock behind the retained

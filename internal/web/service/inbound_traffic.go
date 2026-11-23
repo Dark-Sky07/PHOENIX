@@ -965,6 +965,35 @@ func (s *InboundService) AddClientStat(tx *gorm.DB, inboundId int, client *model
 }
 
 func (s *InboundService) UpdateClientStat(tx *gorm.DB, email string, client *model.Client) error {
+	if client.Enable {
+		// An inbound or credential edit must not silently reactivate a client
+		// whose proposed quota or expiry is already exhausted. Check against
+		// local and every upstream direction before changing the enable flag.
+		key := transferEmailKey(email)
+		if err := rejectNegativeTrafficEvidence(tx, []string{key}); err != nil {
+			return err
+		}
+		var rows []xray.ClientTraffic
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("LOWER(TRIM(email)) = ?", key).Find(&rows).Error; err != nil {
+			return err
+		}
+		if len(rows) > 1 {
+			return errors.New("ambiguous client traffic requires reconciliation before enabling")
+		}
+		if len(rows) == 1 {
+			up, down := rows[0].Up, rows[0].Down
+			var globals []model.ClientGlobalTraffic
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("LOWER(TRIM(email)) = ?", key).Find(&globals).Error; err != nil {
+				return err
+			}
+			for _, global := range globals {
+				up, down = max(up, global.Up), max(down, global.Down)
+			}
+			if !rows[0].Enable && (localTrafficDepleted(client.TotalGB, up, down) || (client.ExpiryTime > 0 && client.ExpiryTime <= time.Now().UnixMilli())) {
+				return errors.New("client quota or expiry exhausted; cannot enable")
+			}
+		}
+	}
 	result := tx.Model(xray.ClientTraffic{}).
 		Where("LOWER(TRIM(email)) = LOWER(?)", strings.TrimSpace(email)).
 		Updates(map[string]any{
