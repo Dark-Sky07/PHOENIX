@@ -320,3 +320,31 @@ func TestPPPRealCollectorFencesUntrackedRuntime(t *testing.T) {
 		t.Fatal("orphan marker did not survive lost process state")
 	}
 }
+
+func TestPPPHookIncidentRequiresReviewAfterFileRemoved(t *testing.T) {
+	setupIntegrationDB(t)
+	bin := t.TempDir()
+	t.Setenv("XUI_BIN_FOLDER", bin)
+	dir := filepath.Join(bin, "pppvpn", "sessions", "pptp-7")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "hook-error.test")
+	if err := os.WriteFile(path, []byte("conflict"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	state := &pppPollState{}
+	if _, _, err := collectAndCommitPPP(state, pppvpn.CollectTraffic, nil, pppvpn.AckTraffic); err == nil || !state.requiresReview {
+		t.Fatalf("hook incident did not fence: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := collectAndCommitPPP(state, pppvpn.CollectTraffic, nil, pppvpn.AckTraffic); err == nil {
+		t.Fatal("hook incident auto-cleared")
+	}
+	if unlock, err := service.LockResellerAllocation(); err == nil {
+		unlock()
+		t.Fatal("hook marker not retained")
+	}
+}

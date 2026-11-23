@@ -70,7 +70,7 @@ func collectAndCommitPPP(state *pppPollState, collect func() (*pppvpn.TrafficBat
 	if state.requiresReview {
 		state.unlock()
 		state.unlock = nil
-		return false, false, errors.New("PPP untracked runtime requires manual reconciliation; poll marker retained")
+		return false, false, errors.New("PPP runtime or hook incident requires manual reconciliation; poll marker retained")
 	}
 	if state.deleteUncertain {
 		// The delete may have committed despite returning an error. Do not
@@ -84,7 +84,8 @@ func collectAndCommitPPP(state *pppPollState, collect func() (*pppvpn.TrafficBat
 	batch, err := collect()
 	if err != nil {
 		var orphan *pppvpn.UntrackedRuntimeError
-		if errors.As(err, &orphan) {
+		var hookIncident *pppvpn.HookIncidentError
+		if errors.As(err, &orphan) || errors.As(err, &hookIncident) {
 			state.requiresReview = true
 		}
 		release()

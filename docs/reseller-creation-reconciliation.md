@@ -973,3 +973,18 @@ before observation or if evidence/DB writes both fail; absent directories do
 not prove an orphan or unpolled usage is absent. This is not a child-process
 termination or final-accounting guarantee, nor does it resolve interface reuse
 or the ordering of old and new ip-up/ip-down hooks.
+
+SSTP/PPTP hook records now bind an active session to the pppd parent PID,
+process start time, boot ID, and Linux interface index. Hooks require `flock`
+and serialize updates per interface; an ip-up cannot replace an existing
+active record, and an ip-down with a different owner, peer, or interface index
+cannot delete it. Hook failures after creation of the session directory leave a
+visible incident; its observation retains a local warning and the collector's
+shared poll marker for manual review. Active legacy seven-field records lack
+this identity and now block polling rather than being silently adopted; closed
+legacy records remain readable. Check and reconcile those sessions during
+upgrade. Directory/index checks before and after sampling reduce interface reuse
+risk but do not prove that bytes between polls were captured, that hooks always
+ran, that interface indices can never be reused, or that a pppd child drained.
+Failures before the hook can create evidence, uncooperative old hooks, and the
+interval before another host observes a marker remain outside this protection.

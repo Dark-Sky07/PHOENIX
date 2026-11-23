@@ -1,9 +1,11 @@
 package pppvpn
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -254,5 +256,130 @@ func TestReadPPPSessionRejectsExtraRecords(t *testing.T) {
 	}
 	if _, err := readPPPSession(path); err == nil {
 		t.Fatal("extra record ignored")
+	}
+}
+
+func TestTrafficHooksFenceInterfaceReuseAndOwnerMismatch(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux PPP hooks")
+	}
+	if _, err := exec.LookPath("flock"); err != nil {
+		t.Skip("flock not installed")
+	}
+	root := setupTrafficTest(t)
+	dir := filepath.Join(root, "sessions", "pptp-7")
+	up, down := filepath.Join(t.TempDir(), "up"), filepath.Join(t.TempDir(), "down")
+	for path, script := range map[string]string{up: renderTrafficHook(dir, 7, false), down: renderTrafficHook(dir, 7, true)} {
+		if err := os.WriteFile(path, []byte(script), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run := func(script string) error {
+		cmd := exec.Command(script)
+		cmd.Env = append(os.Environ(), "IFNAME=lo", "PEERNAME=alice", fmt.Sprintf("PPPD_PID=%d", os.Getpid()))
+		return cmd.Run()
+	}
+	if err := run(up); err != nil {
+		t.Fatalf("ip-up: %v", err)
+	}
+	active := filepath.Join(dir, "lo")
+	original, err := os.ReadFile(active)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := run(up); err == nil {
+		t.Fatal("second up overwrote active session")
+	}
+	if got, err := os.ReadFile(active); err != nil || string(got) != string(original) {
+		t.Fatalf("active replaced: %q %v", got, err)
+	}
+	if _, err := CollectTraffic(); err == nil {
+		t.Fatal("collision incident was ignored")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "hook-error.") {
+			if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	fields := strings.Split(strings.TrimSpace(string(original)), "\t")
+	if len(fields) != 9 {
+		t.Fatalf("unexpected record: %q", original)
+	}
+	fields[7] += "-old"
+	if err := os.WriteFile(active, []byte(strings.Join(fields, "\t")+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(down); err == nil {
+		t.Fatal("down accepted another owner's session")
+	}
+	if got, err := os.ReadFile(active); err != nil || !strings.Contains(string(got), "-old") {
+		t.Fatalf("mismatched active removed: %q %v", got, err)
+	}
+}
+
+func TestTrafficHooksNormalSessionPreservesOwnerAndFinalCounters(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux PPP hooks")
+	}
+	if _, err := exec.LookPath("flock"); err != nil {
+		t.Skip("flock not installed")
+	}
+	root := setupTrafficTest(t)
+	dir := filepath.Join(root, "sessions", "pptp-7")
+	paths := []string{filepath.Join(t.TempDir(), "up"), filepath.Join(t.TempDir(), "down")}
+	for i, path := range paths {
+		if err := os.WriteFile(path, []byte(renderTrafficHook(dir, 7, i == 1)), 0700); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(path)
+		cmd.Env = append(os.Environ(), "IFNAME=lo", "PEERNAME=alice", fmt.Sprintf("PPPD_PID=%d", os.Getpid()))
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("hook %d: %v %s", i, err, output)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "lo")); !os.IsNotExist(err) {
+		t.Fatalf("active record remained: %v", err)
+	}
+	batch, err := CollectTraffic()
+	if err != nil || len(batch.Clients) != 1 || len(batch.ClosedSessionIDs) != 1 {
+		t.Fatalf("closed session: %+v %v", batch, err)
+	}
+	if err := AckTraffic(batch.Token); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLegacyActiveAndWrongInterfaceGenerationFailClosed(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux sysfs")
+	}
+	root := setupTrafficTest(t)
+	dir := filepath.Join(root, "sessions", "pptp-7")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "lo")
+	if err := os.WriteFile(path, []byte("active\tlo\talice\t0\t0\told\t7\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CollectTraffic(); err == nil {
+		t.Fatal("legacy active session silently accepted")
+	}
+	index, err := readCounter("/sys/class/net/lo/ifindex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := fmt.Sprintf("active\tlo\talice\t0\t0\tnew\t7\towner\t%d\n", index+1)
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CollectTraffic(); err == nil {
+		t.Fatal("reused interface silently accepted")
 	}
 }

@@ -137,33 +137,67 @@ PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 iface="${IFNAME:-${1:-}}"
 peer="${PEERNAME:-}"
-case "$iface" in ''|*[!A-Za-z0-9_.-]*) exit 0 ;; esac
+case "$iface" in ''|.|..|*[!A-Za-z0-9_.-]*) exit 1 ;; esac
 session_dir=%s
 mkdir -p "$session_dir"
 chmod 700 "$session_dir"
+# Every unexpected failure after this point leaves a visible, deliberately
+# unparseable incident for the panel collector to fence and an operator to review.
+incident() {
+  code=$?
+  trap - EXIT
+  if [ "$code" -ne 0 ]; then
+    file=$(mktemp "$session_dir/hook-error.XXXXXXXXXX") || exit "$code"
+    printf 'PPP hook failure: %%s interface %%s\n' '%s' "$iface" > "$file" || true
+  fi
+  exit "$code"
+}
+trap incident EXIT
+mkdir -p "$session_dir/.hook-locks"
+exec 9>"$session_dir/.hook-locks/$iface"
+flock -x -w 5 9
 active_file="$session_dir/$iface"
+# PPPD_PID is supplied by pppd. A reused PID alone is not a session identity:
+# require this hook to be its child and include boot ID and process start time.
+pid="${PPPD_PID:-}"
+case "$pid" in ''|*[!0-9]*) exit 1 ;; esac
+[ "$pid" = "$PPID" ] || exit 1
+boot=$(cat /proc/sys/kernel/random/boot_id)
+start=$(sed 's/^.*) //' "/proc/$pid/stat" | awk '{print $20}')
+case "$start" in ''|*[!0-9]*) exit 1 ;; esac
+owner="$boot:$pid:$start"
+ifindex=$(cat "/sys/class/net/$iface/ifindex")
+case "$ifindex" in ''|*[!0-9]*) exit 1 ;; esac
 rx=0
 tx=0
 if [ '%s' = closed ]; then
+  [ -f "$active_file" ] || exit 1
+  saved_peer=$(cut -f3 "$active_file")
+  session_id=$(cut -f6 "$active_file")
+  saved_owner=$(cut -f8 "$active_file")
+  saved_ifindex=$(cut -f9 "$active_file")
+  [ -n "$session_id" ] && [ "$saved_owner" = "$owner" ] && [ "$saved_ifindex" = "$ifindex" ] || exit 1
+  [ -z "$peer" ] || [ "$peer" = "$saved_peer" ] || exit 1
+  peer="$saved_peer"
   rx=$(cat "/sys/class/net/$iface/statistics/rx_bytes")
   tx=$(cat "/sys/class/net/$iface/statistics/tx_bytes")
-fi
-if [ '%s' = closed ]; then
-  [ -n "$peer" ] || peer=$(cut -f3 "$active_file" 2>/dev/null || true)
-  session_id=$(cut -f6 "$active_file" 2>/dev/null || true)
-  [ -n "$session_id" ] || session_id="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || printf '%%s-%%s-%%s' "$iface" "$$" "$(date +%%s)")"
+  [ "$(cat "/sys/class/net/$iface/ifindex")" = "$ifindex" ] || exit 1
   session_file="$session_dir/$iface.closed.$session_id"
+  # Existing closed evidence must not be overwritten.
+  [ ! -e "$session_file" ] || exit 1
 else
-  case "$peer" in '') exit 0 ;; esac
-  session_id=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || printf '%%s-%%s-%%s' "$iface" "$$" "$(date +%%s)")
+  [ -n "$peer" ] && [ ! -e "$active_file" ] || exit 1
+  session_id=$(cat /proc/sys/kernel/random/uuid)
   session_file="$active_file"
 fi
-case "$peer" in '') exit 0 ;; esac
 tmp="$session_file.tmp.$$"
-printf '%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\n' '%s' "$iface" "$peer" "$rx" "$tx" "$session_id" '%d' > "$tmp"
+printf '%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\n' '%s' "$iface" "$peer" "$rx" "$tx" "$session_id" '%d' "$owner" "$ifindex" > "$tmp"
 chmod 600 "$tmp"
-mv -f "$tmp" "$session_file"
-if [ '%s' = closed ]; then rm -f "$active_file"; fi
+# Link is atomic and refuses to replace an existing record.
+ln "$tmp" "$session_file"
+rm -f "$tmp"
+if [ '%s' = closed ]; then rm "$active_file"; fi
+trap - EXIT
 `, shellQuote(sessionDir), state, state, state, inboundID, state)
 }
 

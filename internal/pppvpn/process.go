@@ -75,6 +75,21 @@ func (p *Process) Start(i Instance, configPath string) error {
 	if err != nil {
 		return err
 	}
+	if runtime.GOOS == "linux" {
+		// The hooks intentionally use a fixed PATH, not the panel's PATH.
+		// Test those exact locations so a different executable in the panel
+		// environment cannot satisfy startup while hooks cannot find flock.
+		found := false
+		for _, dir := range []string{"/usr/sbin", "/usr/bin", "/sbin", "/bin"} {
+			if _, err := exec.LookPath(filepath.Join(dir, "flock")); err == nil {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return errors.New("pppvpn: flock is required for accounting hooks")
+		}
+	}
 	var cmd *exec.Cmd
 	if i.Protocol == PPTP {
 		cmd = exec.Command(bin, "--fg", "--conf", configPath)

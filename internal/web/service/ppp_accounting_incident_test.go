@@ -164,3 +164,26 @@ func TestPPPOrphanBlocksQuotaAndLeavesEvidence(t *testing.T) {
 		t.Fatalf("missing local evidence: %v", err)
 	}
 }
+
+func TestPPPHookIncidentBlocksQuotaAndSurvivesFileRemoval(t *testing.T) {
+	reseller, _ := seedResellerRenewal(t)
+	bin := t.TempDir()
+	t.Setenv("XUI_BIN_FOLDER", bin)
+	dir := filepath.Join(bin, "pppvpn", "sessions", "pptp-1")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "hook-error.123")
+	if err := os.WriteFile(path, []byte("uncertain"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&ResellerService{}).CheckTrafficQuota(&reseller, 1); err == nil {
+		t.Fatal("hook incident did not block quota")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&ResellerService{}).CheckTrafficQuota(&reseller, 1); err == nil {
+		t.Fatal("hook incident removal bypassed evidence")
+	}
+}

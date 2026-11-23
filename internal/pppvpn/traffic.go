@@ -28,6 +28,28 @@ type closedSample struct {
 	session pppSession
 }
 
+// HookIncidentError reports a durable warning emitted by the hook. Its removal
+// alone is not proof that counters or session ownership were reconciled.
+type HookIncidentError struct{ Path string }
+
+func (e *HookIncidentError) Error() string {
+	return fmt.Sprintf("pppvpn: hook incident %q requires manual review", e.Path)
+}
+
+// CheckHookIncidents observes visible hook warnings without touching them.
+func CheckHookIncidents() error {
+	paths, err := readSessionPaths()
+	if err != nil {
+		return err
+	}
+	for _, path := range paths {
+		if strings.HasPrefix(filepath.Base(path), "hook-error.") {
+			return &HookIncidentError{Path: path}
+		}
+	}
+	return nil
+}
+
 type pppSession struct {
 	iface     string
 	email     string
@@ -35,6 +57,8 @@ type pppSession struct {
 	tx        uint64
 	sessionID string
 	inboundID int
+	owner     string
+	ifindex   uint64
 	closed    bool
 }
 
@@ -67,6 +91,9 @@ func CollectTraffic() (*TrafficBatch, error) {
 	batch := &TrafficBatch{}
 	for _, path := range files {
 		name := filepath.Base(path)
+		if strings.HasPrefix(name, "hook-error.") {
+			return nil, &HookIncidentError{Path: path}
+		}
 		if strings.HasPrefix(name, ".") {
 			continue
 		}
@@ -86,7 +113,7 @@ func CollectTraffic() (*TrafficBatch, error) {
 			return nil, fmt.Errorf("pppvpn: active session in claim %q requires manual review", path)
 		}
 		if !session.closed {
-			session.rx, session.tx, err = readInterfaceBytes(session.iface)
+			session.rx, session.tx, err = readInterfaceBytes(session.iface, session.ifindex)
 			if err != nil {
 				return nil, fmt.Errorf("pppvpn: cannot read active interface %q: %w", session.iface, err)
 			}
@@ -132,6 +159,14 @@ func readSessionPaths() ([]string, error) {
 			return nil, fmt.Errorf("pppvpn: read session group %q: %w", group.Name(), err)
 		}
 		for _, entry := range entries {
+			// Hook lock files persist so concurrent hooks never lock different
+			// inodes. The private directory is not an accounting spool.
+			if entry.Name() == ".hook-locks" {
+				if !entry.IsDir() {
+					return nil, fmt.Errorf("pppvpn: invalid hook lock directory %q", dir)
+				}
+				continue
+			}
 			if entry.IsDir() {
 				return nil, fmt.Errorf("pppvpn: unexpected session directory %q", entry.Name())
 			}
@@ -285,7 +320,7 @@ func readPPPSession(path string) (pppSession, error) {
 		return pppSession{}, err
 	}
 	fields := strings.Split(line, "\t")
-	if len(fields) != 7 || (fields[0] != "active" && fields[0] != "closed") || fields[1] == "" || fields[2] == "" || fields[5] == "" {
+	if (len(fields) != 7 && len(fields) != 9) || (fields[0] != "active" && fields[0] != "closed") || fields[1] == "" || fields[2] == "" || fields[5] == "" {
 		return pppSession{}, errors.New("pppvpn: malformed session record")
 	}
 	rx, err := strconv.ParseUint(fields[3], 10, 64)
@@ -300,20 +335,52 @@ func readPPPSession(path string) (pppSession, error) {
 	if err != nil || inboundID <= 0 {
 		return pppSession{}, errors.New("pppvpn: invalid inbound id in session record")
 	}
-	return pppSession{iface: fields[1], email: fields[2], rx: rx, tx: tx, sessionID: fields[5], inboundID: inboundID, closed: fields[0] == "closed"}, nil
+	var owner string
+	var ifindex uint64
+	if len(fields) == 9 {
+		owner = fields[7]
+		ifindex, err = strconv.ParseUint(fields[8], 10, 64)
+		if err != nil || ifindex == 0 || owner == "" {
+			return pppSession{}, errors.New("pppvpn: invalid session owner or interface generation")
+		}
+	} else if fields[0] == "active" {
+		return pppSession{}, errors.New("pppvpn: legacy active session has no interface generation; manual review required")
+	}
+	return pppSession{iface: fields[1], email: fields[2], rx: rx, tx: tx, sessionID: fields[5], inboundID: inboundID, owner: owner, ifindex: ifindex, closed: fields[0] == "closed"}, nil
 }
 
-func readInterfaceBytes(iface string) (uint64, uint64, error) {
+func readInterfaceBytes(iface string, expected uint64) (uint64, uint64, error) {
 	if strings.ContainsAny(iface, "/\\\x00") || iface == "." || iface == ".." {
 		return 0, 0, errors.New("pppvpn: invalid interface name")
 	}
-	base := filepath.Join("/sys/class/net", iface, "statistics")
+	dir := filepath.Join("/sys/class/net", iface)
+	if expected == 0 {
+		return 0, 0, errors.New("pppvpn: missing interface generation")
+	}
+	index, err := readCounter(filepath.Join(dir, "ifindex"))
+	if err != nil {
+		return 0, 0, err
+	}
+	if index != expected {
+		return 0, 0, errors.New("pppvpn: interface generation changed")
+	}
+	base := filepath.Join(dir, "statistics")
 	rx, err := readCounter(filepath.Join(base, "rx_bytes"))
 	if err != nil {
 		return 0, 0, err
 	}
 	tx, err := readCounter(filepath.Join(base, "tx_bytes"))
-	return rx, tx, err
+	if err != nil {
+		return 0, 0, err
+	}
+	index, err = readCounter(filepath.Join(dir, "ifindex"))
+	if err != nil {
+		return 0, 0, err
+	}
+	if index != expected {
+		return 0, 0, errors.New("pppvpn: interface generation changed during sampling")
+	}
+	return rx, tx, nil
 }
 
 func readCounter(path string) (uint64, error) {

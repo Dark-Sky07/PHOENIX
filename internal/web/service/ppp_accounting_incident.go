@@ -38,15 +38,19 @@ func notePPPIncidentWrite(key string, done bool, failed bool) {
 const pppEvidenceDir = "ppp-accounting-evidence"
 
 func localPPPAccountingIncident() error {
-	if observation := pppvpn.GetManager().CheckUntrackedRuntime(); observation != nil {
+	observation := pppvpn.GetManager().CheckUntrackedRuntime()
+	if observation == nil {
+		observation = pppvpn.CheckHookIncidents()
+	}
+	if observation != nil {
 		detail := observation.Error()
 		notePPPIncidentWrite(detail, false, false)
 		err := persistAccountingEvidence(pppEvidenceDir, detail)
 		notePPPIncidentWrite(detail, true, err != nil)
 		if err != nil {
-			return fmt.Errorf("PPP untracked runtime requires manual reconciliation; persist evidence: %w", err)
+			return fmt.Errorf("PPP runtime or hook incident requires manual reconciliation; persist evidence: %w", err)
 		}
-		return errors.New("PPP untracked runtime requires manual reconciliation")
+		return errors.New("PPP runtime or hook incident requires manual reconciliation")
 	}
 	if pppIncidentPending.Load() {
 		return errors.New("PPP accounting incident persistence pending; reconciliation required")
