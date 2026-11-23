@@ -1,8 +1,10 @@
 package job
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Dark-Sky07/phoenix/internal/database"
@@ -13,7 +15,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func TestTuicShutdownWithForeignMarkerDoesNotConsumePendingTraffic(t *testing.T) {
+func TestTuicShutdownWithForeignMarkerPreservesManualEvidence(t *testing.T) {
 	setupIntegrationDB(t)
 	mgr := tuic.GetManager()
 	mgr.StopAll()
@@ -31,8 +33,51 @@ func TestTuicShutdownWithForeignMarkerDoesNotConsumePendingTraffic(t *testing.T)
 		t.Fatalf("foreign marker was lost: %v", err)
 	}
 	_, deltas := mgr.CollectAllTraffic()
-	if len(deltas) != 1 || deltas[0].Up != 17 {
-		t.Fatalf("unaccounted traffic was consumed: %+v", deltas)
+	if len(deltas) != 0 {
+		t.Fatalf("journaled traffic remains in memory: %+v", deltas)
+	}
+	entries, err := os.ReadDir(tuicJournalDir())
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("manual journal missing: %+v %v", entries, err)
+	}
+	if filepath.Ext(entries[0].Name()) != ".manual" {
+		t.Fatalf("manual evidence could be replayed by an older binary: %s", entries[0].Name())
+	}
+	data, err := readXrayJournal(tuicJournalDir(), entries[0].Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var batch tuicTrafficBatch
+	if err := json.Unmarshal(data, &batch); err != nil || !batch.ManualReview || len(batch.Deltas) != 1 || batch.Deltas[0].Up != 17 {
+		t.Fatalf("incorrect manual evidence: %+v %v", batch, err)
+	}
+	if err := service.FinishXrayPoll(id); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewTuicJob().replayTuicJournal(); err == nil {
+		t.Fatal("manual evidence was automatically replayed")
+	}
+	if _, err := os.Stat(filepath.Join(tuicJournalDir(), entries[0].Name())); err != nil {
+		t.Fatalf("manual evidence was removed: %v", err)
+	}
+}
+
+func TestTuicShutdownEvidenceWriteFailureRequeues(t *testing.T) {
+	setupIntegrationDB(t)
+	mgr := tuic.GetManager()
+	mgr.StopAll()
+	mgr.CollectAllTraffic()
+	t.Cleanup(func() { mgr.StopAll(); mgr.CollectAllTraffic() })
+	mgr.RequeueClientTraffic([]tuic.ClientTrafficDelta{{Email: "write-failure@example.test", TrafficID: 42, Up: 23}})
+	if err := os.WriteFile(tuicJournalDir(), []byte("not a directory"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewTuicJob().StopAndFlushTraffic(); err == nil || !strings.Contains(err.Error(), "preserve TUIC shutdown evidence") {
+		t.Fatalf("shutdown did not report evidence write failure: %v", err)
+	}
+	_, deltas := mgr.CollectAllTraffic()
+	if len(deltas) != 1 || deltas[0].Up != 23 {
+		t.Fatalf("failed journal write did not requeue traffic: %+v", deltas)
 	}
 }
 

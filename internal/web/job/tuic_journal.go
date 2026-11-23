@@ -21,9 +21,10 @@ import (
 var tuicJournalMu sync.Mutex
 
 type tuicTrafficBatch struct {
-	ID         string                    `json:"id"`
-	Deltas     []tuic.ClientTrafficDelta `json:"deltas"`
-	PollMarker bool                      `json:"pollMarker,omitempty"`
+	ID           string                    `json:"id"`
+	Deltas       []tuic.ClientTrafficDelta `json:"deltas"`
+	PollMarker   bool                      `json:"pollMarker,omitempty"`
+	ManualReview bool                      `json:"manualReview,omitempty"`
 }
 
 func tuicJournalDir() string { return service.TuicTrafficJournalDir() }
@@ -84,6 +85,11 @@ func storeTuicBatch(batch tuicTrafficBatch) (string, error) {
 		return "", fmt.Errorf("TUIC batch exceeds journal size limit")
 	}
 	name := batch.ID + ".json"
+	if batch.ManualReview {
+		// Older binaries reject unknown entries instead of replaying a batch
+		// whose ownership was never captured behind an allocation fence.
+		name = batch.ID + ".manual"
+	}
 	path := filepath.Join(dir, name)
 	if err := verifyStoredTuicBatch(dir, name, batch); err == nil {
 		return path, syncJournalDir(dir)
@@ -146,6 +152,9 @@ func (j *TuicJob) replayTuicJournal() error {
 		}
 		if !validTuicBatchID(batch.ID) || batch.ID+".json" != entry.Name() {
 			return fmt.Errorf("TUIC journal batch ID mismatch")
+		}
+		if batch.ManualReview {
+			return fmt.Errorf("TUIC journal %s requires manual reconciliation", entry.Name())
 		}
 		if batch.PollMarker {
 			if err := j.recoverCommittedTuicPoll(batch); err != nil {

@@ -1,6 +1,7 @@
 package job
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"sync"
@@ -11,6 +12,7 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/web/service"
 	"github.com/Dark-Sky07/phoenix/internal/web/websocket"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
+	"github.com/google/uuid"
 )
 
 const defaultTuicSpeedSampleInterval = 10 * time.Second
@@ -120,17 +122,30 @@ func tuicSpeedPayload(clientTraffics []*xray.ClientTraffic, sampleInterval time.
 }
 
 // StopAndFlushTraffic fences the shutdown mutation before stopping listeners.
-// Even if accounting cannot proceed, shutdown must still close listeners; in
-// that case drained counters may remain only in memory and the error requires
-// operator reconciliation. A marker is not proof of a complete final drain.
-func (j *TuicJob) StopAndFlushTraffic() error {
+// Even if accounting cannot proceed, shutdown must still close listeners. It
+// preserves a separate manual-review journal where possible, without assuming
+// an ownership snapshot. A marker is not proof of a complete final drain.
+func (j *TuicJob) StopAndFlushTraffic() (resultErr error) {
 	tuicJournalMu.Lock()
 	defer tuicJournalMu.Unlock()
 	mgr := tuic.GetManager()
 	stopped := false
 	defer func() {
-		if !stopped {
-			mgr.StopAll()
+		if stopped {
+			return
+		}
+		mgr.StopAll()
+		_, deltas := mgr.CollectAllTraffic()
+		if len(deltas) == 0 {
+			return
+		}
+		batch := tuicTrafficBatch{ID: uuid.NewString(), Deltas: deltas, ManualReview: true}
+		path, err := storeTuicBatch(batch)
+		if err != nil {
+			if path == "" {
+				mgr.RequeueClientTraffic(deltas)
+			}
+			resultErr = errors.Join(resultErr, fmt.Errorf("preserve TUIC shutdown evidence: %w", err))
 		}
 	}()
 	if sharedTuicPoll.batch != nil {

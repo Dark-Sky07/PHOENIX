@@ -73,8 +73,11 @@ ownership, protect unpolled in-memory traffic against a crash, or retroactively
 bind old TUIC receipts to their payloads. Normal panel shutdown now creates a
 marker before stopping TUIC listeners and commits their collected counters using
 the same receipt path. If prior recovery or marker creation fails, shutdown
-still closes listeners; their counters may then remain only in memory and need
-operator reconciliation. Other runtime mutation paths can still drain sessions
+still closes listeners and attempts to save their drained counters as a `.manual`
+journal requiring operator reconciliation; it is never automatically replayed.
+If publication fails before the file exists, counters are requeued in memory;
+a crash before publication or an uncertain filesystem sync can still lose them.
+The local journal is not visible to other hosts. Other runtime mutation paths can still drain sessions
 outside this barrier. A marker does not prove that connections stopped or all
 final bytes were observed. Enforcement
 following the reconciliation drain may require another reconciliation tick.
