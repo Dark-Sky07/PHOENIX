@@ -156,3 +156,103 @@ func TestCollectTrafficRejectsUninspectableSessionRoot(t *testing.T) {
 		t.Fatal("uninspectable session spool reported empty")
 	}
 }
+
+func TestAckTrafficRetainsReplacementAndRepolls(t *testing.T) {
+	root := setupTrafficTest(t)
+	dir := filepath.Join(root, "sessions", "pptp-7")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "ppp0.closed.session")
+	if err := os.WriteFile(path, []byte("closed\tppp0\talice\t10\t20\tsession\t7\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	batch, err := CollectTraffic()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Like ip-down, replace the file atomically after the old sample was read.
+	tmp := filepath.Join(dir, "replacement")
+	if err := os.WriteFile(tmp, []byte("closed\tppp0\talice\t30\t40\tsession\t7\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := AckTraffic(batch.Token); err == nil {
+		t.Fatal("changed session was acknowledged")
+	}
+	// Simulate panel restart: claimed records must be rediscovered without memory.
+	trafficCollector = pppTrafficCollector{}
+	retry, err := CollectTraffic()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(retry.Clients) != 1 || retry.Clients[0].PPPRxBytes != 30 || retry.Clients[0].PPPTxBytes != 40 {
+		t.Fatalf("replacement not recovered: %+v", retry.Clients)
+	}
+	if err := AckTraffic(retry.Token); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAckTrafficRetainsMalformedReplacement(t *testing.T) {
+	root := setupTrafficTest(t)
+	dir := filepath.Join(root, "sessions", "pptp-7")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "ppp0.closed.session")
+	if err := os.WriteFile(path, []byte("closed\tppp0\talice\t10\t20\tsession\t7\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	batch, err := CollectTraffic()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("incomplete"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := AckTraffic(batch.Token); err == nil {
+		t.Fatal("malformed replacement acknowledged")
+	}
+	trafficCollector = pppTrafficCollector{}
+	if _, err := CollectTraffic(); err == nil {
+		t.Fatal("malformed claim ignored after restart")
+	}
+}
+
+func TestAckTrafficRejectsActiveReplacementInClaim(t *testing.T) {
+	root := setupTrafficTest(t)
+	dir := filepath.Join(root, "sessions", "pptp-7")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "ppp0.closed.session")
+	if err := os.WriteFile(path, []byte("closed\tppp0\talice\t10\t20\tsession\t7\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	batch, err := CollectTraffic()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("active\tlo\talice\t0\t0\tnew-session\t7\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := AckTraffic(batch.Token); err == nil {
+		t.Fatal("active replacement acknowledged")
+	}
+	if _, err := CollectTraffic(); err == nil {
+		t.Fatal("active staged record silently treated as accounted")
+	}
+}
+
+func TestReadPPPSessionRejectsExtraRecords(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "record")
+	if err := os.WriteFile(path, []byte("closed\tppp0\talice\t10\t20\tsession\t7\nextra\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readPPPSession(path); err == nil {
+		t.Fatal("extra record ignored")
+	}
+}

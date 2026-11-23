@@ -20,7 +20,12 @@ type TrafficBatch struct {
 	Clients          []*xray.ClientTraffic
 	ClosedSessionIDs []string
 	Token            uint64
-	closed           []string
+	closed           []closedSample
+}
+
+type closedSample struct {
+	path    string
+	session pppSession
 }
 
 type pppSession struct {
@@ -73,6 +78,10 @@ func CollectTraffic() (*TrafficBatch, error) {
 		if readErr != nil {
 			return nil, fmt.Errorf("pppvpn: cannot read session record %q: %w", path, readErr)
 		}
+		stagedRoot := filepath.Join(rootDir(), "sessions-staged") + string(os.PathSeparator)
+		if strings.HasPrefix(path, stagedRoot) && !session.closed {
+			return nil, fmt.Errorf("pppvpn: active session in claim %q requires manual review", path)
+		}
 		if !session.closed {
 			session.rx, session.tx, err = readInterfaceBytes(session.iface)
 			if err != nil {
@@ -91,7 +100,7 @@ func CollectTraffic() (*TrafficBatch, error) {
 			PPPTxBytes:   int64(session.tx),
 		})
 		if session.closed {
-			batch.closed = append(batch.closed, path)
+			batch.closed = append(batch.closed, closedSample{path: path, session: session})
 			batch.ClosedSessionIDs = append(batch.ClosedSessionIDs, session.sessionID)
 		}
 	}
@@ -106,10 +115,7 @@ func CollectTraffic() (*TrafficBatch, error) {
 func readSessionPaths() ([]string, error) {
 	root := filepath.Join(rootDir(), "sessions")
 	groups, err := os.ReadDir(root)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("pppvpn: read session directory: %w", err)
 	}
 	var paths []string
@@ -129,6 +135,29 @@ func readSessionPaths() ([]string, error) {
 			paths = append(paths, filepath.Join(dir, entry.Name()))
 		}
 	}
+	// Claimed records are kept outside hook-controlled session directories.
+	// A crash or mismatch leaves them visible for a later idempotent poll.
+	staged := filepath.Join(rootDir(), "sessions-staged")
+	claims, err := os.ReadDir(staged)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("pppvpn: read staged sessions: %w", err)
+	}
+	for _, claim := range claims {
+		if !claim.IsDir() {
+			return nil, fmt.Errorf("pppvpn: invalid staged session %q", claim.Name())
+		}
+		dir := filepath.Join(staged, claim.Name())
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return nil, fmt.Errorf("pppvpn: read session claim: %w", err)
+		}
+		for _, entry := range entries {
+			if entry.Name() != "record" || entry.IsDir() {
+				return nil, fmt.Errorf("pppvpn: invalid session claim entry %q", entry.Name())
+			}
+			paths = append(paths, filepath.Join(dir, entry.Name()))
+		}
+	}
 	return paths, nil
 }
 
@@ -141,23 +170,88 @@ func AckTraffic(token uint64) error {
 		return errors.New("pppvpn: stale traffic batch acknowledgement")
 	}
 	var ackErr error
-	for _, path := range trafficCollector.pending.closed {
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) && ackErr == nil {
-			ackErr = fmt.Errorf("pppvpn: remove completed session record: %w", err)
+	for _, sample := range trafficCollector.pending.closed {
+		if err := acknowledgeClosedSample(sample); err != nil {
+			ackErr = errors.Join(ackErr, err)
 		}
 	}
-	// DB persistence succeeded before AckTraffic. If cleanup fails, the same
-	// absolute counters are safe to submit again because their DB checkpoints
-	// were committed atomically with the last usage update.
+	// Failed or changed records remain visible for the next idempotent poll.
 	trafficCollector.pending = nil
 	return ackErr
+}
+
+// Move a path into a private claim before comparing it to the committed sample.
+// Hooks only write in sessions/<group>, never under sessions-staged. This avoids
+// a check-then-unlink race with an atomic hook replacement at the original path.
+// The claim is retained on any error, including a different or malformed record.
+func acknowledgeClosedSample(sample closedSample) error {
+	staged := filepath.Join(rootDir(), "sessions-staged")
+	if err := os.MkdirAll(staged, 0700); err != nil {
+		return fmt.Errorf("pppvpn: create claim directory: %w", err)
+	}
+	if err := syncPPPDirectory(rootDir()); err != nil {
+		return err
+	}
+	dir, err := os.MkdirTemp(staged, "claim-")
+	if err != nil {
+		return fmt.Errorf("pppvpn: create session claim: %w", err)
+	}
+	if err := syncPPPDirectory(staged); err != nil {
+		return err
+	}
+	claimed := filepath.Join(dir, "record")
+	if err := os.Rename(sample.path, claimed); err != nil {
+		return fmt.Errorf("pppvpn: claim session record %q: %w", sample.path, err)
+	}
+	if err := syncPPPDirectory(dir); err != nil {
+		return err
+	}
+	if err := syncPPPDirectory(filepath.Dir(sample.path)); err != nil {
+		return err
+	}
+	current, err := readPPPSession(claimed)
+	if err != nil {
+		return fmt.Errorf("pppvpn: inspect claimed session %q: %w", claimed, err)
+	}
+	if current != sample.session {
+		return fmt.Errorf("pppvpn: session changed before acknowledgement; retained %q", claimed)
+	}
+	if err := os.Remove(claimed); err != nil {
+		return fmt.Errorf("pppvpn: remove committed session claim: %w", err)
+	}
+	if err := syncPPPDirectory(dir); err != nil {
+		return err
+	}
+	if err := os.Remove(dir); err != nil {
+		return fmt.Errorf("pppvpn: remove empty session claim: %w", err)
+	}
+	if err := syncPPPDirectory(staged); err != nil {
+		return err
+	}
+	return nil
+}
+
+func syncPPPDirectory(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("pppvpn: open directory for sync: %w", err)
+	}
+	err = f.Sync()
+	closeErr := f.Close()
+	if err != nil {
+		return fmt.Errorf("pppvpn: sync directory: %w", err)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("pppvpn: close directory: %w", closeErr)
+	}
+	return nil
 }
 
 func cloneTrafficBatch(batch *TrafficBatch) *TrafficBatch {
 	if batch == nil {
 		return nil
 	}
-	copyBatch := &TrafficBatch{Token: batch.Token, Clients: make([]*xray.ClientTraffic, 0, len(batch.Clients)), ClosedSessionIDs: append([]string(nil), batch.ClosedSessionIDs...), closed: append([]string(nil), batch.closed...)}
+	copyBatch := &TrafficBatch{Token: batch.Token, Clients: make([]*xray.ClientTraffic, 0, len(batch.Clients)), ClosedSessionIDs: append([]string(nil), batch.ClosedSessionIDs...), closed: append([]closedSample(nil), batch.closed...)}
 	for _, client := range batch.Clients {
 		if client != nil {
 			copyClient := *client
@@ -180,7 +274,14 @@ func readPPPSession(path string) (pppSession, error) {
 		}
 		return pppSession{}, errors.New("pppvpn: empty session record")
 	}
-	fields := strings.Split(scanner.Text(), "\t")
+	line := scanner.Text()
+	if scanner.Scan() {
+		return pppSession{}, errors.New("pppvpn: extra session record data")
+	}
+	if err := scanner.Err(); err != nil {
+		return pppSession{}, err
+	}
+	fields := strings.Split(line, "\t")
 	if len(fields) != 7 || (fields[0] != "active" && fields[0] != "closed") || fields[1] == "" || fields[2] == "" || fields[5] == "" {
 		return pppSession{}, errors.New("pppvpn: malformed session record")
 	}

@@ -2,6 +2,8 @@ package job
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -180,5 +182,95 @@ func TestPPPPollRestoresAmbiguouslyDeletedMarkerBeforeUnlock(t *testing.T) {
 	if u, err := service.LockResellerAllocation(); err == nil {
 		u()
 		t.Fatal("allocation bypassed restored marker")
+	}
+}
+
+func TestPPPPollAckFailureRetainsMarkerUntilRepoll(t *testing.T) {
+	setupIntegrationDB(t)
+	state := &pppPollState{}
+	collects, acks := 0, 0
+	collect := func() (*pppvpn.TrafficBatch, error) {
+		collects++
+		return &pppvpn.TrafficBatch{Token: uint64(collects)}, nil
+	}
+	ack := func(uint64) error {
+		acks++
+		if acks == 1 {
+			return errors.New("replacement detected")
+		}
+		return nil
+	}
+	if _, _, err := collectAndCommitPPP(state, collect, nil, ack); err == nil || state.marker == "" || state.unlock != nil {
+		t.Fatalf("ack failure did not retain fence: %v", err)
+	}
+	if unlock, err := service.LockResellerAllocation(); err == nil {
+		unlock()
+		t.Fatal("allocation bypassed uncertain acknowledgement")
+	}
+	if _, _, err := collectAndCommitPPP(state, collect, nil, ack); err != nil {
+		t.Fatal(err)
+	}
+	if state.marker != "" || collects != 2 || acks != 2 {
+		t.Fatalf("retry did not finish: %d %d", collects, acks)
+	}
+}
+
+func TestPPPPollRecoversHookReplacementAfterCommittedBatch(t *testing.T) {
+	setupIntegrationDB(t)
+	bin := t.TempDir()
+	t.Setenv("XUI_BIN_FOLDER", bin)
+	dir := filepath.Join(bin, "pppvpn", "sessions", "pptp-7")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "ppp0.closed.session")
+	if err := os.WriteFile(path, []byte("closed\tppp0\tppp-replace@example.test\t10\t20\tsession\t7\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	db := database.GetDB()
+	client := model.ClientRecord{Email: "ppp-replace@example.test", Enable: true}
+	row := xray.ClientTraffic{Email: client.Email, Enable: true}
+	for _, item := range []any{&client, &row} {
+		if err := db.Create(item).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	state := &pppPollState{}
+	t.Cleanup(func() {
+		if state.unlock != nil {
+			state.unlock()
+		}
+	})
+	svc := &service.InboundService{}
+	first := true
+	apply := func(marker string, clients []*xray.ClientTraffic) (bool, bool, error) {
+		restart, disabled, err := svc.AddPPPTrafficUnderAllocationLock(marker, clients)
+		if err == nil && first {
+			first = false
+			tmp := filepath.Join(dir, "replacement")
+			if err := os.WriteFile(tmp, []byte("closed\tppp0\tppp-replace@example.test\t30\t40\tsession\t7\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(tmp, path); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return restart, disabled, err
+	}
+	if _, _, err := collectAndCommitPPP(state, pppvpn.CollectTraffic, apply, pppvpn.AckTraffic); err == nil || state.marker == "" {
+		t.Fatalf("replacement did not retain marker: %v", err)
+	}
+	if unlock, err := service.LockResellerAllocation(); err == nil {
+		unlock()
+		t.Fatal("allocation bypassed retained replacement")
+	}
+	if _, _, err := collectAndCommitPPP(state, pppvpn.CollectTraffic, apply, pppvpn.AckTraffic); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.First(&row, row.Id).Error; err != nil || row.Up != 30 || row.Down != 40 {
+		t.Fatalf("replacement accounting: %+v, %v", row, err)
+	}
+	if state.marker != "" {
+		t.Fatal("marker not cleared")
 	}
 }

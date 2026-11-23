@@ -100,16 +100,18 @@ func collectAndCommitPPP(state *pppPollState, collect func() (*pppvpn.TrafficBat
 			return restart, disabled, err
 		}
 	}
+	// A hook can replace a closed record between collection and acknowledgement.
+	// Preserve the fence until cleanup confirms that no changed sample was lost.
+	if err := ack(batch.Token); err != nil {
+		release()
+		return restart, disabled, fmt.Errorf("acknowledge PPP traffic; poll marker %s retained: %w", state.marker, err)
+	}
 	if err := service.FinishXrayPoll(state.marker); err != nil {
 		state.deleteUncertain = true
 		return restart, disabled, fmt.Errorf("clear committed PPP poll marker: %w", err)
 	}
 	state.marker = ""
-	ackErr := ack(batch.Token)
 	release()
-	if ackErr != nil {
-		return restart, disabled, fmt.Errorf("acknowledge PPP traffic: %w", ackErr)
-	}
 	return restart, disabled, nil
 }
 
