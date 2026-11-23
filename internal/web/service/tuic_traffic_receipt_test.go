@@ -60,6 +60,39 @@ func TestTuicBatchRejectsNegativeOnlyCounter(t *testing.T) {
 	}
 }
 
+func TestTuicTrafficRejectsGoNormalizedAmbiguity(t *testing.T) {
+	for _, pair := range [][2]string{{"user@example.test", "\tUSER@example.test\n"}, {"üser@example.test", "ÜSER@example.test"}} {
+		t.Run(pair[0], func(t *testing.T) {
+			setupBulkDB(t)
+			db := database.GetDB()
+			first := xray.ClientTraffic{Email: pair[0], Enable: true}
+			other := xray.ClientTraffic{Email: pair[1], Enable: true}
+			for _, row := range []*xray.ClientTraffic{&first, &other} {
+				if err := db.Create(row).Error; err != nil {
+					t.Fatal(err)
+				}
+			}
+			service := &InboundService{}
+			batch := []tuic.ClientTrafficDelta{{Email: first.Email, TrafficID: first.Id, Up: 9}}
+			if err := service.AddTuicTrafficBatch("ambiguous-normalized", batch); err == nil {
+				t.Fatal("ambiguous journal destination accepted")
+			}
+			if _, _, err := service.AddTraffic(nil, []*xray.ClientTraffic{{Email: first.Email, TuicTrafficID: first.Id, Up: 9}}); err == nil {
+				t.Fatal("ambiguous live destination accepted")
+			}
+			for _, row := range []*xray.ClientTraffic{&first, &other} {
+				if err := db.First(row, row.Id).Error; err != nil || row.Up != 0 {
+					t.Fatalf("rejected sample modified traffic: %+v %v", row, err)
+				}
+			}
+			var count int64
+			if err := db.Model(&model.TuicTrafficReceipt{}).Where("id = ?", "ambiguous-normalized").Count(&count).Error; err != nil || count != 0 {
+				t.Fatalf("rejected journal left receipt: %d %v", count, err)
+			}
+		})
+	}
+}
+
 func TestTuicJournalRejectsMissingAndAmbiguousDestinations(t *testing.T) {
 	setupBulkDB(t)
 	db := database.GetDB()

@@ -37,7 +37,11 @@ contain an inflated snapshot and require evidence-based reconciliation.
 For retained TUIC shutdown batches, a nonzero sample now needs an existing,
 unique client-traffic row identified by its recorded row ID. Missing IDs,
 deleted rows, ambiguous case variants and negative deltas retain the journal
-instead of silently discarding or multiplying those bytes. Supported row renames
+instead of silently discarding or multiplying those bytes. A point-in-time scan
+also checks Go-normalized whitespace and Unicode case variants that SQL
+LOWER/TRIM can miss. It is not a predicate lock against concurrent inserts or
+renames, and the existing SQL check still rejects destinations it cannot resolve.
+Supported row renames
 continue to use the row ID. Unexpected or incomplete journal entries also stop
 replay, and the local dashboard and participating allocation checks report or
 block on any TUIC journal entry or inspection error. Periodic TUIC reconciliation

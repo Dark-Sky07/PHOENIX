@@ -20,6 +20,22 @@ import (
 // or charging several case variants. Row IDs preserve supported renames but
 // do not prove a client's original generation or immutable reseller ownership.
 func validateTuicJournalDestinations(tx *gorm.DB, traffic []*xray.ClientTraffic) error {
+	if len(traffic) == 0 {
+		return nil
+	}
+	// SQL LOWER/TRIM does not implement the same Unicode case folding and
+	// whitespace handling as transferEmailKey. Scan all existing rows so that
+	// an otherwise hidden duplicate cannot pass the destination check. This
+	// is a point-in-time check, not a lock against concurrent insertions.
+	var allRows []xray.ClientTraffic
+	if err := tx.Select("id", "email").Find(&allRows).Error; err != nil {
+		return err
+	}
+	byKey := make(map[string][]int, len(allRows))
+	for _, row := range allRows {
+		key := transferEmailKey(row.Email)
+		byKey[key] = append(byKey[key], row.Id)
+	}
 	for _, sample := range traffic {
 		if sample == nil {
 			return errors.New("nil TUIC journal sample")
@@ -40,6 +56,9 @@ func validateTuicJournalDestinations(tx *gorm.DB, traffic []*xray.ClientTraffic)
 		key := transferEmailKey(row.Email)
 		if key == "" {
 			return errors.New("TUIC journal traffic identity has empty email")
+		}
+		if ids := byKey[key]; len(ids) != 1 || ids[0] != sample.TuicTrafficID {
+			return fmt.Errorf("TUIC journal traffic identity %d has ambiguous normalized destination; manual reconciliation required", sample.TuicTrafficID)
 		}
 		var matches []xray.ClientTraffic
 		if err := tx.Select("id").Clauses(clause.Locking{Strength: "UPDATE"}).Where("LOWER(TRIM(email)) = ?", key).Order("id").Find(&matches).Error; err != nil {

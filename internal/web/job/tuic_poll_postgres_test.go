@@ -60,4 +60,23 @@ func TestTuicCommittedPollRecoveryPostgres(t *testing.T) {
 	if err := service.VerifyXrayPollMarker(id); err == nil {
 		t.Fatal("committed poll marker remains")
 	}
+	// PostgreSQL's trim does not remove tabs; this colliding row must still
+	// block a fresh batch and leave neither a receipt nor changed counters.
+	other := xray.ClientTraffic{Email: "\t" + row.Email + "\n", Enable: true}
+	if err := db.Create(&other).Error; err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Delete(&other).Error })
+	badID := uuid.NewString()
+	t.Cleanup(func() { _ = db.Where("id = ?", badID).Delete(&model.TuicTrafficReceipt{}).Error })
+	if err := (&service.InboundService{}).AddTuicTrafficBatch(badID, batch.Deltas); err == nil {
+		t.Fatal("Go-normalized ambiguous destination accepted")
+	}
+	if err := db.First(&row, row.Id).Error; err != nil || row.Up != 42 {
+		t.Fatalf("rejected batch changed usage: %+v %v", row, err)
+	}
+	var count int64
+	if err := db.Model(&model.TuicTrafficReceipt{}).Where("id = ?", badID).Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("rejected batch left receipt: %d %v", count, err)
+	}
 }
