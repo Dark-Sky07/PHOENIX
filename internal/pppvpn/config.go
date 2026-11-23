@@ -387,12 +387,24 @@ func writeConfig(i Instance) (string, error) {
 	// Keep accounting records outside the managed instance directory: Remove()
 	// deletes daemon configs/certificates after stopping it, but any final PPP
 	// counters still need to be drained by the next traffic poll.
-	sessionDir := filepath.Join(rootDir(), "sessions", fmt.Sprintf("%s-%d", i.Protocol, i.ID))
-	if err := os.MkdirAll(sessionDir, 0700); err != nil {
+	// Derive the spool name from the validated protocol component rather than
+	// accepting a path from settings, and confine all operations to this root.
+	protocolDir := filepath.Dir(relativeDir)
+	sessionRel := filepath.Join("sessions", protocolDir+"-"+strconv.Itoa(i.ID))
+	if !filepath.IsLocal(sessionRel) {
+		return "", errors.New("pppvpn: invalid session path")
+	}
+	sessionDir := filepath.Join(rootDir(), sessionRel)
+	root, err := os.OpenRoot(rootDir())
+	if err != nil {
+		return "", err
+	}
+	defer root.Close()
+	if err := root.MkdirAll(sessionRel, 0700); err != nil {
 		return "", fmt.Errorf("prepare PPP session spool: %w", err)
 	}
-	for _, dir := range []string{sessionDir, filepath.Dir(sessionDir), rootDir()} {
-		if err := syncPPPDirectory(dir); err != nil {
+	for _, rel := range []string{sessionRel, "sessions", "."} {
+		if err := syncPPPDirectory(root, rel); err != nil {
 			return "", err
 		}
 	}

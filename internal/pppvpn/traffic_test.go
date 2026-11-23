@@ -253,7 +253,11 @@ func TestAckTrafficRejectsActiveReplacementInClaim(t *testing.T) {
 }
 
 func TestReadPPPSessionRejectsExtraRecords(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "record")
+	root := setupTrafficTest(t)
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "record")
 	if err := os.WriteFile(path, []byte("closed\tppp0\talice\t10\t20\tsession\t7\nextra\n"), 0600); err != nil {
 		t.Fatal(err)
 	}

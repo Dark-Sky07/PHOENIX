@@ -1015,3 +1015,11 @@ associations merely to bypass it. An absent spool or association is not proof
 that no session exists; nonparticipating writers, concurrent hook/attachment
 changes and remote nodes remain outside this local check. Other protocols and
 other removal routes still need their own drain and accounting guarantees.
+
+PPP spool directory creation, scans, record reads, claim renames, deletion and
+directory sync now use a root-confined filesystem handle. Paths or symlinks
+that escape the configured PPP root are rejected rather than accessed during
+panel-side collection or acknowledgement. This does not constrain shell hooks
+against a privileged external actor replacing directories after startup, bind
+mounts, or other nonparticipating filesystem writers; the runtime root remains
+a trusted, privately controlled directory.

@@ -2,10 +2,13 @@ package pppvpn
 
 import (
 	"bufio"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -165,8 +168,15 @@ func CollectTraffic() (*TrafficBatch, error) {
 // Unlike filepath.Glob, explicit directory reads report permission and I/O
 // errors instead of silently treating an inaccessible spool as empty.
 func readSessionPaths() ([]string, error) {
-	root := filepath.Join(rootDir(), "sessions")
-	groups, err := os.ReadDir(root)
+	root, err := os.OpenRoot(rootDir())
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("pppvpn: open session root: %w", err)
+	}
+	defer root.Close()
+	groups, err := readPPPDir(root, "sessions")
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("pppvpn: read session directory: %w", err)
 	}
@@ -175,8 +185,8 @@ func readSessionPaths() ([]string, error) {
 		if !group.IsDir() {
 			return nil, fmt.Errorf("pppvpn: unexpected session group %q", group.Name())
 		}
-		dir := filepath.Join(root, group.Name())
-		entries, err := os.ReadDir(dir)
+		dir := filepath.Join("sessions", group.Name())
+		entries, err := readPPPDir(root, dir)
 		if err != nil {
 			return nil, fmt.Errorf("pppvpn: read session group %q: %w", group.Name(), err)
 		}
@@ -192,13 +202,13 @@ func readSessionPaths() ([]string, error) {
 			if entry.IsDir() {
 				return nil, fmt.Errorf("pppvpn: unexpected session directory %q", entry.Name())
 			}
-			paths = append(paths, filepath.Join(dir, entry.Name()))
+			paths = append(paths, filepath.Join(rootDir(), dir, entry.Name()))
 		}
 	}
 	// Claimed records are kept outside hook-controlled session directories.
 	// A crash or mismatch leaves them visible for a later idempotent poll.
-	staged := filepath.Join(rootDir(), "sessions-staged")
-	claims, err := os.ReadDir(staged)
+	staged := "sessions-staged"
+	claims, err := readPPPDir(root, staged)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("pppvpn: read staged sessions: %w", err)
 	}
@@ -207,7 +217,7 @@ func readSessionPaths() ([]string, error) {
 			return nil, fmt.Errorf("pppvpn: invalid staged session %q", claim.Name())
 		}
 		dir := filepath.Join(staged, claim.Name())
-		entries, err := os.ReadDir(dir)
+		entries, err := readPPPDir(root, dir)
 		if err != nil {
 			return nil, fmt.Errorf("pppvpn: read session claim: %w", err)
 		}
@@ -215,7 +225,7 @@ func readSessionPaths() ([]string, error) {
 			if entry.Name() != "record" || entry.IsDir() {
 				return nil, fmt.Errorf("pppvpn: invalid session claim entry %q", entry.Name())
 			}
-			paths = append(paths, filepath.Join(dir, entry.Name()))
+			paths = append(paths, filepath.Join(rootDir(), dir, entry.Name()))
 		}
 	}
 	return paths, nil
@@ -245,54 +255,97 @@ func AckTraffic(token uint64) error {
 // a check-then-unlink race with an atomic hook replacement at the original path.
 // The claim is retained on any error, including a different or malformed record.
 func acknowledgeClosedSample(sample closedSample) error {
-	staged := filepath.Join(rootDir(), "sessions-staged")
-	if err := os.MkdirAll(staged, 0700); err != nil {
-		return fmt.Errorf("pppvpn: create claim directory: %w", err)
+	root, err := os.OpenRoot(rootDir())
+	if err != nil {
+		return fmt.Errorf("pppvpn: open spool root: %w", err)
 	}
-	if err := syncPPPDirectory(rootDir()); err != nil {
+	defer root.Close()
+	source, err := pppRelativePath(sample.path)
+	if err != nil {
 		return err
 	}
-	dir, err := os.MkdirTemp(staged, "claim-")
-	if err != nil {
-		return fmt.Errorf("pppvpn: create session claim: %w", err)
+	staged := "sessions-staged"
+	if err := root.MkdirAll(staged, 0700); err != nil {
+		return fmt.Errorf("pppvpn: create claim directory: %w", err)
 	}
-	if err := syncPPPDirectory(staged); err != nil {
+	if err := syncPPPDirectory(root, "."); err != nil {
+		return err
+	}
+	var dir string
+	for attempt := 0; attempt < 10; attempt++ {
+		var token [16]byte
+		if _, err := rand.Read(token[:]); err != nil {
+			return err
+		}
+		dir = filepath.Join(staged, "claim-"+hex.EncodeToString(token[:]))
+		err = root.Mkdir(dir, 0700)
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("pppvpn: create session claim: %w", err)
+		}
+		break
+	}
+	if err != nil {
+		return fmt.Errorf("pppvpn: cannot allocate session claim: %w", err)
+	}
+	if err := syncPPPDirectory(root, staged); err != nil {
 		return err
 	}
 	claimed := filepath.Join(dir, "record")
-	if err := os.Rename(sample.path, claimed); err != nil {
+	if err := root.Rename(source, claimed); err != nil {
 		return fmt.Errorf("pppvpn: claim session record %q: %w", sample.path, err)
 	}
-	if err := syncPPPDirectory(dir); err != nil {
+	if err := syncPPPDirectory(root, dir); err != nil {
 		return err
 	}
-	if err := syncPPPDirectory(filepath.Dir(sample.path)); err != nil {
+	if err := syncPPPDirectory(root, filepath.Dir(source)); err != nil {
 		return err
 	}
-	current, err := readPPPSession(claimed)
+	current, err := readPPPSessionAt(root, claimed)
 	if err != nil {
 		return fmt.Errorf("pppvpn: inspect claimed session %q: %w", claimed, err)
 	}
 	if current != sample.session {
 		return fmt.Errorf("pppvpn: session changed before acknowledgement; retained %q", claimed)
 	}
-	if err := os.Remove(claimed); err != nil {
+	if err := root.Remove(claimed); err != nil {
 		return fmt.Errorf("pppvpn: remove committed session claim: %w", err)
 	}
-	if err := syncPPPDirectory(dir); err != nil {
+	if err := syncPPPDirectory(root, dir); err != nil {
 		return err
 	}
-	if err := os.Remove(dir); err != nil {
+	if err := root.Remove(dir); err != nil {
 		return fmt.Errorf("pppvpn: remove empty session claim: %w", err)
 	}
-	if err := syncPPPDirectory(staged); err != nil {
-		return err
-	}
-	return nil
+	return syncPPPDirectory(root, staged)
 }
 
-func syncPPPDirectory(path string) error {
-	f, err := os.Open(path)
+func pppRelativePath(path string) (string, error) {
+	rel, err := filepath.Rel(rootDir(), path)
+	if err != nil || !filepath.IsLocal(rel) || rel == "." {
+		return "", errors.New("pppvpn: path outside session root")
+	}
+	return rel, nil
+}
+
+func readPPPDir(root *os.Root, name string) ([]os.DirEntry, error) {
+	f, err := root.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	entries, err := f.ReadDir(-1)
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	return entries, nil
+}
+
+func syncPPPDirectory(root *os.Root, name string) error {
+	f, err := root.Open(name)
 	if err != nil {
 		return fmt.Errorf("pppvpn: open directory for sync: %w", err)
 	}
@@ -322,7 +375,20 @@ func cloneTrafficBatch(batch *TrafficBatch) *TrafficBatch {
 }
 
 func readPPPSession(path string) (pppSession, error) {
-	file, err := os.Open(path)
+	rel, err := pppRelativePath(path)
+	if err != nil {
+		return pppSession{}, err
+	}
+	root, err := os.OpenRoot(rootDir())
+	if err != nil {
+		return pppSession{}, err
+	}
+	defer root.Close()
+	return readPPPSessionAt(root, rel)
+}
+
+func readPPPSessionAt(root *os.Root, rel string) (pppSession, error) {
+	file, err := root.Open(rel)
 	if err != nil {
 		return pppSession{}, err
 	}
