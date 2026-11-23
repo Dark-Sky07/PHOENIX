@@ -36,16 +36,32 @@ func (e *HookIncidentError) Error() string {
 	return fmt.Sprintf("pppvpn: hook incident %q requires manual review", e.Path)
 }
 
+// HookPendingError may be a live hook or one interrupted before completion.
+// It must not be treated as either success or proof of failure.
+type HookPendingError struct{ Path string }
+
+func (e *HookPendingError) Error() string {
+	return fmt.Sprintf("pppvpn: hook operation pending at %q", e.Path)
+}
+
 // CheckHookIncidents observes visible hook warnings without touching them.
 func CheckHookIncidents() error {
 	paths, err := readSessionPaths()
 	if err != nil {
 		return err
 	}
+	var pending string
 	for _, path := range paths {
-		if strings.HasPrefix(filepath.Base(path), "hook-error.") {
+		name := filepath.Base(path)
+		if strings.HasPrefix(name, "hook-error.") {
 			return &HookIncidentError{Path: path}
 		}
+		if strings.HasPrefix(name, "hook-pending.") {
+			pending = path
+		}
+	}
+	if pending != "" {
+		return &HookPendingError{Path: pending}
 	}
 	return nil
 }
@@ -80,6 +96,9 @@ func CollectTraffic() (*TrafficBatch, error) {
 	if err := GetManager().CheckUntrackedRuntime(); err != nil {
 		return nil, err
 	}
+	if err := CheckHookIncidents(); err != nil {
+		return nil, err
+	}
 	if trafficCollector.pending != nil {
 		return cloneTrafficBatch(trafficCollector.pending), nil
 	}
@@ -93,6 +112,9 @@ func CollectTraffic() (*TrafficBatch, error) {
 		name := filepath.Base(path)
 		if strings.HasPrefix(name, "hook-error.") {
 			return nil, &HookIncidentError{Path: path}
+		}
+		if strings.HasPrefix(name, "hook-pending.") {
+			return nil, &HookPendingError{Path: path}
 		}
 		if strings.HasPrefix(name, ".") {
 			continue

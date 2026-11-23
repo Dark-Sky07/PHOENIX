@@ -988,3 +988,17 @@ risk but do not prove that bytes between polls were captured, that hooks always
 ran, that interface indices can never be reused, or that a pppd child drained.
 Failures before the hook can create evidence, uncooperative old hooks, and the
 interval before another host observes a marker remain outside this protection.
+
+Each updated PPP hook now creates and syncs a `hook-pending.*` record before
+it mutates a session record, syncs the resulting file and directory, then
+removes and syncs the pending record. A killed hook can therefore leave an
+inspectable pending record instead of appearing to have completed. While it is
+visible, local sensitive decisions and the PPP collector wait; ordinary live
+hooks do not create permanent incidents just because a poll overlaps them.
+The collector checks again after acknowledgement before clearing its database
+marker. An interrupted pending record requires operator investigation, not
+blind removal. The mechanism still cannot protect the interval before a hook
+creates/syncs its marker, detect a hook that never started, fence hooks that
+start after the final check, or prove shutdown and final accounting. Hook sync
+requires a filesystem and `sync` implementation that support these operations;
+failures leave the operation fenced when their evidence can be written.

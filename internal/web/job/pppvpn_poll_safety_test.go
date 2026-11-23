@@ -348,3 +348,33 @@ func TestPPPHookIncidentRequiresReviewAfterFileRemoved(t *testing.T) {
 		t.Fatal("hook marker not retained")
 	}
 }
+
+func TestPPPPollRetainsMarkerWhenHookStartsDuringAck(t *testing.T) {
+	setupIntegrationDB(t)
+	bin := t.TempDir()
+	t.Setenv("XUI_BIN_FOLDER", bin)
+	dir := filepath.Join(bin, "pppvpn", "sessions", "pptp-7")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "hook-pending.test")
+	state := &pppPollState{}
+	collect := func() (*pppvpn.TrafficBatch, error) { return &pppvpn.TrafficBatch{Token: 1}, nil }
+	ack := func(uint64) error { return os.WriteFile(path, []byte("pending"), 0600) }
+	if _, _, err := collectAndCommitPPP(state, collect, nil, ack); err == nil || state.marker == "" || state.requiresReview {
+		t.Fatalf("pending hook not fenced: %v", err)
+	}
+	if unlock, err := service.LockResellerAllocation(); err == nil {
+		unlock()
+		t.Fatal("pending hook allowed allocation")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := collectAndCommitPPP(state, collect, nil, func(uint64) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if state.marker != "" {
+		t.Fatal("successful retry left marker")
+	}
+}

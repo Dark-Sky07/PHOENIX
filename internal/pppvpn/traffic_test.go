@@ -1,13 +1,16 @@
 package pppvpn
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func setupTrafficTest(t *testing.T) string {
@@ -381,5 +384,75 @@ func TestLegacyActiveAndWrongInterfaceGenerationFailClosed(t *testing.T) {
 	}
 	if _, err := CollectTraffic(); err == nil {
 		t.Fatal("reused interface silently accepted")
+	}
+}
+
+func TestKilledHookLeavesPendingMarker(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux flock and hooks")
+	}
+	if _, err := exec.LookPath("flock"); err != nil {
+		t.Skip("flock not installed")
+	}
+	root := setupTrafficTest(t)
+	dir := filepath.Join(root, "sessions", "pptp-7")
+	locks := filepath.Join(dir, ".hook-locks")
+	if err := os.MkdirAll(locks, 0700); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := os.OpenFile(filepath.Join(locks, "lo"), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	path := filepath.Join(t.TempDir(), "up")
+	if err := os.WriteFile(path, []byte(renderTrafficHook(dir, 7, false)), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(path)
+	cmd.Env = append(os.Environ(), "IFNAME=lo", "PEERNAME=alice", fmt.Sprintf("PPPD_PID=%d", os.Getpid()))
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+	deadline := time.Now().Add(5 * time.Second)
+	var pending string
+	for time.Now().Before(deadline) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name(), "hook-pending.") {
+				pending = filepath.Join(dir, entry.Name())
+				break
+			}
+		}
+		if pending != "" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if pending == "" {
+		t.Fatal("hook did not create pending marker")
+	}
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	_ = cmd.Wait()
+	if _, err := os.Stat(pending); err != nil {
+		t.Fatalf("killed hook lost marker: %v", err)
+	}
+	if _, err := CollectTraffic(); err == nil {
+		t.Fatal("interrupted hook was treated as empty spool")
+	} else {
+		var busy *HookPendingError
+		if !errors.As(err, &busy) {
+			t.Fatalf("unexpected pending error: %v", err)
+		}
 	}
 }

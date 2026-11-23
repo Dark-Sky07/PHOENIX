@@ -43,6 +43,10 @@ func localPPPAccountingIncident() error {
 		observation = pppvpn.CheckHookIncidents()
 	}
 	if observation != nil {
+		var pending *pppvpn.HookPendingError
+		if errors.As(observation, &pending) {
+			return fmt.Errorf("PPP hook is in progress or interrupted: %w", observation)
+		}
 		detail := observation.Error()
 		notePPPIncidentWrite(detail, false, false)
 		err := persistAccountingEvidence(pppEvidenceDir, detail)

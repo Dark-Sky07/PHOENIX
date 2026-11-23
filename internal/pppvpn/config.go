@@ -149,10 +149,16 @@ incident() {
   if [ "$code" -ne 0 ]; then
     file=$(mktemp "$session_dir/hook-error.XXXXXXXXXX") || exit "$code"
     printf 'PPP hook failure: %%s interface %%s\n' '%s' "$iface" > "$file" || true
+    sync "$file" "$session_dir" || true
   fi
   exit "$code"
 }
 trap incident EXIT
+# Persist an in-progress record before any session mutation. An interrupted
+# hook leaves it for manual review; a running hook may finish and remove it.
+pending=$(mktemp "$session_dir/hook-pending.XXXXXXXXXX")
+printf 'PPP hook in progress: %%s interface %%s\n' '%s' "$iface" > "$pending"
+sync "$pending" "$session_dir"
 mkdir -p "$session_dir/.hook-locks"
 exec 9>"$session_dir/.hook-locks/$iface"
 flock -x -w 5 9
@@ -193,12 +199,16 @@ fi
 tmp="$session_file.tmp.$$"
 printf '%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\n' '%s' "$iface" "$peer" "$rx" "$tx" "$session_id" '%d' "$owner" "$ifindex" > "$tmp"
 chmod 600 "$tmp"
+sync "$tmp"
 # Link is atomic and refuses to replace an existing record.
 ln "$tmp" "$session_file"
 rm -f "$tmp"
 if [ '%s' = closed ]; then rm "$active_file"; fi
+sync "$session_dir"
+rm "$pending"
+sync "$session_dir"
 trap - EXIT
-`, shellQuote(sessionDir), state, state, state, inboundID, state)
+`, shellQuote(sessionDir), state, state, state, state, inboundID, state)
 }
 
 func renderPPTPDConfig(i Instance, optionsPath string) string {
@@ -378,6 +388,14 @@ func writeConfig(i Instance) (string, error) {
 	// deletes daemon configs/certificates after stopping it, but any final PPP
 	// counters still need to be drained by the next traffic poll.
 	sessionDir := filepath.Join(rootDir(), "sessions", fmt.Sprintf("%s-%d", i.Protocol, i.ID))
+	if err := os.MkdirAll(sessionDir, 0700); err != nil {
+		return "", fmt.Errorf("prepare PPP session spool: %w", err)
+	}
+	for _, dir := range []string{sessionDir, filepath.Dir(sessionDir), rootDir()} {
+		if err := syncPPPDirectory(dir); err != nil {
+			return "", err
+		}
+	}
 	ipUp := renderTrafficHook(sessionDir, i.ID, false) + "\nsysctl -w \"net.ipv4.conf.${IFNAME:-${1:-}}.route_localnet=1\" >/dev/null 2>&1 || true\nsysctl -w \"net.ipv4.conf.${IFNAME:-${1:-}}.rp_filter=0\" >/dev/null 2>&1 || true\n"
 	if err := atomicWrite(rootDir(), filepath.Join(relativeDir, "ip-up"), []byte(ipUp), 0o750); err != nil {
 		return "", err

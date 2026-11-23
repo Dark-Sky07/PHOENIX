@@ -117,6 +117,16 @@ func collectAndCommitPPP(state *pppPollState, collect func() (*pppvpn.TrafficBat
 		release()
 		return restart, disabled, fmt.Errorf("acknowledge PPP traffic; poll marker %s retained: %w", state.marker, err)
 	}
+	// Catch a hook that started or failed during the database write/ack. This
+	// check narrows the window but does not lock hooks or prove quiescence.
+	if err := pppvpn.CheckHookIncidents(); err != nil {
+		var hookIncident *pppvpn.HookIncidentError
+		if errors.As(err, &hookIncident) {
+			state.requiresReview = true
+		}
+		release()
+		return restart, disabled, fmt.Errorf("check PPP hooks before clearing marker: %w", err)
+	}
 	if err := service.FinishXrayPoll(state.marker); err != nil {
 		state.deleteUncertain = true
 		return restart, disabled, fmt.Errorf("clear committed PPP poll marker: %w", err)
