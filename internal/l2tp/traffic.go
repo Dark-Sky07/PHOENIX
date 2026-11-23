@@ -98,20 +98,27 @@ func readSessions(id int) (map[string]interfaceCounter, bool) {
 		path := filepath.Join(sessionDirForID(id), entry.Name())
 		file, err := os.Open(path)
 		if err != nil {
-			continue
+			// A disappearing marker can race an ip-down hook; it must not
+			// turn this entire sample into a trustworthy empty reading.
+			return nil, false
 		}
 		line, readErr := bufio.NewReader(file).ReadString('\n')
 		_ = file.Close()
-		if readErr != nil && len(line) == 0 {
-			continue
+		if readErr != nil {
+			// The hook writes a newline-terminated username. A partial write
+			// must not be attributed to an incomplete identity.
+			return nil, false
 		}
 		email := strings.TrimSpace(line)
 		if email == "" || strings.ContainsAny(email, "\r\n") {
-			continue
+			return nil, false
 		}
 		// A stale ip-up file must not make an offline client appear online.
 		if _, err := os.Stat(filepath.Join(l2tpSysClassNetRoot, entry.Name())); err != nil {
-			continue
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, false
 		}
 		counter, ok := readInterfaceCounter(entry.Name())
 		if !ok {

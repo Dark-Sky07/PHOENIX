@@ -818,3 +818,11 @@ runtime status. This protection is process-local: orphan cleanup after a panel
 restart is not covered. Parent exit is not evidence that pppd children, hooks,
 active sessions or outstanding traffic have drained, so it does not authorize
 quota release or claim that removal disconnected every active user.
+
+L2TP session scans now reject unreadable, empty or partially written username
+markers and unexpected interface lookup errors instead of interpreting them as
+an empty session. The current in-memory baseline is left unchanged and the
+periodic reconcile is deferred until a successful read. An interface that is
+already gone, a marker removed before the directory scan, or a daemon that has
+stopped can still hide unobserved consumption; this check does not solve those
+loss windows or itself create a durable accounting incident.

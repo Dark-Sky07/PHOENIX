@@ -120,3 +120,62 @@ func TestCollectTrafficCheckedFailurePreservesBaselines(t *testing.T) {
 		t.Fatalf("retry delta: %+v err=%v", clients, err)
 	}
 }
+
+func TestCollectTrafficCheckedRejectsIncompleteSessionMarkers(t *testing.T) {
+	setupTrafficFilesystem(t)
+	writeSession(t, 13, "ppp0", "alice@example.com", "80", "160", true)
+	cmd := &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
+	p := &Process{ipsecCmd: cmd, xl2tpdCmd: cmd}
+	baseline := map[string]interfaceCounter{"ppp0\x00alice@example.com": {rx: 50, tx: 100}}
+	m := &Manager{id: 13, proc: &managed{proc: p, tag: "tag", last: baseline}}
+	path := filepath.Join(sessionDirForID(13), "ppp0")
+	for _, content := range []string{"", "alice@example.com", " \n"} {
+		if err := os.WriteFile(path, []byte(content), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := m.CollectTrafficChecked(); err == nil {
+			t.Fatalf("accepted incomplete marker %q", content)
+		}
+		if got := baseline["ppp0\x00alice@example.com"]; got.rx != 50 || got.tx != 100 {
+			t.Fatalf("baseline changed after incomplete marker %q: %+v", content, got)
+		}
+	}
+	if err := os.WriteFile(path, []byte("alice@example.com\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	_, clients, err := m.CollectTrafficChecked()
+	if err != nil || len(clients) != 1 || clients[0].Up != 30 || clients[0].Down != 60 {
+		t.Fatalf("retry delta: %+v err=%v", clients, err)
+	}
+}
+
+func TestReadSessionsFailsClosedOnUnreadableMarker(t *testing.T) {
+	setupTrafficFilesystem(t)
+	path := filepath.Join(sessionDirForID(14), "ppp0")
+	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
+		t.Fatal(err)
+	}
+	// A dangling symlink deterministically simulates a marker disappearing
+	// between the directory scan and open, even when tests run as root.
+	if err := os.Symlink(filepath.Join(t.TempDir(), "missing"), path); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if got, ok := readSessions(14); ok || got != nil {
+		t.Fatalf("unreadable marker was ignored: %#v %v", got, ok)
+	}
+}
+
+func TestReadSessionsFailsClosedOnInterfaceLookupError(t *testing.T) {
+	_, sysroot := setupTrafficFilesystem(t)
+	writeSession(t, 15, "ppp0", "alice@example.com", "0", "0", false)
+	if err := os.MkdirAll(filepath.Dir(sysroot), 0750); err != nil {
+		t.Fatal(err)
+	}
+	// A non-directory parent produces ENOTDIR, not a known-absent interface.
+	if err := os.WriteFile(sysroot, []byte("not a directory"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := readSessions(15); ok || got != nil {
+		t.Fatalf("interface lookup error was ignored: %#v %v", got, ok)
+	}
+}
