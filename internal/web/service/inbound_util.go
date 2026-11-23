@@ -64,10 +64,13 @@ func chunkStrings(s []string, size int) [][]string {
 	if size <= 0 || len(s) == 0 {
 		return nil
 	}
-	out := make([][]string, 0, (len(s)+size-1)/size)
-	for i := 0; i < len(s); i += size {
-		end := min(i+size, len(s))
+	// Bound each step by the remaining length; both len(s)+size-1 and
+	// i+size can overflow for very large size values.
+	var out [][]string
+	for i := 0; i < len(s); {
+		end := i + min(size, len(s)-i)
 		out = append(out, s[i:end])
+		i = end
 	}
 	return out
 }
@@ -78,10 +81,11 @@ func chunkInts(s []int, size int) [][]int {
 	if size <= 0 || len(s) == 0 {
 		return nil
 	}
-	out := make([][]int, 0, (len(s)+size-1)/size)
-	for i := 0; i < len(s); i += size {
-		end := min(i+size, len(s))
+	var out [][]int
+	for i := 0; i < len(s); {
+		end := i + min(size, len(s)-i)
 		out = append(out, s[i:end])
+		i = end
 	}
 	return out
 }
