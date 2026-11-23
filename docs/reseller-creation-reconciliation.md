@@ -78,11 +78,14 @@ client counter resets, manual rewrites, and client-stat deletion helpers also
 reject negative local or upstream evidence, including for non-resellers. Single,
 scoped, bulk and inbound-client removal paths also preflight this evidence when
 asked to delete traffic, before changing associations or runtimes. This is not
-proof that every deletion path or runtime mutation is atomic. Preflight
-checks precede existing runtime re-enable paths,
-but those side effects and the database reset are not a single atomic operation.
-Node status
-counts use overflow-safe local totals but do not replace global enforcement.
+proof that every deletion path or runtime mutation is atomic. Preflight checks
+precede existing runtime re-enable paths, but those side effects and the
+database reset are not a single atomic operation. Removing a local L2TP, SSTP,
+or PPTP inbound is deferred even when disabled: this implementation has no
+verified stop-and-final-accounting proof for the whole inbound, and a missing
+session marker alone is insufficient. An operator must reconcile it; no
+automatic resume path is provided yet. Node status counts use overflow-safe
+local totals but do not replace global enforcement.
 Ordinary cleanup failures release the lock behind the retained
 marker; an uncertain marker deletion keeps the lock. A crash before journal
 publication or after journal removal can

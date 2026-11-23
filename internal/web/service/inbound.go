@@ -1241,6 +1241,13 @@ func (s *InboundService) DelInbound(id int) (bool, error) {
 		if err := rejectInboundNodeIncidents(db, &ib); err != nil {
 			return false, err
 		}
+		// A daemon stop or missing marker does not prove that all PPP child
+		// sessions stopped and published their final accounting. In particular,
+		// DelInbound historically continued deleting the row even if its local
+		// runtime removal failed. Keep the inbound and links for manual review.
+		if ib.NodeID == nil && (ib.Protocol == model.L2TP || ib.Protocol == model.SSTP || ib.Protocol == model.PPTP) {
+			return false, fmt.Errorf("local PPP inbound %d requires verified disconnect and accounting before removal", ib.Id)
+		}
 	} else if !database.IsNotFound(loadErr) {
 		return false, loadErr
 	}
