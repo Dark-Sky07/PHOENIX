@@ -1,6 +1,7 @@
 package l2tp
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -177,5 +178,26 @@ func TestReadSessionsFailsClosedOnInterfaceLookupError(t *testing.T) {
 	}
 	if got, ok := readSessions(15); ok || got != nil {
 		t.Fatalf("interface lookup error was ignored: %#v %v", got, ok)
+	}
+}
+
+func TestCollectTrafficRejectsCounterDecreaseBeforeAdvancingAnyBaseline(t *testing.T) {
+	setupTrafficFilesystem(t)
+	writeSession(t, 16, "ppp0", "alice@example.com", "150", "250", true)
+	writeSession(t, 16, "ppp1", "bob@example.com", "20", "10", true)
+	cmd := &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
+	p := &Process{ipsecCmd: cmd, xl2tpdCmd: cmd}
+	last := map[string]interfaceCounter{
+		"ppp0\x00alice@example.com": {rx: 100, tx: 200},
+		"ppp1\x00bob@example.com":   {rx: 30, tx: 5},
+	}
+	m := &Manager{id: 16, proc: &managed{proc: p, tag: "tag", last: last}}
+	inbounds, clients, err := m.CollectTrafficChecked()
+	var decrease *CounterDecrease
+	if !errors.As(err, &decrease) || decrease.InboundID != 16 || decrease.Interface != "ppp1" || decrease.Email != "bob@example.com" || decrease.PreviousRx != 30 || decrease.ObservedRx != 20 {
+		t.Fatalf("wrong observation: %+v %v", decrease, err)
+	}
+	if len(inbounds) != 0 || len(clients) != 0 || last["ppp0\x00alice@example.com"].rx != 100 || last["ppp1\x00bob@example.com"].rx != 30 {
+		t.Fatalf("partial sample advanced: %#v %#v %#v", inbounds, clients, last)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/Dark-Sky07/phoenix/internal/l2tp"
 	"github.com/Dark-Sky07/phoenix/internal/logger"
 	"github.com/Dark-Sky07/phoenix/internal/web/service"
 	"github.com/Dark-Sky07/phoenix/internal/web/service/outbound"
@@ -153,6 +154,21 @@ func (j *XrayTrafficJob) prepareXrayBatch(
 		}
 		traffic, clients, err := poll()
 		if err != nil {
+			var l2tpDecrease *l2tp.CounterDecrease
+			if errors.As(err, &l2tpDecrease) {
+				// The baseline was not changed. Persist both local evidence and
+				// the shared incident before removing the committed poll marker.
+				if recordErr := service.RecordL2TPCounterDecreaseUnderAllocationLock(l2tpDecrease); recordErr != nil {
+					unlock()
+					return fmt.Errorf("L2TP counter incident; poll marker %s retained: %v; persist evidence: %w", id, err, recordErr)
+				}
+				clearErr := service.FinishXrayPoll(id)
+				unlock()
+				if clearErr != nil {
+					return fmt.Errorf("L2TP counter incident: %v; clear poll marker: %w", err, clearErr)
+				}
+				return err
+			}
 			var decrease *xray.UserTrafficCounterDecrease
 			var missing *xray.UserTrafficCounterMissing
 			if errors.As(err, &decrease) || errors.As(err, &missing) {

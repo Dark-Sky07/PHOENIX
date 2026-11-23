@@ -182,3 +182,26 @@ func TestL2TPSharedPublicationFailureKeepsLocalEvidence(t *testing.T) {
 		t.Fatalf("publication retry failed: %d %v", count, err)
 	}
 }
+
+func TestL2TPCounterEvidenceRejectsIncompleteExistingFile(t *testing.T) {
+	setupConflictDB(t)
+	detail := "inbound 1 counter observation"
+	if err := persistL2TPCounterEvidence(detail); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(os.Getenv("XUI_DB_FOLDER"), "l2tp-accounting-evidence")
+	files, err := os.ReadDir(dir)
+	if err != nil || len(files) != 1 {
+		t.Fatalf("evidence missing: %v %v", files, err)
+	}
+	path := filepath.Join(dir, files[0].Name())
+	if err := os.WriteFile(path, []byte("partial"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := persistL2TPCounterEvidence(detail); err == nil {
+		t.Fatal("incomplete evidence accepted")
+	}
+	if err := ObserveL2TPAccountingIncident(); err == nil {
+		t.Fatal("incomplete evidence did not block")
+	}
+}

@@ -412,6 +412,23 @@ func (m *Manager) CollectTrafficChecked() (inbounds []InboundTraffic, clients []
 		// report a false zero. Retry on the next polling tick.
 		return nil, nil, fmt.Errorf("l2tp: failed to read session counters for inbound %d", m.id)
 	}
+	// Validate the entire snapshot before changing any baseline. A lower
+	// counter can reflect interface reuse or reset, neither of which proves
+	// the missing interval was zero or that the observed counter is new usage.
+	keys := make([]string, 0, len(current))
+	for key := range current {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		previous, exists := m.proc.last[key]
+		counter := current[key]
+		if exists && (counter.rx < previous.rx || counter.tx < previous.tx) {
+			iface, email, _ := strings.Cut(key, "\x00")
+			return nil, nil, &CounterDecrease{InboundID: m.id, Interface: iface, Email: email,
+				PreviousRx: previous.rx, PreviousTx: previous.tx, ObservedRx: counter.rx, ObservedTx: counter.tx}
+		}
+	}
 	newOnline := make(map[string]bool, len(current))
 	deltaByEmail := make(map[string]ClientTrafficDelta)
 	var totalUp, totalDown int64

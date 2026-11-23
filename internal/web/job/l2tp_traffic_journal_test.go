@@ -3,10 +3,13 @@ package job
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
+	"github.com/Dark-Sky07/phoenix/internal/l2tp"
+	"github.com/Dark-Sky07/phoenix/internal/web/service"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
 )
 
@@ -134,5 +137,109 @@ func TestL2TPEmptySampleClearsMarkerWithoutReceipt(t *testing.T) {
 	}
 	if err := db.Model(&model.XrayTrafficReceipt{}).Count(&receipts).Error; err != nil || receipts != 0 {
 		t.Fatalf("receipts=%d err=%v", receipts, err)
+	}
+}
+
+func TestL2TPCounterDecreaseStoresIncidentBeforeClearingPollMarker(t *testing.T) {
+	setupIntegrationDB(t)
+	db := database.GetDB()
+	collector := NewXrayTrafficJob()
+	// A previous warning must not swallow the separate counter evidence.
+	incidentPath := filepath.Join(os.Getenv("XUI_DB_FOLDER"), "l2tp-accounting-incident")
+	if err := os.WriteFile(incidentPath, []byte("prior orphan\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	decrease := &l2tp.CounterDecrease{InboundID: 4, Interface: "ppp0", Email: "alice@example.test", PreviousRx: 100, PreviousTx: 200, ObservedRx: 3, ObservedTx: 210}
+	poll := func() ([]*xray.Traffic, []*xray.ClientTraffic, error) { return nil, nil, decrease }
+	if _, err := persistL2TPPoll(collector, poll); err == nil {
+		t.Fatal("decrease reported success")
+	}
+	var markers, incidents int64
+	if err := db.Model(&model.XrayTrafficInFlight{}).Count(&markers).Error; err != nil || markers != 0 {
+		t.Fatalf("marker not cleared after durable incident: %d %v", markers, err)
+	}
+	if err := db.Model(&model.ResellerNodeCounterIncident{}).Where("node_id = ?", -2).Count(&incidents).Error; err != nil || incidents != 1 {
+		t.Fatalf("shared incident missing: %d %v", incidents, err)
+	}
+	files, err := os.ReadDir(filepath.Join(os.Getenv("XUI_DB_FOLDER"), "l2tp-accounting-evidence"))
+	if err != nil || len(files) != 1 {
+		t.Fatalf("local evidence missing: %v %v", files, err)
+	}
+	evidence, err := os.ReadFile(filepath.Join(os.Getenv("XUI_DB_FOLDER"), "l2tp-accounting-evidence", files[0].Name()))
+	if err != nil || !strings.Contains(string(evidence), decrease.Error()) {
+		t.Fatalf("counter observation not retained: %q %v", evidence, err)
+	}
+	unlock, err := service.LockResellerAllocation()
+	if err != nil {
+		t.Fatalf("unrelated poll lock blocked: %v", err)
+	}
+	unlock()
+}
+
+func TestL2TPCounterDecreaseRetainsMarkerOnIncidentWriteFailure(t *testing.T) {
+	setupIntegrationDB(t)
+	db := database.GetDB()
+	if err := db.Exec("CREATE TRIGGER reject_l2tp_counter BEFORE INSERT ON reseller_node_counter_incidents BEGIN SELECT RAISE(ABORT, 'injected failure'); END").Error; err != nil {
+		t.Fatal(err)
+	}
+	collector := NewXrayTrafficJob()
+	poll := func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
+		return nil, nil, &l2tp.CounterDecrease{InboundID: 4, Interface: "ppp0", Email: "alice", PreviousRx: 10, ObservedRx: 1}
+	}
+	if _, err := persistL2TPPoll(collector, poll); err == nil || !strings.Contains(err.Error(), "poll marker") {
+		t.Fatalf("write failure did not retain marker: %v", err)
+	}
+	var count int64
+	if err := db.Model(&model.XrayTrafficInFlight{}).Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("missing pending poll marker: %d %v", count, err)
+	}
+	if unlock, err := service.LockResellerAllocation(); err == nil {
+		unlock()
+		t.Fatal("marker did not block subsequent allocation")
+	}
+	// Retry the independent incident write under the recovery lock; the poll
+	// marker remains for manual reconciliation and no sample is fabricated.
+	if err := db.Exec("DROP TRIGGER reject_l2tp_counter").Error; err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := service.LockResellerAllocationForXrayRecovery()
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = service.RecordL2TPCounterDecreaseUnderAllocationLock(&l2tp.CounterDecrease{InboundID: 4, Interface: "ppp0", Email: "alice", PreviousRx: 10, ObservedRx: 1})
+	unlock()
+	if err != nil {
+		t.Fatalf("incident retry failed: %v", err)
+	}
+}
+
+func TestL2TPCounterDecreaseRetainsMarkerOnEvidenceWriteFailure(t *testing.T) {
+	setupIntegrationDB(t)
+	db := database.GetDB()
+	path := filepath.Join(os.Getenv("XUI_DB_FOLDER"), "l2tp-accounting-evidence")
+	if err := os.WriteFile(path, []byte("not a directory"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	collector := NewXrayTrafficJob()
+	decrease := &l2tp.CounterDecrease{InboundID: 5, Interface: "ppp2", Email: "bob", PreviousTx: 20, ObservedTx: 5}
+	poll := func() ([]*xray.Traffic, []*xray.ClientTraffic, error) { return nil, nil, decrease }
+	if _, err := persistL2TPPoll(collector, poll); err == nil || !strings.Contains(err.Error(), "poll marker") {
+		t.Fatalf("evidence failure did not retain marker: %v", err)
+	}
+	var count int64
+	if err := db.Model(&model.XrayTrafficInFlight{}).Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("poll marker missing: %d %v", count, err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := service.LockResellerAllocationForXrayRecovery()
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = service.RecordL2TPCounterDecreaseUnderAllocationLock(decrease)
+	unlock()
+	if err != nil {
+		t.Fatalf("failed evidence retry: %v", err)
 	}
 }

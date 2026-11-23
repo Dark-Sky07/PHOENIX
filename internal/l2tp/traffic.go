@@ -2,6 +2,7 @@ package l2tp
 
 import (
 	"bufio"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -25,6 +26,18 @@ type ClientTrafficDelta struct {
 	Email     string
 	Up        int64
 	Down      int64
+}
+
+// CounterDecrease is an uncertain accounting interval, not a new session or
+// an estimate of missing bytes. Callers must retain and reconcile evidence.
+type CounterDecrease struct {
+	InboundID                                      int
+	Interface, Email                               string
+	PreviousRx, PreviousTx, ObservedRx, ObservedTx int64
+}
+
+func (e *CounterDecrease) Error() string {
+	return fmt.Sprintf("l2tp: counter decreased for inbound %d interface %q client %q (rx %d to %d, tx %d to %d); reconciliation required", e.InboundID, e.Interface, e.Email, e.PreviousRx, e.ObservedRx, e.PreviousTx, e.ObservedTx)
 }
 
 type interfaceCounter struct {

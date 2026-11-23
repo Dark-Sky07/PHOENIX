@@ -1,6 +1,8 @@
 package service
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -59,11 +61,97 @@ func persistL2TPAccountingIncident(detail string) error {
 	return syncCounterIncidentDir(filepath.Dir(path))
 }
 
+// Store each distinct observation separately so an earlier orphan incident
+// does not erase the counter values needed for manual reconciliation.
+func persistL2TPCounterEvidence(detail string) error {
+	dir := filepath.Join(config.GetDBFolderPath(), "l2tp-accounting-evidence")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	if err := syncCounterIncidentDir(filepath.Dir(dir)); err != nil {
+		return err
+	}
+	sum := sha256.Sum256([]byte(detail))
+	path := filepath.Join(dir, hex.EncodeToString(sum[:])+".txt")
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if errors.Is(err, os.ErrExist) {
+		// An incomplete earlier file remains evidence, but is not a durable
+		// copy of this observation and must not release the poll marker.
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if string(data) != detail+"\n" {
+			return errors.New("incomplete L2TP counter evidence requires manual review")
+		}
+		f, err = os.OpenFile(path, os.O_RDONLY, 0)
+		if err != nil {
+			return err
+		}
+		syncErr := f.Sync()
+		if closeErr := f.Close(); syncErr == nil {
+			syncErr = closeErr
+		}
+		if syncErr != nil {
+			return syncErr
+		}
+		return syncCounterIncidentDir(dir)
+	}
+	if err != nil {
+		return err
+	}
+	_, writeErr := f.WriteString(detail + "\n")
+	if writeErr == nil {
+		writeErr = f.Sync()
+	}
+	if closeErr := f.Close(); writeErr == nil {
+		writeErr = closeErr
+	}
+	if writeErr != nil {
+		return writeErr
+	}
+	return syncCounterIncidentDir(dir)
+}
+
+// RecordL2TPCounterDecreaseUnderAllocationLock must only be called with the
+// allocation lock already held and the poll marker committed. Failed or
+// ambiguous persistence must leave that marker in place for manual review.
+func RecordL2TPCounterDecreaseUnderAllocationLock(decrease *l2tp.CounterDecrease) error {
+	if decrease == nil {
+		return errors.New("missing L2TP counter observation")
+	}
+	l2tpIncidentPending.Store(true)
+	evidenceErr := persistL2TPCounterEvidence(decrease.Error())
+	markerErr := persistL2TPAccountingIncident("L2TP counter decrease requires reconciliation")
+	db := database.GetDB()
+	var dbErr error
+	if db == nil {
+		dbErr = errors.New("database unavailable")
+	} else {
+		incident := model.ResellerNodeCounterIncident{NodeId: -2, Email: "", Direction: "l2tp-counter-decreased"}
+		dbErr = db.Clauses(clause.OnConflict{DoNothing: true}).Create(&incident).Error
+	}
+	if err := errors.Join(evidenceErr, markerErr, dbErr); err != nil {
+		return err
+	}
+	l2tpIncidentPending.Store(false)
+	return nil
+}
+
 // ObserveL2TPAccountingIncident retains a local warning on disk as soon as an
 // untracked runtime is detected, even if its directory is later removed. A
 // failed write remains latched in this process and is retried on later checks.
 // Callers must not treat this as proof about other hosts or stopped sessions.
 func ObserveL2TPAccountingIncident() error {
+	evidenceDir := filepath.Join(config.GetDBFolderPath(), "l2tp-accounting-evidence")
+	entries, err := os.ReadDir(evidenceDir)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		l2tpIncidentPending.Store(true)
+		return fmt.Errorf("inspect L2TP accounting evidence: %w", err)
+	}
+	if len(entries) > 0 {
+		return errors.New("L2TP accounting evidence requires manual reconciliation")
+	}
 	path := l2tpAccountingIncidentPath()
 	if _, err := os.Lstat(path); err == nil {
 		if l2tpIncidentPending.Load() {

@@ -869,3 +869,22 @@ preserve and reconcile evidence across all affected hosts and confirm process,
 session and historical-traffic state before clearing either local or shared
 incident; deleting markers is not proof of completeness or an automatic recovery
 procedure.
+
+A decrease in a previously sampled L2TP interface counter is now treated as an
+uncertain interval rather than a zero baseline or a new session. The entire
+snapshot is validated before any in-memory baseline advances. Under the shared
+allocation lock, the poll records the observed interface, client, prior and
+current counters in a separate local `l2tp-accounting-evidence` directory, and
+records the shared L2TP incident before clearing its poll marker. Existing
+orphan-warning files do not overwrite the separate counter evidence. If either
+write fails or is ambiguous, the in-flight poll marker remains and participating
+mutations and polling may be blocked until manual reconciliation. No missing
+bytes are inferred. Repeated decreases stop this L2TP collector from sampling
+other sessions until reviewed; do not remove the evidence directory as a
+substitute for review. Local evidence is not copied by database-only migration.
+
+This detects observed decreases only. Interfaces and whole sessions can still
+disappear between polls, or be reused with counters above the previous reading;
+short-lived sessions and usage after the final read are not captured by this
+change. Durable closed-session accounting, writer quiescence and recovery remain
+necessary.
