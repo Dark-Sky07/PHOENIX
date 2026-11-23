@@ -158,7 +158,7 @@ func readInterfaceCounter(iface string) (interfaceCounter, bool) {
 }
 
 func readSessions(id int) (map[string]interfaceCounter, []string, error) {
-	if err := CheckDownHookIncidents(); err != nil {
+	if err := CheckHookIncidents(); err != nil {
 		return nil, nil, err
 	}
 	root, err := os.OpenRoot(l2tpRoot())
@@ -202,7 +202,7 @@ func readSessions(id int) (map[string]interfaceCounter, []string, error) {
 		}
 		out[entry.Name()+"\x00"+email] = counter
 	}
-	if err := CheckDownHookIncidents(); err != nil {
+	if err := CheckHookIncidents(); err != nil {
 		return nil, nil, err
 	}
 	return out, stale, nil

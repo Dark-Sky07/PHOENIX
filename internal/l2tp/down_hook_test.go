@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-func TestDownHookPersistsIncidentBeforeRemovingUnpolledSession(t *testing.T) {
+func TestDownHookPersistsIncidentAndRetainsUnpolledSession(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux sysfs and sync")
 	}
@@ -37,8 +37,8 @@ func TestDownHookPersistsIncidentBeforeRemovingUnpolledSession(t *testing.T) {
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("down hook failed: %v: %s", err, output)
 	}
-	if _, err := os.Stat(marker); !os.IsNotExist(err) {
-		t.Fatalf("active marker not removed after evidence: %v", err)
+	if data, err := os.ReadFile(marker); err != nil || string(data) != "alice@example.test\n" {
+		t.Fatalf("down hook removed or changed marker evidence: %q %v", data, err)
 	}
 	dir := filepath.Join(root, "hook-incidents")
 	entries, err := os.ReadDir(dir)
@@ -50,7 +50,7 @@ func TestDownHookPersistsIncidentBeforeRemovingUnpolledSession(t *testing.T) {
 		t.Fatalf("incomplete down-hook evidence: %q %v", data, err)
 	}
 	var incident *HookIncidentError
-	if err := CheckDownHookIncidents(); !errors.As(err, &incident) {
+	if err := CheckHookIncidents(); !errors.As(err, &incident) {
 		t.Fatalf("hook incident not visible: %v", err)
 	}
 	m := &Manager{id: inst.Id, proc: &managed{}}
@@ -81,7 +81,7 @@ func TestInvalidDownHookStillLeavesIncident(t *testing.T) {
 		t.Fatal("invalid interface was accepted")
 	}
 	var incident *HookIncidentError
-	if err := CheckDownHookIncidents(); !errors.As(err, &incident) {
+	if err := CheckHookIncidents(); !errors.As(err, &incident) {
 		t.Fatalf("invalid hook left no incident: %v", err)
 	}
 }

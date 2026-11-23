@@ -91,7 +91,7 @@ func (m *Manager) orphanDataErrorLocked() error {
 	return orphanDataError(trackedID)
 }
 
-// CheckUntrackedRuntime reports locally visible orphan or down-hook evidence
+// CheckUntrackedRuntime reports locally visible orphan or hook evidence
 // without signalling or modifying it. A clean result is not proof of quiescence.
 func (m *Manager) CheckUntrackedRuntime() error {
 	m.mu.Lock()
@@ -99,7 +99,7 @@ func (m *Manager) CheckUntrackedRuntime() error {
 	if err := m.orphanDataErrorLocked(); err != nil {
 		return err
 	}
-	return CheckDownHookIncidents()
+	return CheckHookIncidents()
 }
 
 // Ensure brings the daemon and firewall toward one desired instance.

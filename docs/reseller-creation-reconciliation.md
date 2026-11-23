@@ -817,10 +817,13 @@ session baselines remain necessary before reconciliation or quota release. Do
 not infer missing bytes or treat a stopped parent daemon as proof of completeness.
 
 Newly generated L2TP ip-down hooks now create and sync a persistent incident
-under `l2tp/hook-incidents` before removing the active session marker. They
-retain the hook identity, the prior marker if readable, and available interface
-counters as investigation evidence. Even a session that starts and ends between
-polls can therefore leave an incident when the updated hook runs. The collector,
+under `l2tp/hook-incidents` and leave the active marker in place. They retain
+the hook identity, the prior marker if readable, and available interface counters
+as investigation evidence; a late down hook no longer deletes a newer marker.
+Updated ip-up hooks refuse to overwrite an existing marker and leave an incident
+on collision or other reportable failure. Markers and incidents require manual
+review, not blind cleanup. Even a session that starts and ends between polls can
+therefore leave an incident when the updated hook runs. The collector,
 sensitive removals and local incident publisher observe the incident; the
 publisher also creates the shared quota barrier. Ordinary disconnects now
 require manual reconciliation, and L2TP sampling is deferred while the incident

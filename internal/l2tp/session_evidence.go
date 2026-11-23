@@ -11,7 +11,7 @@ import (
 	"unicode/utf8"
 )
 
-// HookIncidentError marks a durable ip-down observation or an interrupted
+// HookIncidentError marks a durable hook observation or an interrupted
 // incident write. Its removal alone does not prove final traffic was accounted.
 type HookIncidentError struct{ Path string }
 
@@ -19,9 +19,9 @@ func (e *HookIncidentError) Error() string {
 	return fmt.Sprintf("l2tp: hook incident %q requires manual reconciliation", e.Path)
 }
 
-// CheckDownHookIncidents must not inspect or remove incident contents. Even an
+// CheckHookIncidents must not inspect or remove incident contents. Even an
 // incomplete file is evidence that a hook started and may have been interrupted.
-func CheckDownHookIncidents() error {
+func CheckHookIncidents() error {
 	root, err := os.OpenRoot(l2tpRoot())
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -61,9 +61,9 @@ func CheckClientSessionEvidence(emails []string, scope []int) error {
 	if len(wanted) == 0 {
 		return nil
 	}
-	// A down-hook incident can contain usage for an unknown identity and is
+	// A hook incident can contain usage for an unknown identity and is
 	// therefore a global fence, not merely a per-inbound marker.
-	if err := CheckDownHookIncidents(); err != nil {
+	if err := CheckHookIncidents(); err != nil {
 		return err
 	}
 	allowed := make(map[int]bool, len(scope))
@@ -87,7 +87,7 @@ func CheckClientSessionEvidence(emails []string, scope []int) error {
 			if !group.IsDir() {
 				return fmt.Errorf("l2tp: invalid hook incident directory")
 			}
-			if err := CheckDownHookIncidents(); err != nil {
+			if err := CheckHookIncidents(); err != nil {
 				return err
 			}
 			continue

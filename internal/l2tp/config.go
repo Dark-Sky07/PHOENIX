@@ -202,28 +202,40 @@ func renderPPPOptions(inst Instance) string {
 }
 
 func renderIPUpScript(inst Instance) string {
-	// The directory contains only a numeric inbound id, so it is safe to embed
-	// after shell-quoting. Runtime values are always quoted and interface names
-	// are validated in traffic.go before they are used as path components.
 	dir := strings.ReplaceAll(sessionDirPath(inst.Id), "'", "'\\''")
-	return "#!/bin/sh\nset -eu\n" +
+	root := strings.ReplaceAll(l2tpRoot(), "'", "'\\''")
+	return "#!/bin/sh\nset -eu\numask 077\n" +
 		"PATH=/usr/sbin:/usr/bin:/sbin:/bin\nexport PATH\n" +
-		"dir='" + dir + "'\n" +
-		// pppd's documented interface name is $1/$IFNAME. PPP_IFACE is
-		// exported by some distro wrapper scripts, but is not guaranteed when
-		// pppd invokes an explicit ip-up-script directly.
+		"dir='" + dir + "'\nroot='" + root + "'\n" +
 		"iface=\"${PPP_IFACE:-${IFNAME:-${1:-}}}\"\n" +
-		// PEERNAME is the authenticated PPP username and is the stable identity
-		// that maps a session back to the panel client email.
 		"peer=\"${PEERNAME:-${PPP_PEERNAME:-}}\"\n" +
+		// A collision or failed publication must not replace another session's
+		// marker. Persist a separate incident for every uncertain hook exit.
+		"incident() {\n" +
+		"  code=$?; trap - EXIT\n" +
+		"  if [ \"$code\" -ne 0 ]; then\n" +
+		"    incidents=\"$root/hook-incidents\"\n" +
+		"    mkdir -p \"$incidents\" || exit \"$code\"\n" +
+		"    sync \"$root\" || exit \"$code\"\n" +
+		"    evidence=$(mktemp \"$incidents/up.XXXXXXXXXX\") || exit \"$code\"\n" +
+		"    sync \"$evidence\" \"$incidents\" || exit \"$code\"\n" +
+		"    printf 'L2TP ip-up failure inbound %s interface %s peer %s pppd_pid %s hook_parent %s\\n' '" + strconv.Itoa(inst.Id) + "' \"$iface\" \"$peer\" \"${PPPD_PID:-}\" \"$PPID\" > \"$evidence\" || exit \"$code\"\n" +
+		"    sync \"$evidence\" \"$incidents\" || true\n" +
+		"  fi\n" +
+		"  exit \"$code\"\n" +
+		"}\ntrap incident EXIT\n" +
 		"case \"$iface\" in\n" +
-		"  ''|.|..|*[!A-Za-z0-9_.-]*) exit 0 ;;\n" +
+		"  ''|.|..|*[!A-Za-z0-9_.-]*) exit 1 ;;\n" +
 		"esac\n" +
+		"[ -n \"$peer\" ] || exit 1\n" +
+		"mkdir -p \"$dir\"\n" +
 		"sysctl -w \"net.ipv4.conf.$iface.route_localnet=1\" >/dev/null 2>&1 || true\n" +
 		"sysctl -w \"net.ipv4.conf.$iface.rp_filter=0\" >/dev/null 2>&1 || true\n" +
-		"[ -n \"$peer\" ] || exit 0\n" +
-		"mkdir -p \"$dir\"\n" +
-		"printf '%s\\n' \"$peer\" > \"$dir/$iface\"\n"
+		// POSIX noclobber creates the marker without replacing an existing
+		// file. A partially written marker remains evidence on failure.
+		"( set -C; printf '%s\\n' \"$peer\" > \"$dir/$iface\" )\n" +
+		"sync \"$dir/$iface\" \"$dir\"\n" +
+		"trap - EXIT\n"
 }
 
 func renderIPDownScript(inst Instance) string {
@@ -235,8 +247,8 @@ func renderIPDownScript(inst Instance) string {
 		"iface=\"${PPP_IFACE:-${IFNAME:-${1:-}}}\"\n" +
 		"peer=\"${PEERNAME:-${PPP_PEERNAME:-}}\"\n" +
 		// A down hook does not prove a final drain or preserve a session
-		// generation. Persist an incident before deleting the active marker;
-		// operators must reconcile the evidence rather than infer zero usage.
+		// generation. Persist an incident and leave the active marker intact;
+		// a late hook must never unlink a newer session's marker.
 		"incidents=\"$root/hook-incidents\"\n" +
 		"mkdir -p \"$incidents\"\n" +
 		"sync \"$root\"\n" +
@@ -251,8 +263,7 @@ func renderIPDownScript(inst Instance) string {
 		"for counter in ifindex statistics/rx_bytes statistics/tx_bytes; do\n" +
 		"  if [ -r \"/sys/class/net/$iface/$counter\" ]; then printf '%s: ' \"$counter\" >> \"$evidence\"; cat \"/sys/class/net/$iface/$counter\" >> \"$evidence\"; fi\n" +
 		"done\n" +
-		"sync \"$evidence\" \"$incidents\"\n" +
-		"if [ -d \"$dir\" ]; then rm -f \"$dir/$iface\"; sync \"$dir\"; fi\n"
+		"sync \"$evidence\" \"$incidents\"\n"
 }
 
 func renderChapSecrets(inst Instance) string {
