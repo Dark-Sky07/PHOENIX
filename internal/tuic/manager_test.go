@@ -18,6 +18,43 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/logger"
 )
 
+func TestEnsureCannotConfuseDelimiterContainingUserSets(t *testing.T) {
+	cert, key := generateTestCert(t)
+	const a = "a0000000-0000-0000-0000-000000000001"
+	const b = "a0000000-0000-0000-0000-000000000002"
+	inst := Instance{Id: 44, Tag: "collision-test", Listen: "127.0.0.1", Port: 0, Certificate: string(cert), PrivateKey: string(key), Clients: []TuicClientSettings{
+		{UUID: a, Email: "a", Password: "p"},
+		{UUID: b, Email: "b", Password: "q"},
+	}}
+	m := &Manager{servers: map[int]*managed{}, lastStartErr: map[int]string{}}
+	t.Cleanup(m.StopAll)
+	if err := m.Ensure(inst); err != nil {
+		t.Fatal(err)
+	}
+	server := m.servers[inst.Id].server
+	changed := inst
+	changed.Clients = []TuicClientSettings{{UUID: a, Email: "a", Password: "p|0:b=" + b + ":q"}}
+	if inst.UsersFingerprint() == changed.UsersFingerprint() {
+		t.Fatal("different user lists have identical fingerprint")
+	}
+	if err := m.Ensure(changed); err != nil {
+		t.Fatal(err)
+	}
+	if server != m.servers[inst.Id].server {
+		t.Fatal("client update restarted listener")
+	}
+	server.users.mu.RLock()
+	defer server.users.mu.RUnlock()
+	if len(server.users.users) != 1 {
+		t.Fatalf("removed user is still registered: %d users", len(server.users.users))
+	}
+	for _, u := range server.users.users {
+		if u.UUIDStr != a || u.Password != changed.Clients[0].Password {
+			t.Fatalf("unexpected retained user: %s", u.UUIDStr)
+		}
+	}
+}
+
 func TestEnsureStartsServerAndReconciles(t *testing.T) {
 	certPEM, keyPEM := generateTestCert(t)
 

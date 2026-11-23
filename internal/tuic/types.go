@@ -60,17 +60,16 @@ func (inst Instance) BindTo() string {
 }
 
 func (inst Instance) StructuralFingerprint() string {
-	parts := []string{
-		inst.BindTo(),
-		fingerprintMaterial(inst.Certificate),
-		fingerprintMaterial(inst.PrivateKey),
-		strings.Join(inst.ALPN, ","),
-		strconv.FormatBool(inst.ZeroRTTHandshake),
-		strconv.Itoa(inst.MaxIdleTime),
-		strconv.Itoa(inst.AuthenticationTimeout),
-		strconv.Itoa(inst.MaxUdpRelayPacketSize),
-	}
-	return strings.Join(parts, "|")
+	encoded, _ := json.Marshal(struct {
+		BindTo, Certificate, PrivateKey string
+		ALPN                            []string
+		ZeroRTTHandshake                bool
+		MaxIdleTime                     int
+		AuthenticationTimeout           int
+		MaxUdpRelayPacketSize           int
+	}{inst.BindTo(), fingerprintMaterial(inst.Certificate), fingerprintMaterial(inst.PrivateKey), inst.ALPN,
+		inst.ZeroRTTHandshake, inst.MaxIdleTime, inst.AuthenticationTimeout, inst.MaxUdpRelayPacketSize})
+	return fmt.Sprintf("%x", sha256.Sum256(encoded))
 }
 
 func fingerprintMaterial(value string) string {
@@ -89,12 +88,22 @@ func fingerprintMaterial(value string) string {
 }
 
 func (inst Instance) UsersFingerprint() string {
-	pairs := make([]string, 0, len(inst.Clients))
+	// Length-delimited JSON prevents passwords or emails containing separators
+	// from making different client sets look identical. Include TrafficID
+	// explicitly: TuicClientSettings intentionally omits it from JSON.
+	entries := make([]string, 0, len(inst.Clients))
 	for _, c := range inst.Clients {
-		pairs = append(pairs, fmt.Sprintf("%d:%s=%s:%s", c.TrafficID, c.Email, c.UUID, c.Password))
+		entry, _ := json.Marshal(struct {
+			TrafficID int
+			Email     string
+			UUID      string
+			Password  string
+		}{c.TrafficID, c.Email, c.UUID, c.Password})
+		entries = append(entries, string(entry))
 	}
-	slices.Sort(pairs)
-	return strings.Join(pairs, "|")
+	slices.Sort(entries)
+	encoded, _ := json.Marshal(entries)
+	return fmt.Sprintf("%x", sha256.Sum256(encoded))
 }
 
 func (inst Instance) FullFingerprint() string {

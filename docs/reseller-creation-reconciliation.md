@@ -34,6 +34,12 @@ contain an inflated snapshot and require evidence-based reconciliation.
 
 ## Local TUIC shutdown journal
 
+TUIC reconciliation fingerprints use structured, hashed user and listener
+settings rather than delimiter concatenation. Differently structured client or
+ALPN lists cannot alias merely because credentials contain separators. A live
+QUIC test checks that a removed user in such a case is disconnected and its
+observed counter is retained; this does not prove durable final accounting.
+
 For retained TUIC shutdown batches, a nonzero sample now needs an existing,
 unique client-traffic row identified by its recorded row ID. Missing IDs,
 deleted rows, ambiguous case variants and negative deltas retain the journal

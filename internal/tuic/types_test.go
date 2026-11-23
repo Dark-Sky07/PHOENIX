@@ -76,6 +76,15 @@ func TestInstanceFromInbound(t *testing.T) {
 	})
 }
 
+func TestStructuralFingerprintDistinguishesALPNBoundaries(t *testing.T) {
+	one := Instance{Listen: "127.0.0.1", Port: 443, ALPN: []string{"h3,custom"}}
+	two := one
+	two.ALPN = []string{"h3", "custom"}
+	if one.StructuralFingerprint() == two.StructuralFingerprint() {
+		t.Fatal("different ALPN lists have identical structural fingerprints")
+	}
+}
+
 func TestStructuralFingerprintDetectsCertificateRenewalAtSamePath(t *testing.T) {
 	dir := t.TempDir()
 	certPath := filepath.Join(dir, "fullchain.pem")
