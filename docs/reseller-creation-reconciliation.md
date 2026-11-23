@@ -52,8 +52,10 @@ These are local safeguards, not a shared cross-host marker or a complete TUIC
 accounting protocol. They do not prove generation or reseller ownership, protect
 unpolled in-memory traffic against a crash, or retroactively bind old TUIC receipts
 to their payloads. Other hosts cannot see this host's journal. Normal periodic TUIC polls
-still use the existing non-journaled path, and a crash or uncertain commit can
-lose or duplicate those deltas. Operators must preserve evidence and reconcile
+still use the existing non-journaled path. Nonzero live samples carrying TUIC
+identity fields are now rejected and requeued in memory if their recorded row
+is missing or ambiguous, rather than discarded or charged to multiple rows.
+A crash or uncertain commit can still lose or duplicate those in-memory deltas. Operators must preserve evidence and reconcile
 rather than deleting a journal or inventing usage.
 
 ## Xray poll identity capture

@@ -124,6 +124,31 @@ func audit3RuntimeTrafficID(t *testing.T, service *InboundService, inbound *mode
 	return 0
 }
 
+func TestTuicLiveBatchRejectsAmbiguousAndMissingIdentity(t *testing.T) {
+	setupBulkDB(t)
+	db := database.GetDB()
+	first := xray.ClientTraffic{Email: "first-tuic@example.test", Enable: true}
+	ambiguous := xray.ClientTraffic{Email: "FIRST-tuic@example.test", Enable: true}
+	for _, row := range []*xray.ClientTraffic{&first, &ambiguous} {
+		if err := db.Create(row).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, sample := range []*xray.ClientTraffic{
+		{Email: first.Email, TuicTrafficID: first.Id, Up: 10},
+		{Email: first.Email, TuicUUID: "old", TuicInboundId: 7, Up: 10},
+	} {
+		if _, _, err := (&InboundService{}).AddTraffic(nil, []*xray.ClientTraffic{sample}); err == nil {
+			t.Fatalf("unverified TUIC live traffic accepted: %+v", sample)
+		}
+	}
+	for _, row := range []*xray.ClientTraffic{&first, &ambiguous} {
+		if err := db.First(row, row.Id).Error; err != nil || row.Up != 0 {
+			t.Fatalf("rejected live sample changed usage: %+v %v", row, err)
+		}
+	}
+}
+
 func TestTuicDeletedTrafficRowCannotBillReusedEmail(t *testing.T) {
 	setupBulkDB(t)
 	db := database.GetDB()
@@ -141,8 +166,8 @@ func TestTuicDeletedTrafficRowCannotBillReusedEmail(t *testing.T) {
 	if old.Id == replacement.Id {
 		t.Fatal("accounting primary key reused")
 	}
-	if _, _, err := (&InboundService{}).AddTraffic(nil, []*xray.ClientTraffic{{Email: old.Email, TuicTrafficID: old.Id, Up: 123, Down: 456}}); err != nil {
-		t.Fatal(err)
+	if _, _, err := (&InboundService{}).AddTraffic(nil, []*xray.ClientTraffic{{Email: old.Email, TuicTrafficID: old.Id, Up: 123, Down: 456}}); err == nil {
+		t.Fatal("deleted traffic identity was silently discarded")
 	}
 	got := audit3Traffic(t, old.Email)
 	if got.Up != 0 || got.Down != 0 {

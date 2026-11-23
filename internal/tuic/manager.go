@@ -2,6 +2,7 @@ package tuic
 
 import (
 	"fmt"
+	"math"
 	"sync"
 	"time"
 
@@ -125,6 +126,16 @@ func (m *Manager) stopAndDrainLocked(mg *managed) {
 	m.appendPendingTrafficLocked(mg.server.CollectClientTraffic())
 }
 
+func addPendingTrafficBytes(current, delta int64) int64 {
+	if current < 0 || delta < 0 {
+		return -1 // Preserve invalid evidence for accounting to reject.
+	}
+	if current > math.MaxInt64-delta {
+		return math.MaxInt64
+	}
+	return current + delta
+}
+
 func (m *Manager) appendPendingTrafficLocked(deltas []ClientTrafficDelta) {
 	if m.pendingTraffic == nil {
 		m.pendingTraffic = make(map[string]ClientTrafficDelta)
@@ -142,8 +153,8 @@ func (m *Manager) appendPendingTrafficLocked(deltas []ClientTrafficDelta) {
 		current.UUID = delta.UUID
 		current.InboundID = delta.InboundID
 		current.TrafficID = delta.TrafficID
-		current.Up += delta.Up
-		current.Down += delta.Down
+		current.Up = addPendingTrafficBytes(current.Up, delta.Up)
+		current.Down = addPendingTrafficBytes(current.Down, delta.Down)
 		m.pendingTraffic[key] = current
 	}
 }

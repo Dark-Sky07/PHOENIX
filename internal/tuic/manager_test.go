@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"math"
 	"net"
 	"reflect"
 	"strings"
@@ -381,6 +382,16 @@ func TestCollectAllTraffic(t *testing.T) {
 	inbounds2, clients2 := m.CollectAllTraffic()
 	if len(inbounds2) != 0 || len(clients2) != 0 {
 		t.Fatalf("expected empty deltas after drain, got %+v, %+v", inbounds2, clients2)
+	}
+}
+
+func TestManagerRequeuedTrafficCannotOverflow(t *testing.T) {
+	m := &Manager{servers: make(map[int]*managed)}
+	m.RequeueClientTraffic([]ClientTrafficDelta{{TrafficID: 3, Email: "a", Up: math.MaxInt64 - 1, Down: 5}})
+	m.RequeueClientTraffic([]ClientTrafficDelta{{TrafficID: 3, Email: "a", Up: 100, Down: -1}})
+	_, got := m.CollectAllTraffic()
+	if len(got) != 1 || got[0].Up != math.MaxInt64 || got[0].Down != -1 {
+		t.Fatalf("requeued counters wrapped or discarded invalid input: %+v", got)
 	}
 }
 

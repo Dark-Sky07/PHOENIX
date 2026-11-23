@@ -262,6 +262,18 @@ func (s *InboundService) addClientTraffic(tx *gorm.DB, traffics []*xray.ClientTr
 	if err := validatePPPAccountingDestinations(tx, traffics); err != nil {
 		return fmt.Errorf("verify PPP accounting destinations: %w", err)
 	}
+	// Periodic TUIC samples previously discarded a deleted traffic ID or
+	// charged every normalized email match. Reject the entire transaction so
+	// the collector can requeue its still-uncommitted runtime deltas.
+	var tuicSamples []*xray.ClientTraffic
+	for _, traffic := range traffics {
+		if traffic != nil && (traffic.TuicTrafficID != 0 || traffic.TuicUUID != "" || traffic.TuicInboundId != 0) {
+			tuicSamples = append(tuicSamples, traffic)
+		}
+	}
+	if err := validateTuicJournalDestinations(tx, tuicSamples); err != nil {
+		return fmt.Errorf("verify TUIC accounting destinations: %w", err)
+	}
 	traffics, err = resolvePPPClientTraffic(tx, traffics)
 	if err != nil {
 		return fmt.Errorf("resolve PPP traffic checkpoints: %w", err)
