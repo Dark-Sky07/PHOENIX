@@ -74,6 +74,28 @@ func TestPPPReconciliationResumesAfterReviewedIncident(t *testing.T) {
 	}
 }
 
+func TestPPPPollRetainsSpoolWhenAccountingDestinationIsMissing(t *testing.T) {
+	setupIntegrationDB(t)
+	t.Setenv("XUI_BIN_FOLDER", t.TempDir())
+	state := &pppPollState{}
+	collect := func() (*pppvpn.TrafficBatch, error) {
+		return &pppvpn.TrafficBatch{Token: 1, Clients: []*xray.ClientTraffic{{Email: "missing@example.test", PPPSessionID: "missing-session", PPPInboundID: 7, PPPRxBytes: 100, PPPTxBytes: 200}}}, nil
+	}
+	acked := false
+	ack := func(uint64) error { acked = true; return nil }
+	if _, _, err := collectAndCommitPPP(state, collect, (&service.InboundService{}).AddPPPTrafficUnderAllocationLock, ack); err == nil || state.marker == "" || state.unlock != nil || acked {
+		t.Fatalf("missing destination allowed acknowledgement: marker=%q acked=%v err=%v", state.marker, acked, err)
+	}
+	var count int64
+	if err := database.GetDB().Model(&model.PPPClientTrafficCounter{}).Where("session_id = ?", "missing-session").Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("missing destination checkpoint persisted: %d %v", count, err)
+	}
+	if unlock, err := service.LockResellerAllocation(); err == nil {
+		unlock()
+		t.Fatal("missing destination did not retain shared poll fence")
+	}
+}
+
 func TestPPPPollKeepsFenceForLegacyClaimWithoutOrigin(t *testing.T) {
 	setupIntegrationDB(t)
 	bin := t.TempDir()

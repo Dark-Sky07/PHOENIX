@@ -102,6 +102,54 @@ func TestPPPAbsoluteCountersAreTransactionalAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestPPPMissingDestinationRollsBackEveryCheckpoint(t *testing.T) {
+	setupBulkDB(t)
+	db := database.GetDB()
+	known := xray.ClientTraffic{Email: "known@example.test", Enable: true, Up: 30, Down: 40}
+	if err := db.Create(&known).Error; err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := model.PPPClientTrafficCounter{SessionID: "known-session", Email: known.Email, InboundID: 7, RxBytes: 30, TxBytes: 40}
+	if err := db.Create(&checkpoint).Error; err != nil {
+		t.Fatal(err)
+	}
+	samples := []*xray.ClientTraffic{
+		{Email: known.Email, PPPSessionID: "known-session", PPPInboundID: 7, PPPRxBytes: 50, PPPTxBytes: 60},
+		{Email: "missing@example.test", PPPSessionID: "missing-session", PPPInboundID: 7, PPPRxBytes: 100, PPPTxBytes: 200},
+	}
+	if _, _, err := (&InboundService{}).AddTraffic(nil, samples); err == nil {
+		t.Fatal("missing PPP accounting destination was silently accepted")
+	}
+	if err := db.First(&known, known.Id).Error; err != nil || known.Up != 30 || known.Down != 40 {
+		t.Fatalf("known usage changed on failed mixed batch: %+v %v", known, err)
+	}
+	if err := db.Where("session_id = ?", "known-session").Take(&checkpoint).Error; err != nil || checkpoint.RxBytes != 30 || checkpoint.TxBytes != 40 {
+		t.Fatalf("known checkpoint changed on failed mixed batch: %+v %v", checkpoint, err)
+	}
+	var missing int64
+	if err := db.Model(&model.PPPClientTrafficCounter{}).Where("session_id = ?", "missing-session").Count(&missing).Error; err != nil || missing != 0 {
+		t.Fatalf("missing destination checkpoint created: %d %v", missing, err)
+	}
+}
+
+func TestPPPAmbiguousNormalizedDestinationIsRejected(t *testing.T) {
+	setupBulkDB(t)
+	db := database.GetDB()
+	for _, email := range []string{"alice@example.test", "ALICE@example.test"} {
+		if err := db.Create(&xray.ClientTraffic{Email: email, Enable: true}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	sample := &xray.ClientTraffic{Email: "Alice@example.test", PPPSessionID: "ambiguous-session", PPPInboundID: 7, PPPRxBytes: 20}
+	if _, _, err := (&InboundService{}).AddTraffic(nil, []*xray.ClientTraffic{sample}); err == nil {
+		t.Fatal("ambiguous PPP usage destination accepted")
+	}
+	var count int64
+	if err := db.Model(&model.PPPClientTrafficCounter{}).Where("session_id = ?", "ambiguous-session").Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("ambiguous checkpoint changed: %d %v", count, err)
+	}
+}
+
 func TestTrafficAccountingSaturatesAndRejectsNegativeDeltas(t *testing.T) {
 	setupBulkDB(t)
 	db := database.GetDB()

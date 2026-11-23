@@ -991,7 +991,12 @@ session checkpoint row before calculating its delta, including on concurrent
 first insert. A lower absolute reading is rejected rather than assumed to be a
 reset, and the transaction does not advance its checkpoint. Checkpoints are
 retained indefinitely, so storage grows; migration requires and copies their
-table rather than silently starting empty.
+table rather than silently starting empty. Before advancing any PPP checkpoint,
+the transaction now requires exactly one normalized matching client-traffic row
+for every PPP sample. A missing or ambiguous destination rolls back the entire
+batch and keeps the collector's poll marker and spool evidence for review. The
+row check does not establish the original client's generation; do not recreate
+or merge rows without reconciling their history.
 
 After each successful SSTP/PPTP poll, periodic daemon reconciliation now checks
 both local PPP evidence and the shared PPP incident before proceeding. Existing

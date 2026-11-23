@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -226,6 +227,9 @@ func (s *InboundService) addClientTraffic(tx *gorm.DB, traffics []*xray.ClientTr
 	if len(traffics) == 0 {
 		return nil
 	}
+	if err := validatePPPAccountingDestinations(tx, traffics); err != nil {
+		return fmt.Errorf("verify PPP accounting destinations: %w", err)
+	}
 	traffics, err = resolvePPPClientTraffic(tx, traffics)
 	if err != nil {
 		return fmt.Errorf("resolve PPP traffic checkpoints: %w", err)
@@ -357,6 +361,48 @@ type PPPCounterDecrease struct {
 
 func (e *PPPCounterDecrease) Error() string {
 	return fmt.Sprintf("PPP session %q client %q inbound %d counters decreased or arrived out of order (rx %d to %d, tx %d to %d); reconciliation required", e.SessionID, e.Email, e.InboundID, e.PreviousRx, e.ObservedRx, e.PreviousTx, e.ObservedTx)
+}
+
+// validatePPPAccountingDestinations rejects missing or ambiguous usage rows
+// before any PPP checkpoint advances. Lock existing rows for the transaction so
+// participating PostgreSQL deletes cannot remove them between check and write.
+// This does not establish that an email belongs to the original client generation.
+func validatePPPAccountingDestinations(tx *gorm.DB, traffics []*xray.ClientTraffic) error {
+	wanted := make(map[string]struct{})
+	for _, traffic := range traffics {
+		if traffic == nil || traffic.PPPSessionID == "" {
+			continue
+		}
+		key := transferEmailKey(traffic.Email)
+		if key == "" {
+			return errors.New("PPP sample has no accounting identity")
+		}
+		wanted[key] = struct{}{}
+	}
+	if len(wanted) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(wanted))
+	for key := range wanted {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	counts := make(map[string]int, len(keys))
+	for _, batch := range chunkStrings(keys, sqlInChunk) {
+		var rows []xray.ClientTraffic
+		if err := tx.Model(&xray.ClientTraffic{}).Select("id", "email").Clauses(clause.Locking{Strength: "UPDATE"}).Where("LOWER(TRIM(email)) IN ?", batch).Order("id").Find(&rows).Error; err != nil {
+			return err
+		}
+		for _, row := range rows {
+			counts[transferEmailKey(row.Email)]++
+		}
+	}
+	for _, key := range keys {
+		if counts[key] != 1 {
+			return fmt.Errorf("PPP accounting identity %q has %d matching traffic rows; manual reconciliation required", key, counts[key])
+		}
+	}
+	return nil
 }
 
 // resolvePPPClientTraffic turns absolute PPP interface counters into deltas and

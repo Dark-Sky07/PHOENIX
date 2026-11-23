@@ -2,6 +2,7 @@ package service
 
 import (
 	"os"
+	"strings"
 	"sync"
 	"testing"
 
@@ -11,6 +12,47 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
+
+// Test only against the isolated PostgreSQL CI database.
+func TestPPPAccountingDestinationsPostgres(t *testing.T) {
+	dsn := os.Getenv("PHOENIX_TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("PHOENIX_TEST_POSTGRES_DSN not set")
+	}
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = pool.Close() })
+	if err := db.AutoMigrate(&xray.ClientTraffic{}); err != nil {
+		t.Fatal(err)
+	}
+	email := uuid.NewString() + "@ppp-destination.test"
+	sample := []*xray.ClientTraffic{{Email: email, PPPSessionID: "pg-destination-session", PPPInboundID: 7}}
+	check := func(wantError bool) {
+		t.Helper()
+		err := db.Transaction(func(tx *gorm.DB) error { return validatePPPAccountingDestinations(tx, sample) })
+		if (err != nil) != wantError {
+			t.Fatalf("destination error=%v, wantError=%v", err, wantError)
+		}
+	}
+	check(true)
+	lower := xray.ClientTraffic{Email: email, Enable: true}
+	upper := xray.ClientTraffic{Email: strings.ToUpper(email), Enable: true}
+	if err := db.Create(&lower).Error; err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Where("id IN ?", []int{lower.Id, upper.Id}).Delete(&xray.ClientTraffic{}).Error })
+	check(false)
+	if err := db.Create(&upper).Error; err != nil {
+		t.Fatal(err)
+	}
+	check(true)
+}
 
 // Two independent DB transactions reproduce separate panel writers; the
 // process-local traffic-writer mutex is deliberately not involved.
