@@ -52,23 +52,31 @@ func CollectTraffic() (*TrafficBatch, error) {
 		return cloneTrafficBatch(trafficCollector.pending), nil
 	}
 
-	files, err := filepath.Glob(filepath.Join(rootDir(), "sessions", "*", "*"))
+	files, err := readSessionPaths()
 	if err != nil {
 		return nil, err
 	}
 	batch := &TrafficBatch{}
 	for _, path := range files {
-		if strings.HasPrefix(filepath.Base(path), ".") {
+		name := filepath.Base(path)
+		if strings.HasPrefix(name, ".") {
 			continue
+		}
+		// ip-up/down creates <session>.tmp.<pid> before an atomic rename.
+		// Never acknowledge a temporary file before the hook can rename it.
+		if _, suffix, ok := strings.Cut(name, ".tmp."); ok {
+			if _, err := strconv.ParseUint(suffix, 10, 64); err == nil {
+				return nil, fmt.Errorf("pppvpn: unfinished session hook file %q", path)
+			}
 		}
 		session, readErr := readPPPSession(path)
 		if readErr != nil {
-			continue // Never delete an unreadable record that may hold final counters.
+			return nil, fmt.Errorf("pppvpn: cannot read session record %q: %w", path, readErr)
 		}
 		if !session.closed {
 			session.rx, session.tx, err = readInterfaceBytes(session.iface)
 			if err != nil {
-				continue // interface is temporarily absent; retry on the next poll
+				return nil, fmt.Errorf("pppvpn: cannot read active interface %q: %w", session.iface, err)
 			}
 		}
 		if session.rx > uint64(^uint64(0)>>1) || session.tx > uint64(^uint64(0)>>1) {
@@ -91,6 +99,37 @@ func CollectTraffic() (*TrafficBatch, error) {
 	batch.Token = trafficCollector.token
 	trafficCollector.pending = batch
 	return cloneTrafficBatch(batch), nil
+}
+
+// Unlike filepath.Glob, explicit directory reads report permission and I/O
+// errors instead of silently treating an inaccessible spool as empty.
+func readSessionPaths() ([]string, error) {
+	root := filepath.Join(rootDir(), "sessions")
+	groups, err := os.ReadDir(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("pppvpn: read session directory: %w", err)
+	}
+	var paths []string
+	for _, group := range groups {
+		if !group.IsDir() {
+			return nil, fmt.Errorf("pppvpn: unexpected session group %q", group.Name())
+		}
+		dir := filepath.Join(root, group.Name())
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return nil, fmt.Errorf("pppvpn: read session group %q: %w", group.Name(), err)
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				return nil, fmt.Errorf("pppvpn: unexpected session directory %q", entry.Name())
+			}
+			paths = append(paths, filepath.Join(dir, entry.Name()))
+		}
+	}
+	return paths, nil
 }
 
 // AckTraffic removes closed-session spool files only after the DB transaction

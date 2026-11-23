@@ -923,3 +923,20 @@ in-memory warning. The current batch remains pending and can block later PPP
 samples, and parent/child shutdown, final hooks, distinct sessions and writers
 are still not fully fenced. Review must preserve evidence and reconcile every
 affected host before clearing local and shared incidents.
+
+PPP collection now acquires the participating allocation lock and writes an
+in-flight database marker before scanning the spool. It retains both the lock
+and marker on an uncertain scan or write, and retries the same pending batch;
+absolute session checkpoints make an uncertain committed write idempotent.
+The marker is removed only after a successful write or after a counter-decrease
+incident is confirmed in both local evidence and the shared database. Closed
+spool acknowledgement follows successful accounting. A crash can leave an
+orphan marker requiring manual investigation; it is not proof of a final
+sample and must not be blindly cleared. Temporary hook files, unreadable or
+malformed records, and unavailable active interfaces now fail the scan instead
+of being silently skipped. This may block allocation and periodic PPP
+reconciliation until the issue is corrected. Polling precedes periodic daemon
+reconciliation, but other runtime mutation paths, failed/missing hooks, vanished
+sessions, traffic after the sample, and nonparticipating writers are not
+fenced. Neither this marker nor a successful poll proves session drain or
+complete accounting.

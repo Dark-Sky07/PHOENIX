@@ -99,3 +99,60 @@ func TestTrafficHookAndPPPDOptionsWireUpAndDownAccounting(t *testing.T) {
 		t.Fatal("ip-down must preserve the active session identity and final counters")
 	}
 }
+
+func TestCollectTrafficRetainsUnfinishedAndMalformedSessions(t *testing.T) {
+	root := setupTrafficTest(t)
+	dir := filepath.Join(root, "sessions", "pptp-7")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	good := filepath.Join(dir, "ppp0.closed.good")
+	if err := os.WriteFile(good, []byte("closed\tppp0\talice\t10\t20\tgood\t7\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	temp := filepath.Join(dir, "ppp1.closed.second.tmp.123")
+	if err := os.WriteFile(temp, []byte("closed\tppp1\tbob\t30\t40\tsecond\t7\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CollectTraffic(); err == nil {
+		t.Fatal("unfinished hook file accepted")
+	}
+	for _, path := range []string{temp, good} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("session evidence lost: %s: %v", path, err)
+		}
+	}
+	if err := os.Remove(temp); err != nil {
+		t.Fatal(err)
+	}
+	bad := filepath.Join(dir, "ppp1.closed.bad")
+	if err := os.WriteFile(bad, []byte("broken"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CollectTraffic(); err == nil {
+		t.Fatal("malformed session accepted")
+	}
+	if err := os.Remove(bad); err != nil {
+		t.Fatal(err)
+	}
+	batch, err := CollectTraffic()
+	if err != nil || len(batch.Clients) != 1 {
+		t.Fatalf("retry lost good session: %+v %v", batch, err)
+	}
+	if err := AckTraffic(batch.Token); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCollectTrafficRejectsUninspectableSessionRoot(t *testing.T) {
+	root := setupTrafficTest(t)
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "sessions"), []byte("not a directory"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CollectTraffic(); err == nil {
+		t.Fatal("uninspectable session spool reported empty")
+	}
+}

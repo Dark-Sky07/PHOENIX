@@ -23,6 +23,17 @@ func (s *InboundService) AddTraffic(inboundTraffics []*xray.Traffic, clientTraff
 	return s.addTrafficBatch("", inboundTraffics, clientTraffics, nil, false)
 }
 
+// AddPPPTrafficUnderAllocationLock applies absolute PPP checkpoints while the
+// caller holds the shared allocation lock and an in-flight poll marker.
+func (s *InboundService) AddPPPTrafficUnderAllocationLock(clients []*xray.ClientTraffic) (bool, bool, error) {
+	for _, client := range clients {
+		if client == nil || client.PPPSessionID == "" {
+			return false, false, errors.New("PPP sample requires a session checkpoint identity")
+		}
+	}
+	return s.addTrafficBatch("", nil, clients, nil, true)
+}
+
 // AddXrayTrafficBatch makes retries after an uncertain database commit
 // idempotent. The receipt and counters commit in the same transaction.
 func (s *InboundService) AddXrayTrafficBatch(id string, inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic) (bool, bool, error) {

@@ -1,6 +1,8 @@
 package job
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"sync"
 
@@ -9,6 +11,8 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/pppvpn"
 	"github.com/Dark-Sky07/phoenix/internal/web/service"
 	"github.com/Dark-Sky07/phoenix/internal/web/websocket"
+	"github.com/Dark-Sky07/phoenix/internal/xray"
+	"github.com/google/uuid"
 )
 
 // PPPVPNJob reconciles local SSTP/PPTP daemons and collects their authenticated
@@ -23,6 +27,62 @@ func NewPPPVPNJob() *PPPVPNJob { return &PPPVPNJob{} }
 
 // All job instances share the same process-local spool collector and token.
 var pppVPNRunMu sync.Mutex
+var sharedPPPPoll pppPollState
+
+type pppPollState struct {
+	unlock func()
+	marker string
+}
+
+// collectAndCommitPPP retains the allocation lock and the exact pending spool
+// batch on ambiguous application failure. A marker without a receipt after a
+// crash is intentionally not cleared automatically.
+func collectAndCommitPPP(state *pppPollState, collect func() (*pppvpn.TrafficBatch, error), apply func([]*xray.ClientTraffic) (bool, bool, error), ack func(uint64) error) (bool, bool, error) {
+	if state.unlock == nil {
+		unlock, err := service.LockResellerAllocation()
+		if err != nil {
+			return false, false, err
+		}
+		id := uuid.NewString()
+		if err := service.BeginXrayPoll(id); err != nil {
+			unlock()
+			return false, false, fmt.Errorf("create PPP poll marker: %w", err)
+		}
+		state.unlock, state.marker = unlock, id
+	}
+	batch, err := collect()
+	if err != nil {
+		return false, false, fmt.Errorf("collect PPP traffic; poll marker %s retained: %w", state.marker, err)
+	}
+	if batch == nil {
+		return false, false, fmt.Errorf("missing PPP batch; poll marker %s retained", state.marker)
+	}
+	var restart, disabled bool
+	if len(batch.Clients) > 0 {
+		restart, disabled, err = apply(batch.Clients)
+		if err != nil {
+			var decrease *service.PPPCounterDecrease
+			if errors.As(err, &decrease) && service.ConfirmPPPCounterIncidentUnderAllocationLock(decrease) == nil {
+				if clearErr := service.FinishXrayPoll(state.marker); clearErr != nil {
+					return restart, disabled, fmt.Errorf("PPP incident: %v; clear poll marker: %w", err, clearErr)
+				}
+				state.unlock()
+				state.unlock, state.marker = nil, ""
+			}
+			return restart, disabled, err
+		}
+	}
+	if err := service.FinishXrayPoll(state.marker); err != nil {
+		return restart, disabled, fmt.Errorf("clear committed PPP poll marker: %w", err)
+	}
+	ackErr := ack(batch.Token)
+	state.unlock()
+	state.unlock, state.marker = nil, ""
+	if ackErr != nil {
+		return restart, disabled, fmt.Errorf("acknowledge PPP traffic: %w", ackErr)
+	}
+	return restart, disabled, nil
+}
 
 func (j *PPPVPNJob) reconcile() bool {
 	inbounds, err := j.inboundService.GetAllInbounds()
@@ -74,41 +134,18 @@ func (j *PPPVPNJob) runOnce(run func()) {
 }
 
 func (j *PPPVPNJob) run() {
-	if !j.reconcile() {
-		return
-	}
-	batch, err := pppvpn.CollectTraffic()
-	if err != nil {
-		logger.Warning("pppvpn job: collect PPP traffic failed:", err)
-		return
-	}
-	if batch == nil {
-		return
-	}
-	needRestart := false
-	clientsDisabled := false
-	if len(batch.Clients) > 0 {
-		needRestart, clientsDisabled, err = j.inboundService.AddTraffic(nil, batch.Clients)
-		if err != nil {
-			logger.Warning("pppvpn job: persist PPP traffic failed:", err)
-			return // Keep the batch pending so the next poll retries without loss.
-		}
-	}
-	if err := pppvpn.AckTraffic(batch.Token); err != nil {
-		logger.Warning("pppvpn job: acknowledge PPP traffic failed:", err)
-		return
-	}
-	// Keep committed session checkpoints even after removing the closed spool
-	// file: another process may already have captured the same final record.
+	// Capture before periodic reconciliation can replace the daemon. Other
+	// runtime paths and unobserved/final traffic remain outside this barrier.
+	needRestart, clientsDisabled, err := collectAndCommitPPP(&sharedPPPPoll, pppvpn.CollectTraffic, j.inboundService.AddPPPTrafficUnderAllocationLock, pppvpn.AckTraffic)
 	if needRestart {
 		j.xrayService.SetToNeedRestart()
 	}
+	if err != nil {
+		logger.Warning("pppvpn job: PPP collection or persistence failed:", err)
+		return
+	}
+	j.reconcile()
 	if clientsDisabled {
-		// Quota enforcement ran in AddTraffic. Reconcile again now rather than
-		// waiting for the next cron interval, so a depleted PPP account loses
-		// daemon credentials and any active session as promptly as possible.
-		j.reconcile()
-
 		websocket.BroadcastInvalidate(websocket.MessageTypeInbounds)
 	}
 }

@@ -1,6 +1,8 @@
 package service
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -100,5 +102,36 @@ func recordPPPCounterDecrease(decrease *PPPCounterDecrease, allocationHeld bool)
 		return err
 	}
 	completed = true
+	return nil
+}
+
+// ConfirmPPPCounterIncidentUnderAllocationLock checks both exact local evidence
+// and the shared incident before a caller removes its durable poll marker.
+// The caller must already hold the allocation lock.
+func ConfirmPPPCounterIncidentUnderAllocationLock(decrease *PPPCounterDecrease) error {
+	if decrease == nil || pppIncidentPending.Load() {
+		return errors.New("PPP incident evidence is not durable")
+	}
+	detail := decrease.Error()
+	sum := sha256.Sum256([]byte(detail))
+	path := filepath.Join(config.GetDBFolderPath(), pppEvidenceDir, hex.EncodeToString(sum[:])+".txt")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if string(data) != detail+"\n" {
+		return errors.New("PPP incident evidence is incomplete")
+	}
+	db := database.GetDB()
+	if db == nil {
+		return errors.New("database unavailable")
+	}
+	var count int64
+	if err := db.Model(&model.ResellerNodeCounterIncident{}).Where("node_id = ?", -3).Count(&count).Error; err != nil {
+		return err
+	}
+	if count == 0 {
+		return errors.New("shared PPP incident is missing")
+	}
 	return nil
 }
