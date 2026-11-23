@@ -120,7 +120,9 @@ func (ur *UserRegistry) CollectTrafficDeltas() []ClientTrafficDelta {
 	collect := func(u *User, retired bool) {
 		up := u.Traffic.BytesUp.Swap(0)
 		down := u.Traffic.BytesDown.Swap(0)
-		if up > 0 || down > 0 {
+		// Preserve invalid or wrapped values for the accounting layer to reject;
+		// silently discarding a negative-only delta would erase evidence.
+		if up != 0 || down != 0 {
 			deltas = append(deltas, ClientTrafficDelta{
 				TrafficID: u.TrafficID,
 				Email:     u.Email,

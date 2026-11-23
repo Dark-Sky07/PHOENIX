@@ -385,6 +385,24 @@ func TestCollectAllTraffic(t *testing.T) {
 	}
 }
 
+func TestManagerRetainsDistinctPendingSourceIdentities(t *testing.T) {
+	m := &Manager{servers: make(map[int]*managed)}
+	original := ClientTrafficDelta{TrafficID: 3, InboundID: 1, UUID: "old", Email: "old@example.test", Up: 10}
+	replacement := ClientTrafficDelta{TrafficID: 3, InboundID: 1, UUID: "new", Email: "new@example.test", Down: 20}
+	m.RequeueClientTraffic([]ClientTrafficDelta{original, replacement})
+	_, got := m.CollectAllTraffic()
+	if len(got) != 2 {
+		t.Fatalf("distinct source evidence merged: %+v", got)
+	}
+	seen := make(map[ClientTrafficDelta]bool)
+	for _, delta := range got {
+		seen[delta] = true
+	}
+	if !seen[original] || !seen[replacement] {
+		t.Fatalf("source identities changed: %+v", got)
+	}
+}
+
 func TestManagerRequeuedTrafficCannotOverflow(t *testing.T) {
 	m := &Manager{servers: make(map[int]*managed)}
 	m.RequeueClientTraffic([]ClientTrafficDelta{{TrafficID: 3, Email: "a", Up: math.MaxInt64 - 1, Down: 5}})

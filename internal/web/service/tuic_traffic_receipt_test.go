@@ -43,6 +43,23 @@ func TestTuicReceiptBindsOriginalDeltas(t *testing.T) {
 	}
 }
 
+func TestTuicBatchRejectsNegativeOnlyCounter(t *testing.T) {
+	setupBulkDB(t)
+	db := database.GetDB()
+	row := xray.ClientTraffic{Email: "negative-tuic@example.test", Enable: true}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	sample := []tuic.ClientTrafficDelta{{Email: row.Email, TrafficID: row.Id, Up: -1, Down: -2}}
+	if err := (&InboundService{}).AddTuicTrafficBatch("negative-only", sample); err == nil {
+		t.Fatal("negative-only sample accepted")
+	}
+	var count int64
+	if err := db.Model(&model.TuicTrafficReceipt{}).Where("id = ?", "negative-only").Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("negative sample created receipt: %d %v", count, err)
+	}
+}
+
 func TestTuicJournalRejectsMissingAndAmbiguousDestinations(t *testing.T) {
 	setupBulkDB(t)
 	db := database.GetDB()

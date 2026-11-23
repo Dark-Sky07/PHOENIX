@@ -62,7 +62,10 @@ After restart, a periodic journal can be cleaned up automatically only under
 the recovery lock with its exclusive marker and a matching payload-bound receipt
 proving the transaction already committed. Uncommitted journals lack a durable
 ownership snapshot and remain for manual reconciliation; they are not applied
-automatically. Ordinary cleanup failures release the lock behind the retained
+automatically. TUIC collection retains negative-only counter evidence for
+rejection and keeps distinct source identities separate in the manager's pending
+queue; neither measure proves immutable historical ownership or generation.
+Ordinary cleanup failures release the lock behind the retained
 marker; an uncertain marker deletion keeps the lock. A crash before journal
 publication or after journal removal can
 leave only a marker; never infer missing bytes from it.

@@ -62,7 +62,7 @@ func TestAudit3ManagerStopMustInterruptIdleTCPRelay(t *testing.T) {
 	cert, key := generateTestCert(t)
 	clientID := uuid.New()
 	password := "audit3-password"
-	m := &Manager{servers: make(map[int]*managed), lastStartErr: make(map[int]string), pendingTraffic: make(map[string]ClientTrafficDelta)}
+	m := &Manager{servers: make(map[int]*managed), lastStartErr: make(map[int]string), pendingTraffic: make(map[pendingTrafficKey]ClientTrafficDelta)}
 	if err := m.Ensure(Instance{Id: inboundID, Tag: "audit3-manager-shutdown", Listen: "127.0.0.1", Port: 0, Certificate: string(cert), PrivateKey: string(key), ALPN: []string{"h3"}, AuthenticationTimeout: 2, MaxIdleTime: 30, Clients: []TuicClientSettings{{UUID: clientID.String(), Password: password, Email: "close-idle@audit3"}}}); err != nil {
 		t.Fatal(err)
 	}

@@ -34,6 +34,18 @@ func TestUserRegistryBasic(t *testing.T) {
 	}
 }
 
+func TestUserRegistryPreservesNegativeCounterEvidence(t *testing.T) {
+	reg := NewUserRegistry()
+	reg.SetUsers([]TuicClientSettings{{UUID: uuid.NewString(), Email: "negative@example.test", TrafficID: 5}})
+	if !reg.AddTestTraffic("negative@example.test", -7, -3) {
+		t.Fatal("missing user")
+	}
+	got := reg.CollectTrafficDeltas()
+	if len(got) != 1 || got[0].Up != -7 || got[0].Down != -3 {
+		t.Fatalf("negative counter evidence lost: %+v", got)
+	}
+}
+
 func TestUserRegistryCredentialUpdatesKeepOldCounters(t *testing.T) {
 	reg := NewUserRegistry()
 	u1 := uuid.New().String()

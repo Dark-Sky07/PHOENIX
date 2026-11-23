@@ -16,11 +16,18 @@ type managed struct {
 	usersFP      string
 }
 
+type pendingTrafficKey struct {
+	trafficID int
+	inboundID int
+	uuid      string
+	email     string
+}
+
 type Manager struct {
 	mu             sync.Mutex
 	servers        map[int]*managed
 	lastStartErr   map[int]string
-	pendingTraffic map[string]ClientTrafficDelta
+	pendingTraffic map[pendingTrafficKey]ClientTrafficDelta
 }
 
 var (
@@ -33,7 +40,7 @@ func GetManager() *Manager {
 		managerInstance = &Manager{
 			servers:        make(map[int]*managed),
 			lastStartErr:   make(map[int]string),
-			pendingTraffic: make(map[string]ClientTrafficDelta),
+			pendingTraffic: make(map[pendingTrafficKey]ClientTrafficDelta),
 		}
 	})
 	return managerInstance
@@ -138,16 +145,12 @@ func addPendingTrafficBytes(current, delta int64) int64 {
 
 func (m *Manager) appendPendingTrafficLocked(deltas []ClientTrafficDelta) {
 	if m.pendingTraffic == nil {
-		m.pendingTraffic = make(map[string]ClientTrafficDelta)
+		m.pendingTraffic = make(map[pendingTrafficKey]ClientTrafficDelta)
 	}
 	for _, delta := range deltas {
-		key := delta.Email
-		if delta.TrafficID > 0 {
-			key = fmt.Sprintf("traffic:%d", delta.TrafficID)
-		}
-		if delta.TrafficID == 0 && delta.InboundID > 0 && delta.UUID != "" {
-			key = fmt.Sprintf("%d:%s", delta.InboundID, delta.UUID)
-		}
+		// Preserve every identity component when users change between drains.
+		// Merging by traffic ID alone overwrote the older source's evidence.
+		key := pendingTrafficKey{trafficID: delta.TrafficID, inboundID: delta.InboundID, uuid: delta.UUID, email: delta.Email}
 		current := m.pendingTraffic[key]
 		current.Email = delta.Email
 		current.UUID = delta.UUID
