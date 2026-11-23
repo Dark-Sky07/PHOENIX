@@ -1,11 +1,16 @@
 package service
 
 import (
+	"fmt"
 	"math"
+	"os"
+	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
+	"github.com/Dark-Sky07/phoenix/internal/pppvpn"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
 )
 
@@ -81,14 +86,18 @@ func TestPPPAbsoluteCountersAreTransactionalAndIdempotent(t *testing.T) {
 	assertUsage(100, 200)
 	apply(145, 260)
 	assertUsage(145, 260)
-	apply(10, 5) // a kernel counter reset must not subtract already-accounted usage
-	assertUsage(155, 265)
+	// A lower reading can be a stale replay or a reset. Neither is evidence
+	// for charging a new baseline or discarding already accounted usage.
+	if _, _, err := service.AddTraffic(nil, []*xray.ClientTraffic{{Email: client.Email, Enable: true, PPPSessionID: "pptp-session-uuid", PPPInboundID: inbound.Id, PPPRxBytes: 10, PPPTxBytes: 5}}); err == nil {
+		t.Fatal("counter decrease was accepted as a new session")
+	}
+	assertUsage(145, 260)
 
 	var checkpoint model.PPPClientTrafficCounter
 	if err := database.GetDB().Where("session_id = ?", "pptp-session-uuid").Take(&checkpoint).Error; err != nil {
 		t.Fatalf("read PPP checkpoint: %v", err)
 	}
-	if checkpoint.RxBytes != 10 || checkpoint.TxBytes != 5 || checkpoint.InboundID != inbound.Id || checkpoint.Email != client.Email {
+	if checkpoint.RxBytes != 145 || checkpoint.TxBytes != 260 || checkpoint.InboundID != inbound.Id || checkpoint.Email != client.Email {
 		t.Fatalf("unexpected persisted checkpoint: %+v", checkpoint)
 	}
 }
@@ -169,5 +178,63 @@ func TestPPPCheckpointCannotBeReassignedToDifferentIdentity(t *testing.T) {
 	}
 	if checkpoint.Email != first.Email || checkpoint.RxBytes != 100 || checkpoint.TxBytes != 200 {
 		t.Fatalf("failed reassignment changed original checkpoint: %+v", checkpoint)
+	}
+}
+
+func TestPPPClosedSessionReplayAfterAcknowledgementDoesNotDoubleCount(t *testing.T) {
+	setupBulkDB(t)
+	t.Setenv("XUI_BIN_FOLDER", t.TempDir())
+	db := database.GetDB()
+	inbound := mkInbound(t, 32126, model.PPTP, `{"clients":[]}`)
+	client := model.Client{Email: "ppp-final@example.test", ID: "d271c1dc-664c-4f48-8f86-8f973c68e70d", Enable: true}
+	inbound.Settings = clientsSettings(t, []model.Client{client})
+	if err := db.Save(inbound).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := (&ClientService{}).SyncInbound(nil, inbound.Id, []model.Client{client}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&xray.ClientTraffic{InboundId: inbound.Id, Email: client.Email, Enable: true}).Error; err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(os.Getenv("XUI_BIN_FOLDER"), "pppvpn", "sessions", "pptp-"+strconv.Itoa(inbound.Id))
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "ppp0.closed.final-session")
+	data := fmt.Sprintf("closed\tppp0\t%s\t120\t150\tfinal-session\t%d\n", client.Email, inbound.Id)
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	first, err := pppvpn.CollectTraffic()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale, err := pppvpn.CollectTraffic()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Clients) != 1 || len(stale.Clients) != 1 {
+		t.Fatal("expected two independent copies of final sample")
+	}
+	if _, _, err := (&InboundService{}).AddTraffic(nil, first.Clients); err != nil {
+		t.Fatal(err)
+	}
+	if err := pppvpn.AckTraffic(first.Token); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("closed spool not acknowledged: %v", err)
+	}
+	if _, _, err := (&InboundService{}).AddTraffic(nil, stale.Clients); err != nil {
+		t.Fatal(err)
+	}
+	var got xray.ClientTraffic
+	if err := db.Where("email = ?", client.Email).Take(&got).Error; err != nil || got.Up != 120 || got.Down != 150 {
+		t.Fatalf("replayed final sample charged twice: %+v %v", got, err)
+	}
+	var checkpoint model.PPPClientTrafficCounter
+	if err := db.Where("session_id = ?", "final-session").Take(&checkpoint).Error; err != nil || checkpoint.RxBytes != 120 || checkpoint.TxBytes != 150 {
+		t.Fatalf("receipt lost: %+v %v", checkpoint, err)
 	}
 }

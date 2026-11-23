@@ -19,17 +19,6 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// DeletePPPTrafficCheckpoints removes final per-session baselines after the
-// corresponding closed-session spool files have been safely acknowledged.
-func (s *InboundService) DeletePPPTrafficCheckpoints(sessionIDs []string) error {
-	for _, batch := range chunkStrings(sessionIDs, sqlInChunk) {
-		if err := database.GetDB().Where("session_id IN ?", batch).Delete(&model.PPPClientTrafficCounter{}).Error; err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (s *InboundService) AddTraffic(inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic) (needRestart bool, clientsDisabled bool, err error) {
 	return s.addTrafficBatch("", inboundTraffics, clientTraffics, nil, false)
 }
@@ -334,27 +323,25 @@ func resolvePPPClientTraffic(tx *gorm.DB, traffics []*xray.ClientTraffic) ([]*xr
 		if len(traffic.PPPSessionID) > 128 || traffic.PPPInboundID <= 0 || strings.TrimSpace(traffic.Email) == "" || traffic.PPPRxBytes < 0 || traffic.PPPTxBytes < 0 {
 			return nil, errors.New("invalid PPP traffic checkpoint")
 		}
+		// Establish a row even for the first observation, then lock it before
+		// calculating deltas. The unique insert serializes concurrent first
+		// polls; FOR UPDATE serializes existing rows across PostgreSQL writers.
+		initial := model.PPPClientTrafficCounter{SessionID: traffic.PPPSessionID, Email: strings.TrimSpace(traffic.Email), InboundID: traffic.PPPInboundID}
+		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&initial).Error; err != nil {
+			return nil, err
+		}
 		var previous model.PPPClientTrafficCounter
-		result := tx.Where("session_id = ?", traffic.PPPSessionID).Take(&previous)
-		if result.Error != nil && !errors.Is(result.Error, gorm.ErrRecordNotFound) {
-			return nil, result.Error
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("session_id = ?", traffic.PPPSessionID).Take(&previous).Error; err != nil {
+			return nil, err
 		}
-		var rxDelta, txDelta int64
-		if result.Error == nil {
-			if transferEmailKey(previous.Email) != transferEmailKey(traffic.Email) || previous.InboundID != traffic.PPPInboundID || previous.RxBytes < 0 || previous.TxBytes < 0 {
-				return nil, errors.New("PPP session checkpoint identity mismatch or corruption")
-			}
-			rxDelta = traffic.PPPRxBytes - previous.RxBytes
-			txDelta = traffic.PPPTxBytes - previous.TxBytes
-			if rxDelta < 0 {
-				rxDelta = traffic.PPPRxBytes // a counter reset starts a new baseline
-			}
-			if txDelta < 0 {
-				txDelta = traffic.PPPTxBytes
-			}
-		} else {
-			rxDelta, txDelta = traffic.PPPRxBytes, traffic.PPPTxBytes
+		if transferEmailKey(previous.Email) != transferEmailKey(traffic.Email) || previous.InboundID != traffic.PPPInboundID || previous.RxBytes < 0 || previous.TxBytes < 0 {
+			return nil, errors.New("PPP session checkpoint identity mismatch or corruption")
 		}
+		if traffic.PPPRxBytes < previous.RxBytes || traffic.PPPTxBytes < previous.TxBytes {
+			return nil, fmt.Errorf("PPP session %q counters decreased or arrived out of order; reconciliation required", traffic.PPPSessionID)
+		}
+		rxDelta := traffic.PPPRxBytes - previous.RxBytes
+		txDelta := traffic.PPPTxBytes - previous.TxBytes
 		checkpoint := model.PPPClientTrafficCounter{
 			SessionID: traffic.PPPSessionID,
 			Email:     strings.TrimSpace(traffic.Email),

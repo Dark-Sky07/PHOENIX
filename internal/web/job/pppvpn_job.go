@@ -14,13 +14,15 @@ import (
 // PPPVPNJob reconciles local SSTP/PPTP daemons and collects their authenticated
 // PPP interface counters into the shared client-traffic/quota pipeline.
 type PPPVPNJob struct {
-	runMu          sync.Mutex
 	inboundService service.InboundService
 	clientService  service.ClientService
 	xrayService    service.XrayService
 }
 
 func NewPPPVPNJob() *PPPVPNJob { return &PPPVPNJob{} }
+
+// All job instances share the same process-local spool collector and token.
+var pppVPNRunMu sync.Mutex
 
 func (j *PPPVPNJob) reconcile() bool {
 	inbounds, err := j.inboundService.GetAllInbounds()
@@ -61,15 +63,17 @@ func (j *PPPVPNJob) reconcile() bool {
 	return true
 }
 
-func (j *PPPVPNJob) Run() {
-	// The cron scheduler may overlap jobs, and startTask also performs an
-	// immediate initial run. Keep checkpoint processing, file acknowledgement,
-	// and checkpoint cleanup in one local critical section to avoid a replay
-	// racing final-session cleanup.
-	if !j.runMu.TryLock() {
+func (j *PPPVPNJob) Run() { j.runOnce(j.run) }
+
+func (j *PPPVPNJob) runOnce(run func()) {
+	if !pppVPNRunMu.TryLock() {
 		return
 	}
-	defer j.runMu.Unlock()
+	defer pppVPNRunMu.Unlock()
+	run()
+}
+
+func (j *PPPVPNJob) run() {
 	if !j.reconcile() {
 		return
 	}
@@ -94,11 +98,8 @@ func (j *PPPVPNJob) Run() {
 		logger.Warning("pppvpn job: acknowledge PPP traffic failed:", err)
 		return
 	}
-	if len(batch.ClosedSessionIDs) > 0 {
-		if err := j.inboundService.DeletePPPTrafficCheckpoints(batch.ClosedSessionIDs); err != nil {
-			logger.Warning("pppvpn job: delete completed traffic checkpoints failed:", err)
-		}
-	}
+	// Keep committed session checkpoints even after removing the closed spool
+	// file: another process may already have captured the same final record.
 	if needRestart {
 		j.xrayService.SetToNeedRestart()
 	}

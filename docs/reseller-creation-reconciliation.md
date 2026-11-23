@@ -888,3 +888,22 @@ disappear between polls, or be reused with counters above the previous reading;
 short-lived sessions and usage after the final read are not captured by this
 change. Durable closed-session accounting, writer quiescence and recovery remain
 necessary.
+
+SSTP/PPTP PPP session checkpoints are now retained after a closed spool file is
+acknowledged. This prevents a second collector that already captured the same
+record from billing it again after the first acknowledgement. All job instances
+also share one process-local run lock. PostgreSQL writers create/lock the same
+session checkpoint row before calculating its delta, including on concurrent
+first insert. A lower absolute reading is rejected rather than assumed to be a
+reset, and the transaction does not advance its checkpoint. Checkpoints are
+retained indefinitely, so storage grows; migration requires and copies their
+table rather than silently starting empty.
+
+These changes only protect the same session ID and participating checkpoint
+writers. A lower/stale reading currently logs an error and retains its batch;
+it does not yet create a durable shared incident that blocks quota decisions.
+Different sessions or other traffic writers updating the same client across
+processes still need independent serialization. The session ID alone does not
+prove immutable client generation; final hooks, children, undetected short-lived
+sessions and post-sample traffic are not proven drained. Older deployments may
+already have deleted checkpoints, and missing evidence cannot be reconstructed.

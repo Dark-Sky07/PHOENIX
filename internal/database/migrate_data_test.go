@@ -212,6 +212,7 @@ func TestCopyAllModelsPreservesTrafficProtocolEvidence(t *testing.T) {
 	rows := []any{
 		&model.ResellerNodeCounterIncident{NodeId: 123, Email: "migration@example.test", PreviousUp: 100, ObservedUp: 10},
 		&model.ResellerNodeCounterIncident{NodeId: -2, Email: "", Direction: "l2tp-orphan"},
+		&model.PPPClientTrafficCounter{SessionID: "ppp-migration", Email: "migration@example.test", InboundID: 27, RxBytes: 123, TxBytes: 321},
 		&model.ClientGlobalTraffic{MasterGuid: "master", Email: "migration@example.test", Up: 77},
 		&model.XrayTrafficReceipt{ID: "batch-committed"},
 		&model.XrayTrafficInFlight{ID: "batch-pending"},
@@ -256,6 +257,10 @@ func TestCopyAllModelsPreservesTrafficProtocolEvidence(t *testing.T) {
 	var l2tpIncident model.ResellerNodeCounterIncident
 	if err := dst.First(&l2tpIncident, "node_id = ?", -2).Error; err != nil || l2tpIncident.Direction != "l2tp-orphan" {
 		t.Fatalf("L2TP incident: %+v %v", l2tpIncident, err)
+	}
+	var ppp model.PPPClientTrafficCounter
+	if err := dst.First(&ppp, "session_id = ?", "ppp-migration").Error; err != nil || ppp.RxBytes != 123 || ppp.TxBytes != 321 {
+		t.Fatalf("PPP checkpoint: %+v %v", ppp, err)
 	}
 }
 
@@ -314,6 +319,7 @@ func TestTrafficEvidenceMigrationPostgres(t *testing.T) {
 		&model.TrafficSnapshotSender{ID: "node-sender", Sender: "migration-sender", Generation: "g", LastSequence: 72},
 		&model.ResellerNodeCounterIncident{NodeId: 313, Email: "migration@test", PreviousUp: 80, ObservedUp: 10},
 		&model.ResellerNodeCounterIncident{NodeId: -2, Email: "", Direction: "l2tp-orphan"},
+		&model.PPPClientTrafficCounter{SessionID: "ppp-pg-migration", Email: "migration@test", InboundID: 313, RxBytes: 123, TxBytes: 321},
 		&model.XrayTrafficReceipt{ID: "migration-receipt"}, &model.XrayTrafficInFlight{ID: "migration-inflight"},
 	} {
 		if err := src.Create(row).Error; err != nil {
@@ -362,5 +368,9 @@ func TestTrafficEvidenceMigrationPostgres(t *testing.T) {
 	var l2tpIncident model.ResellerNodeCounterIncident
 	if err := dst.First(&l2tpIncident, "node_id = ?", -2).Error; err != nil || l2tpIncident.Direction != "l2tp-orphan" {
 		t.Fatalf("L2TP incident: %+v %v", l2tpIncident, err)
+	}
+	var ppp model.PPPClientTrafficCounter
+	if err := dst.First(&ppp, "session_id = ?", "ppp-pg-migration").Error; err != nil || ppp.RxBytes != 123 || ppp.TxBytes != 321 {
+		t.Fatalf("PPP checkpoint: %+v %v", ppp, err)
 	}
 }
