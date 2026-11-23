@@ -11,8 +11,9 @@ import (
 )
 
 // The manager is process-global, so every TuicJob shares this state. Call only
-// under tuicJournalMu. Once a poll starts, keep the allocation lock across
-// retries, including uncertain marker deletion, until the fence is cleared.
+// under tuicJournalMu. Ordinary failures release the allocation lock while the
+// durable marker continues to fence mutations; uncertain marker deletion keeps
+// the lock until the fence is restored.
 type tuicPollState struct {
 	unlock          func()
 	batch           *tuicTrafficBatch
@@ -36,7 +37,25 @@ func collectAndCommitTuic(state *tuicPollState, collect func() []tuic.ClientTraf
 		}
 		state.unlock = unlock
 		state.batch = &tuicTrafficBatch{ID: id, Deltas: collect(), PollMarker: true}
+	} else if state.unlock == nil {
+		unlock, err := service.LockResellerAllocationForXrayRecovery()
+		if err != nil {
+			return nil, false, false, fmt.Errorf("reacquire TUIC poll lock: %w", err)
+		}
+		if err := service.VerifyExclusiveXrayPollMarker(state.batch.ID); err != nil {
+			unlock()
+			return nil, false, false, fmt.Errorf("verify TUIC poll marker: %w", err)
+		}
+		state.unlock = unlock
 	}
+	// A retained marker fences other writers while ordinary failures wait for
+	// retry. Do not release after an uncertain marker delete: it may be gone.
+	defer func() {
+		if state.unlock != nil && !state.deleteUncertain {
+			state.unlock()
+			state.unlock = nil
+		}
+	}()
 	batch := state.batch
 	if state.deleteUncertain {
 		if err := service.EnsureXrayPollMarker(batch.ID); err != nil {

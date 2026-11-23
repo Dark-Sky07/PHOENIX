@@ -39,7 +39,7 @@ func TestTuicReconcileDrainRunsBehindMarkerAndRetainsFailedBatch(t *testing.T) {
 		// Represent bytes drained from a daemon removed during reconcile.
 		return []tuic.ClientTrafficDelta{{Email: row.Email, TrafficID: row.Id, Up: 91}}
 	}
-	if _, _, _, err := collectAndCommitTuic(state, collectAfterReconcile, &service.InboundService{}); err == nil || state.batch == nil || state.unlock == nil {
+	if _, _, _, err := collectAndCommitTuic(state, collectAfterReconcile, &service.InboundService{}); err == nil || state.batch == nil || state.unlock != nil {
 		t.Fatalf("reconcile drain not retained after failure: %v", err)
 	}
 	if err := service.VerifyXrayPollMarker(state.batch.ID); err != nil {
@@ -78,8 +78,8 @@ func TestTuicPeriodicPollRetainsExactBatchAndFenceOnWriteFailure(t *testing.T) {
 		return []tuic.ClientTrafficDelta{{Email: row.Email, TrafficID: row.Id, Up: 120, Down: 45}}
 	}
 	inbound := &service.InboundService{}
-	if _, _, _, err := collectAndCommitTuic(state, poll, inbound); err == nil || state.batch == nil || state.unlock == nil {
-		t.Fatalf("failed poll did not retain exact batch and lock: %v", err)
+	if _, _, _, err := collectAndCommitTuic(state, poll, inbound); err == nil || state.batch == nil || state.unlock != nil {
+		t.Fatalf("failed poll did not retain batch and release lock: %v", err)
 	}
 	id := state.batch.ID
 	if err := service.VerifyXrayPollMarker(id); err != nil {
@@ -108,6 +108,56 @@ func TestTuicPeriodicPollRetainsExactBatchAndFenceOnWriteFailure(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("completed journal remains: %v", err)
+	}
+}
+
+func TestTuicRetryRequiresExclusiveMarkerAfterReacquiringLock(t *testing.T) {
+	setupIntegrationDB(t)
+	db := database.GetDB()
+	row := xray.ClientTraffic{Email: "foreign-tuic@example.test", Enable: true}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("CREATE TRIGGER reject_foreign_tuic BEFORE UPDATE ON client_traffics BEGIN SELECT RAISE(ABORT, 'injected'); END").Error; err != nil {
+		t.Fatal(err)
+	}
+	state := &tuicPollState{}
+	calls := 0
+	poll := func() []tuic.ClientTrafficDelta {
+		calls++
+		return []tuic.ClientTrafficDelta{{Email: row.Email, TrafficID: row.Id, Up: 9}}
+	}
+	if _, _, _, err := collectAndCommitTuic(state, poll, &service.InboundService{}); err == nil || state.unlock != nil {
+		t.Fatalf("expected fenced failure: %v", err)
+	}
+	id := state.batch.ID
+	if unlock, err := service.LockResellerAllocationForXrayRecovery(); err != nil {
+		t.Fatalf("ordinary failure blocked independent recovery: %v", err)
+	} else {
+		unlock()
+	}
+	if unlock, err := service.LockResellerAllocation(); err == nil {
+		unlock()
+		t.Fatal("ordinary failure allowed allocation despite marker")
+	}
+	foreign := uuid.NewString()
+	if err := service.BeginXrayPoll(foreign); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("DROP TRIGGER reject_foreign_tuic").Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := collectAndCommitTuic(state, poll, &service.InboundService{}); err == nil || calls != 1 || state.unlock != nil {
+		t.Fatalf("foreign marker allowed retry or repoll: calls=%d err=%v", calls, err)
+	}
+	if err := service.VerifyXrayPollMarker(id); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.FinishXrayPoll(foreign); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := collectAndCommitTuic(state, poll, &service.InboundService{}); err != nil || calls != 1 {
+		t.Fatalf("retry after recovery failed: calls=%d err=%v", calls, err)
 	}
 }
 
@@ -286,8 +336,11 @@ func TestTuicPeriodicJournalAfterCrashRequiresReview(t *testing.T) {
 	}
 	id := state.batch.ID
 	path := filepath.Join(tuicJournalDir(), id+".json")
-	state.unlock() // Simulate process death while keeping marker and journal.
-	state.unlock = nil
+	// Simulate process death after the failed write released its lock; the
+	// marker and journal must survive independently of this in-memory state.
+	if state.unlock != nil {
+		t.Fatal("ordinary failure retained allocation lock")
+	}
 	if err := NewTuicJob().replayTuicJournal(); err == nil {
 		t.Fatal("periodic journal automatically replayed without recovery coordination")
 	}

@@ -175,7 +175,7 @@ func (j *TuicJob) replayTuicJournal() error {
 // proves that this exact payload already committed. Uncommitted samples lack a
 // durable ownership snapshot and must not be applied automatically on restart.
 // The caller holds tuicJournalMu; on a later cleanup failure the same process
-// retains both the recovery lock and state for retry.
+// retains state for retry and keeps the lock only for an uncertain deletion.
 func (j *TuicJob) recoverCommittedTuicPoll(batch tuicTrafficBatch) error {
 	if sharedTuicPoll.batch != nil {
 		return fmt.Errorf("another TUIC poll is pending")

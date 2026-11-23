@@ -53,14 +53,18 @@ lock before draining the manager, journals the exact delta batch, and commits a
 payload-bound receipt before attempting quota enforcement and clearing the
 journal and marker. Periodic daemon reconciliation runs behind a second marker:
 it reads the desired state under the lock and immediately collects and journals
-any counters drained by stopping or replacing a daemon. A failed step retains the batch and allocation lock in the
-same process for retry; an uncertain marker deletion is restored under that lock.
+any counters drained by stopping or replacing a daemon. An ordinary failed step
+retains the batch and marker but releases the allocation lock so independent
+recovery can proceed. Before retrying, the collector reacquires the recovery
+lock and requires its marker to be exclusive. An uncertain marker deletion
+instead keeps the lock until the marker is restored.
 After restart, a periodic journal can be cleaned up automatically only under
 the recovery lock with its exclusive marker and a matching payload-bound receipt
 proving the transaction already committed. Uncommitted journals lack a durable
 ownership snapshot and remain for manual reconciliation; they are not applied
-automatically. Cleanup failures retain the lock for retry, including uncertain
-marker deletion. A crash before journal publication or after journal removal can
+automatically. Ordinary cleanup failures release the lock behind the retained
+marker; an uncertain marker deletion keeps the lock. A crash before journal
+publication or after journal removal can
 leave only a marker; never infer missing bytes from it.
 
 This is not a complete TUIC accounting protocol. Other hosts cannot inspect this
