@@ -35,7 +35,9 @@ contain an inflated snapshot and require evidence-based reconciliation.
 ## Local TUIC shutdown journal
 
 TUIC reconciliation fingerprints use structured, hashed user and listener
-settings rather than delimiter concatenation. Differently structured client or
+settings rather than delimiter concatenation. OpenVPN, L2TP and SSTP/PPTP
+fingerprints likewise encode fields and credential boundaries before hashing;
+their restart and accounting safeguards still apply. Differently structured client or
 ALPN lists cannot alias merely because credentials contain separators. A live
 QUIC test checks that a removed user in such a case is disconnected and its
 observed counter is retained; this does not prove durable final accounting.

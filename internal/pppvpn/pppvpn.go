@@ -5,13 +5,13 @@
 package pppvpn
 
 import (
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
-	"strconv"
 	"strings"
 
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
@@ -183,9 +183,11 @@ func Validate(i Instance) error {
 }
 
 func (i Instance) fingerprint() string {
-	parts := []string{string(i.Protocol), strconv.Itoa(i.Port), i.Listen, i.LocalIP, i.PoolCIDR, i.DNS1, i.DNS2, i.CertificatePEM, i.PrivateKeyPEM}
-	for _, c := range i.Credentials {
-		parts = append(parts, c.Username+"\x00"+c.Password)
-	}
-	return strings.Join(parts, "\x01")
+	encoded, _ := json.Marshal(struct {
+		Protocol                                                             Protocol
+		Port                                                                 int
+		Listen, LocalIP, PoolCIDR, DNS1, DNS2, CertificatePEM, PrivateKeyPEM string
+		Credentials                                                          []Credential
+	}{i.Protocol, i.Port, i.Listen, i.LocalIP, i.PoolCIDR, i.DNS1, i.DNS2, i.CertificatePEM, i.PrivateKeyPEM, i.Credentials})
+	return fmt.Sprintf("%x", sha256.Sum256(encoded))
 }

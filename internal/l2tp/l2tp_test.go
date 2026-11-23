@@ -30,6 +30,21 @@ func validInstance() Instance {
 	}
 }
 
+func TestFingerprintDistinguishesCredentialBoundaries(t *testing.T) {
+	one := validInstance()
+	one.Credentials = []Credential{{Email: "a", Password: "p\x01b\x00q"}}
+	two := one
+	two.Credentials = []Credential{{Email: "a", Password: "p"}, {Email: "b", Password: "q"}}
+	if one.fingerprint() == two.fingerprint() {
+		t.Fatal("different L2TP credentials have the same fingerprint")
+	}
+	reversed := two
+	reversed.Credentials = []Credential{two.Credentials[1], two.Credentials[0]}
+	if two.fingerprint() != reversed.fingerprint() {
+		t.Fatal("credential order changed L2TP fingerprint")
+	}
+}
+
 func TestWriteConfigDoesNotRemoveOtherStrongSwanRoots(t *testing.T) {
 	setupTrafficFilesystem(t)
 	parent := t.TempDir()

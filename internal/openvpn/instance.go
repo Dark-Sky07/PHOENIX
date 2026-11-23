@@ -11,7 +11,9 @@
 package openvpn
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -60,16 +62,14 @@ func (inst Instance) fingerprint() string {
 	clients := make([]string, len(inst.Clients))
 	copy(clients, inst.Clients)
 	sort.Strings(clients)
-	return strings.Join([]string{
-		strconv.Itoa(inst.Port),
-		inst.listenFor(),
-		inst.protoFor(),
-		strconv.FormatBool(inst.RedirectGw),
-		strconv.FormatBool(inst.PushDNS),
-		inst.dns1For(),
-		inst.dns2For(),
-		strings.Join(clients, ","),
-	}, "|")
+	encoded, _ := json.Marshal(struct {
+		Port                int
+		Listen, Proto       string
+		RedirectGw, PushDNS bool
+		DNS1, DNS2          string
+		Clients             []string
+	}{inst.Port, inst.listenFor(), inst.protoFor(), inst.RedirectGw, inst.PushDNS, inst.dns1For(), inst.dns2For(), clients})
+	return fmt.Sprintf("%x", sha256.Sum256(encoded))
 }
 
 func (inst Instance) listenFor() string {
