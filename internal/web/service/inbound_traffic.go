@@ -979,6 +979,9 @@ func (s *InboundService) UpdateClientStat(tx *gorm.DB, email string, client *mod
 }
 
 func (s *InboundService) DelClientStat(tx *gorm.DB, email string) error {
+	if err := rejectNegativeTrafficEvidence(tx, []string{email}); err != nil {
+		return err
+	}
 	if err := tx.Where("LOWER(TRIM(email)) = LOWER(?)", strings.TrimSpace(email)).Delete(xray.ClientTraffic{}).Error; err != nil {
 		return err
 	}
@@ -989,6 +992,9 @@ func (s *InboundService) DelClientStat(tx *gorm.DB, email string) error {
 }
 
 func (s *InboundService) delClientStatsByEmails(tx *gorm.DB, emails []string) error {
+	if err := rejectNegativeTrafficEvidence(tx, emails); err != nil {
+		return err
+	}
 	const chunk = 400
 	keys := make([]string, 0, len(emails))
 	for _, email := range emails {

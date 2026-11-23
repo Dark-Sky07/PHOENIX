@@ -209,6 +209,9 @@ func closeResellerTrafficWindowsTx(tx *gorm.DB, emails []string) error {
 // usage, so increasing counters is not double charged. Unassigned owners keep
 // their previously recorded snapshots rather than acquiring later usage.
 func rewriteResellerTrafficCountersTx(tx *gorm.DB, email string, upload, download int64) error {
+	if err := rejectNegativeTrafficEvidence(tx, []string{email}); err != nil {
+		return err
+	}
 	key := transferEmailKey(email)
 	var rows []xray.ClientTraffic
 	if err := tx.Where("LOWER(TRIM(email)) = ?", key).Find(&rows).Error; err != nil {

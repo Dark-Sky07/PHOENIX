@@ -681,6 +681,11 @@ func (s *ClientService) DeleteByEmail(inboundSvc *InboundService, email string, 
 	if email == "" {
 		return false, common.NewError("client email is required")
 	}
+	if !keepTraffic {
+		if err := rejectNegativeTrafficEvidence(database.GetDB(), []string{email}); err != nil {
+			return false, err
+		}
+	}
 	if err := checkPPPAndL2TPAccountingIncidents(database.GetDB()); err != nil {
 		return false, err
 	}
