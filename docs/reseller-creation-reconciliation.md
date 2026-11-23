@@ -120,7 +120,10 @@ host's journal. The safeguards do not prove client generation or reseller
 ownership, protect unpolled in-memory traffic against a crash, or retroactively
 bind old TUIC receipts to their payloads. Normal panel shutdown now creates a
 marker before stopping TUIC listeners and commits their collected counters using
-the same receipt path. If prior recovery or marker creation fails, shutdown
+the same receipt path. Concurrent TUIC server Close calls now all wait for the
+same handler drain before the manager collects counters; this is not evidence
+of durability across a crash or of traffic outside the tracked handlers.
+If prior recovery or marker creation fails, shutdown
 still closes listeners and attempts to save their drained counters as a `.manual`
 journal requiring operator reconciliation; it is never automatically replayed.
 If publication fails before the file exists, counters are requeued in memory;

@@ -53,8 +53,10 @@ type Server struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	closed  atomic.Bool
-	running atomic.Bool
+	closed    atomic.Bool
+	running   atomic.Bool
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // NewServer creates a new TUIC v5 Server instance.
@@ -969,25 +971,26 @@ func (s *Server) sendUDPPacketFragments(
 
 // Close gracefully stops the server and releases all network resources.
 func (s *Server) Close() error {
-	if s.closed.Swap(true) {
-		return nil
-	}
-	s.running.Store(false)
-	s.logf(tuicLogInfo, "listener stopped")
-	s.cancel()
+	// All callers must wait for the same close and handler drain. Returning as
+	// soon as closed is set can let a concurrent manager drain counters while
+	// relays from the first close are still writing them.
+	s.closeOnce.Do(func() {
+		s.closed.Store(true)
+		s.running.Store(false)
+		s.logf(tuicLogInfo, "listener stopped")
+		s.cancel()
 
-	var err error
-	if s.quicListener != nil {
-		err = s.quicListener.Close()
-	}
-	if s.packetConn != nil {
-		_ = s.packetConn.Close()
-	}
+		if s.quicListener != nil {
+			s.closeErr = s.quicListener.Close()
+		}
+		if s.packetConn != nil {
+			_ = s.packetConn.Close()
+		}
 
-	s.closeAllConns()
-
-	s.wg.Wait()
-	return err
+		s.closeAllConns()
+		s.wg.Wait()
+	})
+	return s.closeErr
 }
 
 const (

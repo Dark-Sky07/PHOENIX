@@ -14,6 +14,55 @@ import (
 	clientquic "github.com/quic-go/quic-go"
 )
 
+func TestConcurrentCloseWaitsBeforeManagerDrains(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	registry := NewUserRegistry()
+	registry.SetUsers([]TuicClientSettings{{UUID: uuid.NewString(), Email: "closing@example.test", TrafficID: 42}})
+	server := &Server{id: 17, ctx: ctx, cancel: cancel, users: registry}
+	server.wg.Add(1) // Stand in for a handler still writing its final bytes.
+	first := make(chan error, 1)
+	go func() { first <- server.Close() }()
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("first close did not begin")
+	}
+	m := &Manager{servers: map[int]*managed{17: {server: server, tag: "closing"}}}
+	stopped := make(chan struct{})
+	go func() { m.StopAll(); close(stopped) }()
+	select {
+	case <-stopped:
+		server.wg.Done()
+		t.Fatal("manager drained before first close finished")
+	case <-time.After(100 * time.Millisecond):
+	}
+	if !registry.AddTestTraffic("closing@example.test", 7, 9) {
+		server.wg.Done()
+		t.Fatal("test user missing")
+	}
+	server.wg.Done()
+	select {
+	case err := <-first:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first close did not finish")
+	}
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("manager did not finish")
+	}
+	_, deltas := m.CollectAllTraffic()
+	if len(deltas) != 1 || deltas[0].Up != 7 || deltas[0].Down != 9 || deltas[0].TrafficID != 42 {
+		t.Fatalf("final counters not preserved: %+v", deltas)
+	}
+	if _, again := m.CollectAllTraffic(); len(again) != 0 {
+		t.Fatalf("counter replayed: %+v", again)
+	}
+}
+
 func TestAudit3ManagerStopMustInterruptIdleTCPRelay(t *testing.T) {
 	var listener net.Listener
 	var err error
