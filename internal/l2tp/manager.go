@@ -400,7 +400,7 @@ func (m *Manager) CollectTrafficChecked() (inbounds []InboundTraffic, clients []
 	if m.proc.proc == nil || !m.proc.proc.IsRunning() {
 		// Parent exit is not proof that pppd children stopped or that their
 		// final traffic was recorded. Preserve all known baselines as evidence.
-		if missing := missingL2TPSessions(m.id, m.proc.last, nil, "tracked runtime unavailable"); missing != nil {
+		if missing := missingL2TPSessions(m.id, m.proc.last, nil, nil, "tracked runtime unavailable"); missing != nil {
 			return nil, nil, missing
 		}
 		m.proc.online = map[string]bool{}
@@ -412,7 +412,7 @@ func (m *Manager) CollectTrafficChecked() (inbounds []InboundTraffic, clients []
 	if m.proc.online == nil {
 		m.proc.online = make(map[string]bool)
 	}
-	current, countersOK := readSessions(m.id)
+	current, stale, countersOK := readSessions(m.id)
 	if !countersOK {
 		// A transient marker/interface read failure must not clear baselines or
 		// report a false zero. Retry on the next polling tick.
@@ -420,7 +420,7 @@ func (m *Manager) CollectTrafficChecked() (inbounds []InboundTraffic, clients []
 	}
 	// A missing previously sampled session is not a zero-traffic disconnect:
 	// the down hook discards its marker without recording final counters.
-	if missing := missingL2TPSessions(m.id, m.proc.last, current, "session absent from sample"); missing != nil {
+	if missing := missingL2TPSessions(m.id, m.proc.last, current, stale, "session absent from sample or interface missing"); missing != nil {
 		return nil, nil, missing
 	}
 	// Validate the entire snapshot before changing any baseline. A lower
@@ -477,14 +477,22 @@ func (m *Manager) CollectTrafficChecked() (inbounds []InboundTraffic, clients []
 
 // missingL2TPSessions retains every absent baseline in deterministic order.
 // A nil current map marks all known sessions uncertain when runtime is down.
-func missingL2TPSessions(id int, last, current map[string]interfaceCounter, cause string) *SessionDisappeared {
-	keys := make([]string, 0, len(last))
+func missingL2TPSessions(id int, last, current map[string]interfaceCounter, stale []string, cause string) *SessionDisappeared {
+	keys := make([]string, 0, len(last)+len(stale))
+	seen := make(map[string]bool, len(last)+len(stale))
 	retainedKeys := make([]string, 0, len(last))
 	for key := range last {
 		if _, present := current[key]; !present {
 			keys = append(keys, key)
+			seen[key] = true
 		} else {
 			retainedKeys = append(retainedKeys, key)
+		}
+	}
+	for _, key := range stale {
+		if !seen[key] {
+			keys = append(keys, key)
+			seen[key] = true
 		}
 	}
 	sort.Strings(keys)
@@ -494,11 +502,11 @@ func missingL2TPSessions(id int, last, current map[string]interfaceCounter, caus
 	}
 	observation := func(key string) SessionObservation {
 		iface, email, _ := strings.Cut(key, "\x00")
-		counter := last[key]
-		return SessionObservation{Interface: iface, Email: email, PreviousRx: counter.rx, PreviousTx: counter.tx}
+		counter, known := last[key]
+		return SessionObservation{Interface: iface, Email: email, PreviousRx: counter.rx, PreviousTx: counter.tx, NoBaseline: !known}
 	}
 	first := observation(keys[0])
-	missing := &SessionDisappeared{InboundID: id, Interface: first.Interface, Email: first.Email, PreviousRx: first.PreviousRx, PreviousTx: first.PreviousTx, Cause: cause}
+	missing := &SessionDisappeared{InboundID: id, Interface: first.Interface, Email: first.Email, PreviousRx: first.PreviousRx, PreviousTx: first.PreviousTx, NoBaseline: first.NoBaseline, Cause: cause}
 	for _, key := range keys[1:] {
 		missing.Additional = append(missing.Additional, observation(key))
 	}

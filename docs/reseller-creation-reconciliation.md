@@ -811,9 +811,11 @@ session baselines remain necessary before reconciliation or quota release. Do
 not infer missing bytes or treat a stopped parent daemon as proof of completeness.
 
 When an L2TP session that was sampled in this process disappears from the next
-snapshot, including when its marker remains but its interface is gone, polling
-now preserves all baselines and records the missing sessions and the remaining
-snapshot as evidence. If the tracked runtime becomes unavailable while sampled
+snapshot, polling now preserves all baselines and records the missing sessions
+and the remaining snapshot as evidence. A surviving session marker whose
+interface has disappeared is also treated as an incident even if no prior sample
+exists; evidence explicitly says the prior count is unknown, not zero. If the
+tracked runtime becomes unavailable while sampled
 sessions exist, all last baselines are likewise recorded as uncertain; parent
 exit is not treated as proof of child exit or complete usage. A shared incident
 fences sensitive quota operations after the evidence is
@@ -823,8 +825,8 @@ require manual reconciliation because the existing down hook does not save final
 usage. The node remains running, but L2TP sampling and automatic daemon
 reconciliation are deferred until the incident is resolved; other active L2TP
 sessions can therefore accumulate unsampled traffic during the hold. It cannot
-detect a session that began and ended between polls, disappearance after a
-process restart or runtime replacement, or interface reuse with the same name
+detect a session that began and ended between polls when no marker remains,
+disappearance after a process restart or runtime replacement, or interface reuse with the same name
 and higher counters. It does not recover unobserved bytes.
 
 L2TP daemon replacement and checked removal now preserve their tracked process,

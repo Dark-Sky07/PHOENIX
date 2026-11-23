@@ -50,11 +50,11 @@ func TestReadSessionsSupportsConcurrentSessionsForOneEmail(t *testing.T) {
 	writeSession(t, 7, "ppp0", "alice@example.com", "100", "200", true)
 	writeSession(t, 7, "ppp1", "alice@example.com", "300", "400", true)
 
-	got, ok := readSessions(7)
+	got, stale, ok := readSessions(7)
 	if !ok {
 		t.Fatal("readSessions reported a transient failure")
 	}
-	if len(got) != 2 {
+	if len(got) != 2 || len(stale) != 0 {
 		t.Fatalf("read %d sessions, want two independent interface/email keys: %#v", len(got), got)
 	}
 	if got["ppp0\x00alice@example.com"].rx != 100 || got["ppp1\x00alice@example.com"].tx != 400 {
@@ -62,16 +62,16 @@ func TestReadSessionsSupportsConcurrentSessionsForOneEmail(t *testing.T) {
 	}
 }
 
-func TestReadSessionsDropsStaleMarkerWithoutInterface(t *testing.T) {
+func TestReadSessionsReportsStaleMarkerWithoutInterface(t *testing.T) {
 	setupTrafficFilesystem(t)
 	writeSession(t, 8, "ppp-stale", "offline@example.com", "10", "20", false)
 
-	got, ok := readSessions(8)
+	got, stale, ok := readSessions(8)
 	if !ok {
-		t.Fatal("a stale marker should be a healthy empty-session read")
+		t.Fatal("a stale marker should be readable as uncertain evidence")
 	}
-	if len(got) != 0 {
-		t.Fatalf("stale marker produced an online session: %#v", got)
+	if len(got) != 0 || len(stale) != 1 || stale[0] != "ppp-stale\x00offline@example.com" {
+		t.Fatalf("stale marker not retained separately: %#v %#v", got, stale)
 	}
 }
 
@@ -79,7 +79,7 @@ func TestReadSessionsFailsClosedOnInvalidCounter(t *testing.T) {
 	setupTrafficFilesystem(t)
 	writeSession(t, 9, "ppp0", "alice@example.com", "not-a-counter", "20", true)
 
-	got, ok := readSessions(9)
+	got, _, ok := readSessions(9)
 	if ok || got != nil {
 		t.Fatalf("invalid interface counter was accepted: got=%#v ok=%v", got, ok)
 	}
@@ -162,7 +162,7 @@ func TestReadSessionsFailsClosedOnUnreadableMarker(t *testing.T) {
 	if err := os.Symlink(filepath.Join(t.TempDir(), "missing"), path); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	if got, ok := readSessions(14); ok || got != nil {
+	if got, _, ok := readSessions(14); ok || got != nil {
 		t.Fatalf("unreadable marker was ignored: %#v %v", got, ok)
 	}
 }
@@ -177,7 +177,7 @@ func TestReadSessionsFailsClosedOnInterfaceLookupError(t *testing.T) {
 	if err := os.WriteFile(sysroot, []byte("not a directory"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if got, ok := readSessions(15); ok || got != nil {
+	if got, _, ok := readSessions(15); ok || got != nil {
 		t.Fatalf("interface lookup error was ignored: %#v %v", got, ok)
 	}
 }
@@ -214,6 +214,27 @@ func TestCollectTrafficRejectsDisappearedSampleWithoutAdvancingBaselines(t *test
 	}
 }
 
+func TestCollectTrafficRejectsNeverSampledStaleMarkers(t *testing.T) {
+	setupTrafficFilesystem(t)
+	writeSession(t, 18, "ppp0", "alice@example.com", "0", "0", false)
+	writeSession(t, 18, "ppp1", "bob@example.com", "0", "0", false)
+	writeSession(t, 18, "ppp2", "active@example.com", "90", "100", true)
+	cmd := &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
+	last := map[string]interfaceCounter{"ppp2\x00active@example.com": {rx: 50, tx: 60}}
+	m := &Manager{id: 18, proc: &managed{proc: &Process{ipsecCmd: cmd, xl2tpdCmd: cmd}, last: last}}
+	inbounds, clients, err := m.CollectTrafficChecked()
+	var missing *SessionDisappeared
+	if !errors.As(err, &missing) || missing.Email != "alice@example.com" || !missing.NoBaseline || len(missing.Additional) != 1 || !missing.Additional[0].NoBaseline || missing.Additional[0].Email != "bob@example.com" {
+		t.Fatalf("never-sampled marker ignored: %+v %v", missing, err)
+	}
+	if len(missing.Retained) != 1 || missing.Retained[0].PreviousRx != 50 || missing.Retained[0].ObservedRx != 90 || !strings.Contains(err.Error(), "no prior sample") {
+		t.Fatalf("incomplete reconciliation evidence: %+v %v", missing, err)
+	}
+	if len(inbounds) != 0 || len(clients) != 0 || last["ppp2\x00active@example.com"].rx != 50 {
+		t.Fatalf("sample advanced despite missing final counters: %#v %#v %#v", inbounds, clients, last)
+	}
+}
+
 func TestCollectTrafficPreservesAllMissingSessions(t *testing.T) {
 	setupTrafficFilesystem(t)
 	writeSession(t, 16, "ppp2", "remaining@example.com", "90", "100", true)
@@ -227,7 +248,7 @@ func TestCollectTrafficPreservesAllMissingSessions(t *testing.T) {
 	m := &Manager{id: 16, proc: &managed{proc: &Process{ipsecCmd: cmd, xl2tpdCmd: cmd}, tag: "tag", last: last}}
 	_, _, err := m.CollectTrafficChecked()
 	var missing *SessionDisappeared
-	if !errors.As(err, &missing) || missing.Interface != "ppp0" || missing.Cause != "session absent from sample" || len(missing.Additional) != 1 {
+	if !errors.As(err, &missing) || missing.Interface != "ppp0" || missing.Cause != "session absent from sample or interface missing" || len(missing.Additional) != 1 {
 		t.Fatalf("missing observations not captured: %+v %v", missing, err)
 	}
 	other := missing.Additional[0]

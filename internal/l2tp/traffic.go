@@ -40,13 +40,14 @@ func (e *CounterDecrease) Error() string {
 	return fmt.Sprintf("l2tp: counter decreased for inbound %d interface %q client %q (rx %d to %d, tx %d to %d); reconciliation required", e.InboundID, e.Interface, e.Email, e.PreviousRx, e.ObservedRx, e.PreviousTx, e.ObservedTx)
 }
 
-// SessionDisappeared reports a previously sampled interface whose marker or
-// interface vanished without a durable final counter. It does not estimate
-// traffic after the last sample or prove the session has terminated.
+// SessionDisappeared reports a missing sampled session or a session marker
+// whose interface vanished before any sample. It does not estimate missing
+// traffic or prove the session has terminated.
 type SessionDisappeared struct {
 	InboundID              int
 	Interface, Email       string
 	PreviousRx, PreviousTx int64
+	NoBaseline             bool
 	Cause                  string
 	Additional             []SessionObservation
 	Retained               []SessionObservation
@@ -57,14 +58,23 @@ type SessionDisappeared struct {
 type SessionObservation struct {
 	Interface, Email       string
 	PreviousRx, PreviousTx int64
-	ObservedRx, ObservedTx int64 // meaningful for Retained observations only
+	ObservedRx, ObservedTx int64 // meaningful for Retained and New observations only
+	NoBaseline             bool
 }
 
 func (e *SessionDisappeared) Error() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "l2tp: session accounting uncertain for inbound %d (%s); last sampled interface %q client %q rx %d tx %d", e.InboundID, e.Cause, e.Interface, e.Email, e.PreviousRx, e.PreviousTx)
+	fmt.Fprintf(&b, "l2tp: session accounting uncertain for inbound %d (%s)", e.InboundID, e.Cause)
+	writeMissing := func(iface, email string, rx, tx int64, noBaseline bool) {
+		if noBaseline {
+			fmt.Fprintf(&b, "; missing interface %q client %q with no prior sample", iface, email)
+		} else {
+			fmt.Fprintf(&b, "; missing interface %q client %q last sampled rx %d tx %d", iface, email, rx, tx)
+		}
+	}
+	writeMissing(e.Interface, e.Email, e.PreviousRx, e.PreviousTx, e.NoBaseline)
 	for _, observation := range e.Additional {
-		fmt.Fprintf(&b, "; missing interface %q client %q rx %d tx %d", observation.Interface, observation.Email, observation.PreviousRx, observation.PreviousTx)
+		writeMissing(observation.Interface, observation.Email, observation.PreviousRx, observation.PreviousTx, observation.NoBaseline)
 	}
 	for _, observation := range e.Retained {
 		fmt.Fprintf(&b, "; currently present: interface %q client %q previous rx %d tx %d observed rx %d tx %d", observation.Interface, observation.Email, observation.PreviousRx, observation.PreviousTx, observation.ObservedRx, observation.ObservedTx)
@@ -130,16 +140,17 @@ func readInterfaceCounter(iface string) (interfaceCounter, bool) {
 	return interfaceCounter{rx: rx, tx: tx}, rxOK && txOK
 }
 
-func readSessions(id int) (map[string]interfaceCounter, bool) {
+func readSessions(id int) (map[string]interfaceCounter, []string, bool) {
 	entries, err := os.ReadDir(sessionDirForID(id))
 	if err != nil {
 		if os.IsNotExist(err) {
 			// No marker directory is the normal no-active-session state.
-			return map[string]interfaceCounter{}, true
+			return map[string]interfaceCounter{}, nil, true
 		}
-		return nil, false
+		return nil, nil, false
 	}
 	out := make(map[string]interfaceCounter, len(entries))
+	var stale []string
 	for _, entry := range entries {
 		if entry.IsDir() || !validInterfaceName(entry.Name()) {
 			continue
@@ -149,35 +160,37 @@ func readSessions(id int) (map[string]interfaceCounter, bool) {
 		if err != nil {
 			// A disappearing marker can race an ip-down hook; it must not
 			// turn this entire sample into a trustworthy empty reading.
-			return nil, false
+			return nil, nil, false
 		}
 		line, readErr := bufio.NewReader(file).ReadString('\n')
 		_ = file.Close()
 		if readErr != nil {
 			// The hook writes a newline-terminated username. A partial write
 			// must not be attributed to an incomplete identity.
-			return nil, false
+			return nil, nil, false
 		}
 		email := strings.TrimSpace(line)
 		if email == "" || strings.ContainsAny(email, "\r\n") {
-			return nil, false
+			return nil, nil, false
 		}
-		// A stale ip-up file must not make an offline client appear online.
+		// An absent interface is not proof of zero final usage. Retain the
+		// marker identity even when this session was never sampled.
 		if _, err := os.Stat(filepath.Join(l2tpSysClassNetRoot, entry.Name())); err != nil {
 			if os.IsNotExist(err) {
+				stale = append(stale, entry.Name()+"\x00"+email)
 				continue
 			}
-			return nil, false
+			return nil, nil, false
 		}
 		counter, ok := readInterfaceCounter(entry.Name())
 		if !ok {
 			// Do not turn a temporarily unreadable counter into a zero delta;
 			// that would discard the baseline and double-count the next poll.
-			return nil, false
+			return nil, nil, false
 		}
 		out[entry.Name()+"\x00"+email] = counter
 	}
-	return out, true
+	return out, stale, true
 }
 
 func saturatingCounterAdd(current, delta int64) int64 {
