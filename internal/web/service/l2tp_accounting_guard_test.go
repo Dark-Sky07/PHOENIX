@@ -134,6 +134,40 @@ func TestL2TPLiveHookPendingBlocksWithoutPermanentIncident(t *testing.T) {
 	}
 }
 
+func TestL2TPPublicationReportsExistingSharedIncidentWithoutLocalEvidence(t *testing.T) {
+	seedResellerRenewal(t)
+	t.Setenv("XUI_BIN_FOLDER", t.TempDir())
+	db := database.GetDB()
+	incident := model.ResellerNodeCounterIncident{NodeId: -2, Email: "", Direction: "l2tp-session-disappeared"}
+	if err := db.Create(&incident).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := PublishL2TPAccountingIncident(); err == nil || !strings.Contains(err.Error(), "shared L2TP") {
+		t.Fatalf("shared incident ignored without local evidence: %v", err)
+	}
+	if _, err := os.Stat(l2tpAccountingIncidentPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("shared observation unexpectedly changed local evidence: %v", err)
+	}
+	// Simulate an independently reviewed recovery, not automatic clearing.
+	if err := db.Delete(&incident).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := PublishL2TPAccountingIncident(); err != nil {
+		t.Fatalf("cleared shared incident still blocks publication: %v", err)
+	}
+}
+
+func TestL2TPPublicationFailsClosedWhenSharedIncidentCannotBeChecked(t *testing.T) {
+	seedResellerRenewal(t)
+	t.Setenv("XUI_BIN_FOLDER", t.TempDir())
+	if err := database.GetDB().Migrator().DropTable(&model.ResellerNodeCounterIncident{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := PublishL2TPAccountingIncident(); err == nil || !strings.Contains(err.Error(), "check shared L2TP") {
+		t.Fatalf("inaccessible shared incident store was accepted: %v", err)
+	}
+}
+
 func TestL2TPDownHookIncidentPublishesSharedBarrier(t *testing.T) {
 	reseller, _ := seedResellerRenewal(t)
 	origin := os.Getenv("XUI_DB_FOLDER")

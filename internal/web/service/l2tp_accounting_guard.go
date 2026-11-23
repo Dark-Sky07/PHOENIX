@@ -223,6 +223,12 @@ func checkPPPAndL2TPAccountingIncidents(db *gorm.DB) error {
 	if err := ObserveL2TPAccountingIncident(); err != nil {
 		return err
 	}
+	return checkSharedL2TPAccountingIncident(db)
+}
+
+// An incident is shared across participating panels. A clean local filesystem
+// cannot authorize recovery or daemon replacement while the shared record exists.
+func checkSharedL2TPAccountingIncident(db *gorm.DB) error {
 	if db == nil {
 		return errors.New("database unavailable while checking L2TP accounting incidents")
 	}
@@ -239,12 +245,14 @@ func checkPPPAndL2TPAccountingIncidents(db *gorm.DB) error {
 // PublishL2TPAccountingIncident runs outside traffic transactions. A committed
 // shared record fences subsequent participating allocation operations on hosts
 // using the same database; the local file remains if the insert or lock fails.
+// Even without a local observation, an existing shared incident is returned to
+// callers. The unlocked clean check is not a fence against a concurrent insert.
 // The global lock serializes publication with participating mutations, but is
 // not a lease or evidence that no writer ran before the incident was observed.
 func PublishL2TPAccountingIncident() error {
 	observation := ObserveL2TPAccountingIncident()
 	if observation == nil {
-		return nil
+		return checkSharedL2TPAccountingIncident(database.GetDB())
 	}
 	var pending *l2tp.HookPendingError
 	if errors.As(observation, &pending) {
@@ -257,7 +265,7 @@ func PublishL2TPAccountingIncident() error {
 	defer unlock()
 	observation = ObserveL2TPAccountingIncident()
 	if observation == nil {
-		return nil
+		return checkSharedL2TPAccountingIncident(database.GetDB())
 	}
 	if errors.As(observation, &pending) {
 		return pending

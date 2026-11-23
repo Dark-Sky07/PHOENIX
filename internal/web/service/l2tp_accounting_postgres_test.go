@@ -47,6 +47,9 @@ func TestL2TPIncidentAcrossPostgresProcesses(t *testing.T) {
 			if err := checkPPPAndL2TPAccountingIncidents(database.GetDB()); err == nil {
 				t.Fatal("reader missed shared L2TP incident")
 			}
+			if err := PublishL2TPAccountingIncident(); err == nil {
+				t.Fatal("reader's reconciliation barrier missed shared L2TP incident")
+			}
 			unlock, err := LockResellerAllocation()
 			if err != nil {
 				t.Fatalf("traffic lock blocked: %v", err)

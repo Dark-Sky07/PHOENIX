@@ -77,6 +77,31 @@ func TestL2TPLocalIncidentDefersReconciliationAfterEmptyPoll(t *testing.T) {
 	}
 }
 
+func TestL2TPSharedIncidentDefersReconciliationWithoutLocalEvidence(t *testing.T) {
+	setupIntegrationDB(t)
+	t.Setenv("XUI_BIN_FOLDER", t.TempDir())
+	incident := model.ResellerNodeCounterIncident{NodeId: -2, Email: "", Direction: "l2tp-session-disappeared"}
+	if err := database.GetDB().Create(&incident).Error; err != nil {
+		t.Fatal(err)
+	}
+	polls := 0
+	poll := func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
+		polls++
+		return nil, nil, errEmptyL2TPSample
+	}
+	collector := NewXrayTrafficJob()
+	if _, err := pollL2TPWithIncidentBarrier(collector, service.PublishL2TPAccountingIncident, poll); err == nil || !strings.Contains(err.Error(), "shared L2TP") || polls != 1 {
+		t.Fatalf("shared incident failed to defer reconciliation: polls=%d err=%v", polls, err)
+	}
+	// This removal represents simulated manual reconciliation, not automatic recovery.
+	if err := database.GetDB().Delete(&incident).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pollL2TPWithIncidentBarrier(collector, service.PublishL2TPAccountingIncident, poll); err != nil {
+		t.Fatalf("reconciliation did not resume after reviewed shared incident: %v", err)
+	}
+}
+
 func TestL2TPIncidentPublicationWaitsForMarkerRestoration(t *testing.T) {
 	setupIntegrationDB(t)
 	db := database.GetDB()

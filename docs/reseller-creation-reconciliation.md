@@ -828,7 +828,11 @@ sensitive removals and local incident publisher observe the incident; the
 publisher also creates the shared quota barrier. Ordinary disconnects now
 require manual reconciliation. Visible hook incidents defer sampling; a separate
 persisted accounting warning can allow another sample but now always defers
-periodic daemon reconciliation when publication reports an error. Publication
+periodic daemon reconciliation when publication reports an error. A shared
+L2TP incident also defers that reconciliation on participating panels even if
+their local incident file is absent; an unavailable shared incident store is
+not treated as clear. This can delay L2TP configuration changes on other hosts,
+but does not automatically stop their running daemons. Publication
 is checked again after a successful poll, and after an uncertain poll-marker
 restoration or retained batch releases its lock, avoiding recursive lock
 acquisition; hooks can still race the final check. The
