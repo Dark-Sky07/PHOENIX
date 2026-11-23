@@ -925,8 +925,10 @@ are still not fully fenced. Review must preserve evidence and reconcile every
 affected host before clearing local and shared incidents.
 
 PPP collection now acquires the participating allocation lock and writes an
-in-flight database marker before scanning the spool. It retains both the lock
-and marker on an uncertain scan or write, and retries the same pending batch;
+in-flight database marker before scanning the spool. It retains the marker
+on an uncertain scan or write and retries the same pending batch; the lock is
+released between retries so independent journal recovery can proceed. An
+uncertain marker deletion retains the lock until the marker is restored;
 absolute session checkpoints make an uncertain committed write idempotent.
 The marker is removed only after a successful write or after a counter-decrease
 incident is confirmed in both local evidence and the shared database. Closed
@@ -940,3 +942,10 @@ reconciliation, but other runtime mutation paths, failed/missing hooks, vanished
 sessions, traffic after the sample, and nonparticipating writers are not
 fenced. Neither this marker nor a successful poll proves session drain or
 complete accounting.
+When a traffic batch runs under the recovery lock, automatic renewal is deferred
+while any other in-flight poll marker remains; accounting the batch itself can
+continue. This avoids releasing quota against another poll's uncommitted usage.
+A journal without a corresponding marker, external writers, or a lost advisory
+lock connection still require separate safeguards and are not covered by this
+check. New Xray polls still wait behind an unresolved marker; the recovery lock
+only permits replay and other explicitly recovery-aware work.

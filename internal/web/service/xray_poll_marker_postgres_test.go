@@ -30,6 +30,17 @@ func TestXrayPollMarkerAcrossPostgresProcesses(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer database.CloseDB()
+		if mode == "recovery" {
+			unlock, err := LockResellerAllocationForXrayRecovery()
+			if err != nil {
+				t.Fatalf("recovery lock blocked by marker: %v", err)
+			}
+			defer unlock()
+			if err := VerifyXrayPollMarker(os.Getenv("PHOENIX_POLL_MARKER_ID")); err != nil {
+				t.Fatalf("shared marker unavailable: %v", err)
+			}
+			return
+		}
 		unlock, err := LockResellerAllocation()
 		if mode == "blocked" {
 			if err == nil {
@@ -70,12 +81,13 @@ func TestXrayPollMarkerAcrossPostgresProcesses(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestXrayPollMarkerAcrossPostgresProcesses$")
-		cmd.Env = append(os.Environ(), "PHOENIX_POLL_MARKER_HELPER="+mode, "XUI_DB_FOLDER="+dir)
+		cmd.Env = append(os.Environ(), "PHOENIX_POLL_MARKER_HELPER="+mode, "PHOENIX_POLL_MARKER_ID="+id, "XUI_DB_FOLDER="+dir)
 		if output, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("child %s: %v\n%s", mode, err, output)
 		}
 	}
 	run("blocked")
+	run("recovery")
 	if err := db.Where("id = ?", id).Delete(&model.XrayTrafficInFlight{}).Error; err != nil {
 		t.Fatal(err)
 	}

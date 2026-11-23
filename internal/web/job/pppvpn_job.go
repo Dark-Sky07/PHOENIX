@@ -30,54 +30,83 @@ var pppVPNRunMu sync.Mutex
 var sharedPPPPoll pppPollState
 
 type pppPollState struct {
-	unlock func()
-	marker string
+	unlock          func()
+	marker          string
+	deleteUncertain bool
 }
 
-// collectAndCommitPPP retains the allocation lock and the exact pending spool
-// batch on ambiguous application failure. A marker without a receipt after a
-// crash is intentionally not cleared automatically.
-func collectAndCommitPPP(state *pppPollState, collect func() (*pppvpn.TrafficBatch, error), apply func([]*xray.ClientTraffic) (bool, bool, error), ack func(uint64) error) (bool, bool, error) {
+// collectAndCommitPPP keeps a durable fence and the exact pending spool batch
+// on failure. The allocation lock is released between ordinary retries so
+// independent journal recovery can proceed, but normal mutations remain fenced.
+// An ambiguous marker deletion keeps the lock because it might have succeeded.
+func collectAndCommitPPP(state *pppPollState, collect func() (*pppvpn.TrafficBatch, error), apply func(string, []*xray.ClientTraffic) (bool, bool, error), ack func(uint64) error) (bool, bool, error) {
 	if state.unlock == nil {
-		unlock, err := service.LockResellerAllocation()
+		var unlock func()
+		var err error
+		if state.marker == "" {
+			unlock, err = service.LockResellerAllocation()
+		} else {
+			unlock, err = service.LockResellerAllocationForXrayRecovery()
+		}
 		if err != nil {
 			return false, false, err
 		}
-		id := uuid.NewString()
-		if err := service.BeginXrayPoll(id); err != nil {
-			unlock()
-			return false, false, fmt.Errorf("create PPP poll marker: %w", err)
+		state.unlock = unlock
+		if state.marker == "" {
+			id := uuid.NewString()
+			if err := service.BeginXrayPoll(id); err != nil {
+				state.unlock()
+				state.unlock = nil
+				return false, false, fmt.Errorf("create PPP poll marker: %w", err)
+			}
+			state.marker = id
+		} else if err := service.VerifyXrayPollMarker(state.marker); err != nil {
+			state.unlock()
+			state.unlock = nil
+			return false, false, fmt.Errorf("verify PPP poll marker: %w", err)
 		}
-		state.unlock, state.marker = unlock, id
 	}
+	if state.deleteUncertain {
+		// The delete may have committed despite returning an error. Do not
+		// release the lock until the durable fence has been restored.
+		if err := service.EnsureXrayPollMarker(state.marker); err != nil {
+			return false, false, fmt.Errorf("restore uncertain PPP poll marker: %w", err)
+		}
+		state.deleteUncertain = false
+	}
+	release := func() { state.unlock(); state.unlock = nil }
 	batch, err := collect()
 	if err != nil {
+		release()
 		return false, false, fmt.Errorf("collect PPP traffic; poll marker %s retained: %w", state.marker, err)
 	}
 	if batch == nil {
+		release()
 		return false, false, fmt.Errorf("missing PPP batch; poll marker %s retained", state.marker)
 	}
 	var restart, disabled bool
 	if len(batch.Clients) > 0 {
-		restart, disabled, err = apply(batch.Clients)
+		restart, disabled, err = apply(state.marker, batch.Clients)
 		if err != nil {
 			var decrease *service.PPPCounterDecrease
 			if errors.As(err, &decrease) && service.ConfirmPPPCounterIncidentUnderAllocationLock(decrease) == nil {
 				if clearErr := service.FinishXrayPoll(state.marker); clearErr != nil {
+					state.deleteUncertain = true
 					return restart, disabled, fmt.Errorf("PPP incident: %v; clear poll marker: %w", err, clearErr)
 				}
-				state.unlock()
-				state.unlock, state.marker = nil, ""
+				state.marker = ""
 			}
+			release()
 			return restart, disabled, err
 		}
 	}
 	if err := service.FinishXrayPoll(state.marker); err != nil {
+		state.deleteUncertain = true
 		return restart, disabled, fmt.Errorf("clear committed PPP poll marker: %w", err)
 	}
+	state.marker = ""
 	ackErr := ack(batch.Token)
-	state.unlock()
-	state.unlock, state.marker = nil, ""
+	release()
 	if ackErr != nil {
 		return restart, disabled, fmt.Errorf("acknowledge PPP traffic: %w", ackErr)
 	}

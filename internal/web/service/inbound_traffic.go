@@ -25,13 +25,16 @@ func (s *InboundService) AddTraffic(inboundTraffics []*xray.Traffic, clientTraff
 
 // AddPPPTrafficUnderAllocationLock applies absolute PPP checkpoints while the
 // caller holds the shared allocation lock and an in-flight poll marker.
-func (s *InboundService) AddPPPTrafficUnderAllocationLock(clients []*xray.ClientTraffic) (bool, bool, error) {
+func (s *InboundService) AddPPPTrafficUnderAllocationLock(markerID string, clients []*xray.ClientTraffic) (bool, bool, error) {
+	if markerID == "" {
+		return false, false, errors.New("PPP poll marker required")
+	}
 	for _, client := range clients {
 		if client == nil || client.PPPSessionID == "" {
 			return false, false, errors.New("PPP sample requires a session checkpoint identity")
 		}
 	}
-	return s.addTrafficBatch("", nil, clients, nil, true)
+	return s.addTrafficBatchWithMarker("", nil, clients, nil, true, markerID)
 }
 
 // AddXrayTrafficBatch makes retries after an uncertain database commit
@@ -63,10 +66,14 @@ func (s *InboundService) AddCheckedXrayTrafficBatchUnderAllocationLock(id string
 }
 
 func (s *InboundService) addTrafficBatch(id string, inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic, identities []XrayTrafficIdentity, allocationHeld bool) (needRestart bool, clientsDisabled bool, err error) {
+	return s.addTrafficBatchWithMarker(id, inboundTraffics, clientTraffics, identities, allocationHeld, id)
+}
+
+func (s *InboundService) addTrafficBatchWithMarker(id string, inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic, identities []XrayTrafficIdentity, allocationHeld bool, markerID string) (needRestart bool, clientsDisabled bool, err error) {
 	var disabledNodeIDs []int
 	err = submitTrafficWrite(func() error {
 		var inner error
-		needRestart, clientsDisabled, disabledNodeIDs, inner = s.addTrafficLocked(id, inboundTraffics, clientTraffics, identities, allocationHeld)
+		needRestart, clientsDisabled, disabledNodeIDs, inner = s.addTrafficLocked(id, inboundTraffics, clientTraffics, identities, allocationHeld, markerID)
 		return inner
 	})
 	if err == nil && len(disabledNodeIDs) > 0 {
@@ -83,7 +90,7 @@ func (s *InboundService) addTrafficBatch(id string, inboundTraffics []*xray.Traf
 	return
 }
 
-func (s *InboundService) addTrafficLocked(id string, inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic, identities []XrayTrafficIdentity, allocationHeld bool) (needRestart bool, clientsDisabled bool, disabledNodeIDs []int, err error) {
+func (s *InboundService) addTrafficLocked(id string, inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic, identities []XrayTrafficIdentity, allocationHeld bool, markerID string) (needRestart bool, clientsDisabled bool, disabledNodeIDs []int, err error) {
 	db := database.GetDB()
 	tx := db.Begin()
 	if tx.Error != nil {
@@ -141,7 +148,17 @@ func (s *InboundService) addTrafficLocked(id string, inboundTraffics []*xray.Tra
 		unlockRenewalQuota, renewErr = tryLockResellerAllocation(tx)
 	}
 	if renewErr == nil && (allocationHeld || unlockRenewalQuota != nil) {
-		needRestart0, count, renewErr = s.autoRenewClients(tx)
+		// Recovery can run while another poll is unresolved. Its usage may
+		// not yet be visible, so defer renewal until all other markers clear.
+		var otherMarkers int64
+		q := tx.Model(&model.XrayTrafficInFlight{})
+		if markerID != "" {
+			q = q.Where("id <> ?", markerID)
+		}
+		renewErr = q.Count(&otherMarkers).Error
+		if renewErr == nil && otherMarkers == 0 {
+			needRestart0, count, renewErr = s.autoRenewClients(tx)
+		}
 	}
 	if renewErr != nil {
 		if err = tx.RollbackTo("automatic_renewal").Error; err != nil {

@@ -5,6 +5,7 @@ import (
 
 	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
+	"gorm.io/gorm/clause"
 )
 
 // BeginXrayPoll must run under the allocation lock before the runtime poll.
@@ -37,4 +38,29 @@ func RecoverCommittedXrayPollMarkers() error {
 	}
 	receipts := db.Model(&model.XrayTrafficReceipt{}).Select("id")
 	return db.Where("id IN (?)", receipts).Delete(&model.XrayTrafficInFlight{}).Error
+}
+
+// VerifyXrayPollMarker checks that a retry still has its original durable
+// fence. Call under the allocation lock; a missing marker needs investigation.
+func VerifyXrayPollMarker(id string) error {
+	if id == "" || database.GetDB() == nil {
+		return errors.New("invalid poll marker")
+	}
+	var count int64
+	if err := database.GetDB().Model(&model.XrayTrafficInFlight{}).Where("id = ?", id).Count(&count).Error; err != nil {
+		return err
+	}
+	if count != 1 {
+		return errors.New("poll marker disappeared; manual reconciliation required")
+	}
+	return nil
+}
+
+// EnsureXrayPollMarker re-establishes a fence after an uncertain delete. It
+// must be called while continuously holding the allocation lock since deletion.
+func EnsureXrayPollMarker(id string) error {
+	if id == "" || database.GetDB() == nil {
+		return errors.New("invalid poll marker")
+	}
+	return database.GetDB().Clauses(clause.OnConflict{DoNothing: true}).Create(&model.XrayTrafficInFlight{ID: id}).Error
 }

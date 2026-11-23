@@ -4,7 +4,6 @@ import (
 	"errors"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
@@ -13,7 +12,7 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/xray"
 )
 
-func TestPPPPollRetriesAmbiguousCommitAndHoldsAllocation(t *testing.T) {
+func TestPPPPollRetriesAmbiguousCommitAndFencesAllocation(t *testing.T) {
 	setupIntegrationDB(t)
 	db := database.GetDB()
 	client := model.ClientRecord{Email: "ppp-poll@example.test", Enable: true}
@@ -35,9 +34,9 @@ func TestPPPPollRetriesAmbiguousCommitAndHoldsAllocation(t *testing.T) {
 	}
 	svc := &service.InboundService{}
 	calls, acks := 0, 0
-	apply := func(rows []*xray.ClientTraffic) (bool, bool, error) {
+	apply := func(marker string, rows []*xray.ClientTraffic) (bool, bool, error) {
 		calls++
-		restart, disabled, err := svc.AddPPPTrafficUnderAllocationLock(rows)
+		restart, disabled, err := svc.AddPPPTrafficUnderAllocationLock(marker, rows)
 		if err != nil {
 			return restart, disabled, err
 		}
@@ -47,45 +46,34 @@ func TestPPPPollRetriesAmbiguousCommitAndHoldsAllocation(t *testing.T) {
 		return restart, disabled, nil
 	}
 	ack := func(uint64) error { acks++; return nil }
-	if _, _, err := collectAndCommitPPP(state, collect, apply, ack); err == nil || state.unlock == nil || state.marker == "" {
+	if _, _, err := collectAndCommitPPP(state, collect, apply, ack); err == nil || state.unlock != nil || state.marker == "" {
 		t.Fatalf("ambiguous commit not retained: %v", err)
 	}
 	var count int64
 	if err := db.Model(&model.XrayTrafficInFlight{}).Count(&count).Error; err != nil || count != 1 {
 		t.Fatalf("marker missing: %d %v", count, err)
 	}
-	gotLock := make(chan func(), 1)
-	go func() {
-		unlock, err := service.LockResellerAllocation()
-		if err != nil {
-			gotLock <- nil
-		} else {
-			gotLock <- unlock
-		}
-	}()
-	select {
-	case unlock := <-gotLock:
-		if unlock != nil {
-			unlock()
-		}
+	if unlock, err := service.LockResellerAllocation(); err == nil {
+		unlock()
 		t.Fatal("allocation passed before retry")
-	case <-time.After(100 * time.Millisecond):
 	}
+	// Other traffic journal recovery is not blocked between PPP attempts.
+	recoveryUnlock, err := service.LockResellerAllocationForXrayRecovery()
+	if err != nil {
+		t.Fatalf("independent recovery blocked: %v", err)
+	}
+	recoveryUnlock()
 	if _, _, err := collectAndCommitPPP(state, collect, apply, ack); err != nil {
 		t.Fatal(err)
 	}
-	if state.unlock != nil || calls != 2 || acks != 1 {
+	if state.unlock != nil || state.marker != "" || calls != 2 || acks != 1 {
 		t.Fatalf("retry state: calls=%d acks=%d", calls, acks)
 	}
-	select {
-	case unlock := <-gotLock:
-		if unlock == nil {
-			t.Fatal("allocation did not recover")
-		}
-		unlock()
-	case <-time.After(3 * time.Second):
-		t.Fatal("allocation lock leaked")
+	unlock, err := service.LockResellerAllocation()
+	if err != nil {
+		t.Fatalf("allocation did not recover: %v", err)
 	}
+	unlock()
 	if err := db.First(&row, row.Id).Error; err != nil || row.Up != 123 || row.Down != 456 {
 		t.Fatalf("sample counted incorrectly: %+v %v", row, err)
 	}
@@ -137,16 +125,60 @@ func TestPPPPollCrashLeavesCrossHostMarker(t *testing.T) {
 	setupIntegrationDB(t)
 	state := &pppPollState{}
 	collect := func() (*pppvpn.TrafficBatch, error) { return nil, errors.New("injected scan failure") }
-	if _, _, err := collectAndCommitPPP(state, collect, nil, nil); err == nil || state.unlock == nil {
+	if _, _, err := collectAndCommitPPP(state, collect, nil, nil); err == nil || state.unlock != nil || state.marker == "" {
 		t.Fatalf("scan failure not retained: %v", err)
 	}
 	// Simulate lost process memory. A process exit releases its advisory lock,
 	// but no receipt exists to establish what happened during the poll.
-	state.unlock()
-	state.unlock = nil
 	state.marker = ""
 	if unlock, err := service.LockResellerAllocation(); err == nil {
 		unlock()
 		t.Fatal("orphan marker did not block allocations")
+	}
+}
+
+func TestPPPPollRetryRejectsMissingMarker(t *testing.T) {
+	setupIntegrationDB(t)
+	state := &pppPollState{}
+	collect := func() (*pppvpn.TrafficBatch, error) { return nil, errors.New("scan failed") }
+	if _, _, err := collectAndCommitPPP(state, collect, nil, nil); err == nil {
+		t.Fatal("expected failure")
+	}
+	if err := service.FinishXrayPoll(state.marker); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	_, _, err := collectAndCommitPPP(state, func() (*pppvpn.TrafficBatch, error) { called = true; return nil, nil }, nil, nil)
+	if err == nil || called || state.marker == "" {
+		t.Fatalf("missing fence accepted: %v", err)
+	}
+}
+
+func TestPPPPollRestoresAmbiguouslyDeletedMarkerBeforeUnlock(t *testing.T) {
+	setupIntegrationDB(t)
+	unlock, err := service.LockResellerAllocation()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := &pppPollState{unlock: unlock, marker: "uncertain-delete", deleteUncertain: true}
+	t.Cleanup(func() {
+		if state.unlock != nil {
+			state.unlock()
+		}
+	})
+	// Emulate a deletion that committed but whose response was lost.
+	collect := func() (*pppvpn.TrafficBatch, error) { return nil, errors.New("injected scan failure") }
+	if _, _, err := collectAndCommitPPP(state, collect, nil, nil); err == nil {
+		t.Fatal("scan should fail")
+	}
+	if state.unlock != nil || state.deleteUncertain {
+		t.Fatal("retry retained lock or uncertain state")
+	}
+	if err := service.VerifyXrayPollMarker(state.marker); err != nil {
+		t.Fatalf("fence not restored: %v", err)
+	}
+	if u, err := service.LockResellerAllocation(); err == nil {
+		u()
+		t.Fatal("allocation bypassed restored marker")
 	}
 }
