@@ -347,7 +347,7 @@ func pppRelativePath(path string) (string, error) {
 }
 
 func readPPPDir(root *os.Root, name string) ([]os.DirEntry, error) {
-	f, err := root.Open(name)
+	f, err := openPPPDirectory(root, name)
 	if err != nil {
 		return nil, err
 	}
@@ -361,7 +361,7 @@ func readPPPDir(root *os.Root, name string) ([]os.DirEntry, error) {
 }
 
 func syncPPPDirectory(root *os.Root, name string) error {
-	f, err := root.Open(name)
+	f, err := openPPPDirectory(root, name)
 	if err != nil {
 		return fmt.Errorf("pppvpn: open directory for sync: %w", err)
 	}
@@ -404,7 +404,7 @@ func readPPPSession(path string) (pppSession, error) {
 }
 
 func readPPPSessionAt(root *os.Root, rel string) (pppSession, error) {
-	file, err := root.Open(rel)
+	file, err := openPPPRecord(root, rel)
 	if err != nil {
 		return pppSession{}, err
 	}

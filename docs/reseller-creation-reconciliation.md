@@ -1025,7 +1025,12 @@ other removal routes still need their own drain and accounting guarantees.
 PPP spool directory creation, scans, record reads, claim renames, deletion and
 directory sync now use a root-confined filesystem handle. Paths or symlinks
 that escape the configured PPP root are rejected rather than accessed during
-panel-side collection or acknowledgement. This does not constrain shell hooks
+panel-side collection or acknowledgement. On Linux, record reads reject final
+symlinks and non-regular files, and directory opens require directories; FIFO
+substitution therefore does not indefinitely block the collector. The runtime
+root must still be trusted: these checks do not authenticate hard links or
+protect against privileged filesystem replacement. The non-Linux fallback does
+not prevent races with concurrent replacement. This does not constrain shell hooks
 against a privileged external actor replacing directories after startup, bind
 mounts, or other nonparticipating filesystem writers; the runtime root remains
 a trusted, privately controlled directory.
