@@ -417,6 +417,10 @@ func (m *Manager) CollectTrafficChecked() (inbounds []InboundTraffic, clients []
 	}
 	current, stale, readErr := readSessions(m.id)
 	if readErr != nil {
+		var pending *HookPendingError
+		if errors.As(readErr, &pending) {
+			return nil, nil, pending
+		}
 		// An unreadable snapshot cannot prove that the missing interval is
 		// zero. Preserve every baseline before reporting the uncertainty.
 		failure := &SessionReadFailure{InboundID: m.id, Cause: readErr.Error()}

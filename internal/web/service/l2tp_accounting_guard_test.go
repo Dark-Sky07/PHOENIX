@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
+	"github.com/Dark-Sky07/phoenix/internal/l2tp"
 )
 
 func TestL2TPOrphanBlocksQuotaAndDeletionButNotTrafficLock(t *testing.T) {
@@ -95,6 +97,40 @@ func TestL2TPIncidentPersistenceFailureStaysLatched(t *testing.T) {
 	}
 	if _, err := os.Stat(l2tpAccountingIncidentPath()); err != nil {
 		t.Fatalf("incident retry did not persist: %v", err)
+	}
+}
+
+func TestL2TPLiveHookPendingBlocksWithoutPermanentIncident(t *testing.T) {
+	reseller, _ := seedResellerRenewal(t)
+	bin := t.TempDir()
+	t.Setenv("XUI_BIN_FOLDER", bin)
+	dir := filepath.Join(bin, "l2tp", "hook-incidents")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "pending.test")
+	if err := os.WriteFile(path, []byte("live"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var pending *l2tp.HookPendingError
+	if err := ObserveL2TPAccountingIncident(); !errors.As(err, &pending) {
+		t.Fatalf("pending hook not observed: %v", err)
+	}
+	if err := PublishL2TPAccountingIncident(); !errors.As(err, &pending) {
+		t.Fatalf("pending hook incorrectly published as permanent: %v", err)
+	}
+	if err := (&ResellerService{}).CheckTrafficQuota(&reseller, 1); err == nil {
+		t.Fatal("pending hook allowed quota allocation")
+	}
+	var count int64
+	if err := database.GetDB().Model(&model.ResellerNodeCounterIncident{}).Where("node_id = ?", -2).Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("pending hook created a permanent incident: %d %v", count, err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&ResellerService{}).CheckTrafficQuota(&reseller, 1); err != nil {
+		t.Fatalf("completed hook left a permanent fence: %v", err)
 	}
 }
 

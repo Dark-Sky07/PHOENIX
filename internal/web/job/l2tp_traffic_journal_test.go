@@ -120,6 +120,118 @@ func TestL2TPSampledTrafficJournalReplaysAfterCollectorRestart(t *testing.T) {
 	}
 }
 
+func TestL2TPPendingHookRetainsMarkerUntilSuccessfulRetry(t *testing.T) {
+	setupIntegrationDB(t)
+	db := database.GetDB()
+	collector := NewXrayTrafficJob()
+	calls := 0
+	pending := true
+	poll := func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
+		calls++
+		if pending {
+			return nil, nil, &l2tp.HookPendingError{Path: "pending-test"}
+		}
+		return nil, nil, errEmptyL2TPSample
+	}
+	if _, err := persistL2TPPoll(collector, poll); err == nil || collector.l2tpHookPollID == "" {
+		t.Fatalf("pending hook failed to retain marker: %v", err)
+	}
+	id := collector.l2tpHookPollID
+	var markers int64
+	if err := db.Model(&model.XrayTrafficInFlight{}).Count(&markers).Error; err != nil || markers != 1 {
+		t.Fatalf("missing durable marker: %d %v", markers, err)
+	}
+	if unlock, err := service.LockResellerAllocation(); err == nil {
+		unlock()
+		t.Fatal("pending hook allowed allocation")
+	}
+	// Recovery is allowed independently, but an unresolved foreign marker
+	// must prevent this collector from repolling or clearing its own fence.
+	if err := db.Create(&model.XrayTrafficInFlight{ID: "foreign-hook-poll"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := persistL2TPPoll(collector, poll); err == nil || calls != 1 || collector.l2tpHookPollID != id {
+		t.Fatalf("foreign marker bypassed: calls=%d id=%q err=%v", calls, collector.l2tpHookPollID, err)
+	}
+	if err := db.Where("id = ?", "foreign-hook-poll").Delete(&model.XrayTrafficInFlight{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := persistL2TPPoll(collector, poll); err == nil || calls != 2 || collector.l2tpHookPollID != id {
+		t.Fatalf("pending retry changed marker: calls=%d id=%q err=%v", calls, collector.l2tpHookPollID, err)
+	}
+	pending = false
+	if _, err := persistL2TPPoll(collector, poll); err != nil {
+		t.Fatalf("completed hook retry failed: %v", err)
+	}
+	if collector.l2tpHookPollID != "" {
+		t.Fatal("successful retry retained marker identity")
+	}
+	if err := db.Model(&model.XrayTrafficInFlight{}).Count(&markers).Error; err != nil || markers != 0 {
+		t.Fatalf("completed hook marker remained: %d %v", markers, err)
+	}
+}
+
+func TestL2TPPendingHookRetainsLockUntilUncertainMarkerIsRestored(t *testing.T) {
+	setupIntegrationDB(t)
+	db := database.GetDB()
+	collector := NewXrayTrafficJob()
+	pending := true
+	poll := func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
+		if pending {
+			return nil, nil, &l2tp.HookPendingError{Path: "pending-test"}
+		}
+		return nil, nil, errEmptyL2TPSample
+	}
+	if _, err := persistL2TPPoll(collector, poll); err == nil || collector.l2tpHookPollID == "" {
+		t.Fatalf("pending marker missing: %v", err)
+	}
+	id := collector.l2tpHookPollID
+	for _, sql := range []string{
+		"CREATE TRIGGER reject_l2tp_delete BEFORE DELETE ON xray_traffic_in_flights BEGIN SELECT RAISE(ABORT, 'delete failed'); END",
+		"CREATE TRIGGER reject_l2tp_restore BEFORE INSERT ON xray_traffic_in_flights BEGIN SELECT RAISE(ABORT, 'restore failed'); END",
+	} {
+		if err := db.Exec(sql).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	pending = false
+	if _, err := persistL2TPPoll(collector, poll); err == nil || !collector.l2tpRestorePoll || collector.captureUnlock == nil || collector.l2tpHookPollID != id {
+		t.Fatalf("uncertain deletion did not retain lock and identity: id=%q restore=%v err=%v", collector.l2tpHookPollID, collector.l2tpRestorePoll, err)
+	}
+	for _, name := range []string{"reject_l2tp_delete", "reject_l2tp_restore"} {
+		if err := db.Exec("DROP TRIGGER " + name).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := persistL2TPPoll(collector, poll); err != nil {
+		t.Fatalf("restored marker retry failed: %v", err)
+	}
+	if collector.l2tpRestorePoll || collector.captureUnlock != nil || collector.l2tpHookPollID != "" {
+		t.Fatal("restored poll left its lock or marker state")
+	}
+	var count int64
+	if err := db.Model(&model.XrayTrafficInFlight{}).Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("restored marker not cleared after retry: %d %v", count, err)
+	}
+}
+
+func TestL2TPPendingHookMarkerSurvivesCollectorRestart(t *testing.T) {
+	setupIntegrationDB(t)
+	poll := func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
+		return nil, nil, &l2tp.HookPendingError{Path: "pending-test"}
+	}
+	if _, err := persistL2TPPoll(NewXrayTrafficJob(), poll); err == nil {
+		t.Fatal("pending hook reported success")
+	}
+	calls := 0
+	if _, err := persistL2TPPoll(NewXrayTrafficJob(), func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
+		calls++
+		return nil, nil, errEmptyL2TPSample
+	}); err == nil || calls != 0 {
+		t.Fatalf("orphaned marker allowed new poll: calls=%d err=%v", calls, err)
+	}
+}
+
 func TestL2TPEmptySampleClearsMarkerWithoutReceipt(t *testing.T) {
 	setupIntegrationDB(t)
 	collector := NewXrayTrafficJob()

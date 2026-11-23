@@ -197,6 +197,10 @@ func ObserveL2TPAccountingIncident() error {
 	if observation == nil && !l2tpIncidentPending.Load() {
 		return nil
 	}
+	var pending *l2tp.HookPendingError
+	if errors.As(observation, &pending) && !l2tpIncidentPending.Load() {
+		return pending
+	}
 	l2tpIncidentPending.Store(true)
 	detail := "L2TP accounting incident persistence was previously incomplete"
 	if observation != nil {
@@ -238,16 +242,25 @@ func checkPPPAndL2TPAccountingIncidents(db *gorm.DB) error {
 // The global lock serializes publication with participating mutations, but is
 // not a lease or evidence that no writer ran before the incident was observed.
 func PublishL2TPAccountingIncident() error {
-	if err := ObserveL2TPAccountingIncident(); err == nil {
+	observation := ObserveL2TPAccountingIncident()
+	if observation == nil {
 		return nil
+	}
+	var pending *l2tp.HookPendingError
+	if errors.As(observation, &pending) {
+		return pending
 	}
 	unlock, err := LockResellerAllocationForXrayRecovery()
 	if err != nil {
 		return fmt.Errorf("lock L2TP incident publication: %w", err)
 	}
 	defer unlock()
-	if err := ObserveL2TPAccountingIncident(); err == nil {
+	observation = ObserveL2TPAccountingIncident()
+	if observation == nil {
 		return nil
+	}
+	if errors.As(observation, &pending) {
+		return pending
 	}
 	db := database.GetDB()
 	if db == nil {

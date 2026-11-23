@@ -834,6 +834,20 @@ before its marker is durable, cross-process races, failed incident publication,
 nonparticipating writers and lack of a final drain remain outside this measure.
 The node is not automatically stopped by the incident.
 
+Updated L2TP ip-up hooks also create and sync a `pending.*` file before changing
+session markers, and remove it only after syncing the marker. While observed,
+the collector retains its shared poll marker and retries under the allocation
+lock only if no other unresolved marker exists. Sensitive operations defer;
+a pending file that persists after a killed hook needs manual investigation,
+not automatic deletion. A failed, uncertain marker deletion is restored while
+the allocation lock is held; if restoration fails, the collector retains that
+lock and retries. A process or database session failure can still release the
+lock before restoration, so this is not a durable fencing guarantee in that
+case. The hook does not take the database lock: it can begin or complete between
+checks, including before pending creation or after the last observation. A crash
+before pending is durable, old hooks, and other hosts before observation remain
+unprotected. Pending evidence does not prove a drained session or final usage.
+
 When an L2TP session that was sampled in this process disappears from the next
 snapshot, polling now preserves all baselines and records the missing sessions
 and the remaining snapshot as evidence. A surviving session marker whose

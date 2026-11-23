@@ -56,6 +56,22 @@ func VerifyXrayPollMarker(id string) error {
 	return nil
 }
 
+// VerifyExclusiveXrayPollMarker additionally rejects a foreign unresolved poll.
+// Call under the allocation lock before re-polling after a temporary hook wait.
+func VerifyExclusiveXrayPollMarker(id string) error {
+	if err := VerifyXrayPollMarker(id); err != nil {
+		return err
+	}
+	var count int64
+	if err := database.GetDB().Model(&model.XrayTrafficInFlight{}).Count(&count).Error; err != nil {
+		return err
+	}
+	if count != 1 {
+		return errors.New("another poll marker requires recovery before retry")
+	}
+	return nil
+}
+
 // EnsureXrayPollMarker re-establishes a fence after an uncertain delete. It
 // must be called while continuously holding the allocation lock since deletion.
 func EnsureXrayPollMarker(id string) error {

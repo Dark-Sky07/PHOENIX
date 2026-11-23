@@ -224,6 +224,14 @@ func renderIPUpScript(inst Instance) string {
 		"  fi\n" +
 		"  exit \"$code\"\n" +
 		"}\ntrap incident EXIT\n" +
+		// Publish in-progress evidence before session mutation. It remains
+		// on SIGKILL and is temporary while a live hook completes.
+		"incidents=\"$root/hook-incidents\"\n" +
+		"mkdir -p \"$incidents\"\n" +
+		"sync \"$root\"\n" +
+		"pending=$(mktemp \"$incidents/pending.XXXXXXXXXX\")\n" +
+		"printf 'L2TP ip-up pending inbound %s interface %s peer %s\\n' '" + strconv.Itoa(inst.Id) + "' \"$iface\" \"$peer\" > \"$pending\"\n" +
+		"sync \"$pending\" \"$incidents\"\n" +
 		"case \"$iface\" in\n" +
 		"  ''|.|..|*[!A-Za-z0-9_.-]*) exit 1 ;;\n" +
 		"esac\n" +
@@ -235,6 +243,8 @@ func renderIPUpScript(inst Instance) string {
 		// file. A partially written marker remains evidence on failure.
 		"( set -C; printf '%s\\n' \"$peer\" > \"$dir/$iface\" )\n" +
 		"sync \"$dir/$iface\" \"$dir\"\n" +
+		"rm \"$pending\"\n" +
+		"sync \"$incidents\"\n" +
 		"trap - EXIT\n"
 }
 

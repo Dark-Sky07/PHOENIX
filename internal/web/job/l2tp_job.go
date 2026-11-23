@@ -59,7 +59,7 @@ var errEmptyL2TPSample = errors.New("no observed L2TP traffic")
 // marker and transactional receipt as Xray. It covers only sampled bytes: the
 // L2TP runtime can still lose traffic before a sample or during shutdown.
 func persistL2TPPoll(collector *XrayTrafficJob, poll func() ([]*xray.Traffic, []*xray.ClientTraffic, error)) (bool, error) {
-	if collector.pending == nil {
+	if collector.pending == nil && collector.l2tpHookPollID == "" {
 		if err := collector.replayXrayJournal(); err != nil {
 			return false, err
 		}
@@ -80,8 +80,12 @@ func (j *L2TPJob) Run() {
 	}
 	defer l2tpRunMu.Unlock()
 	mgr := l2tp.GetManager()
-	if err := service.PublishL2TPAccountingIncident(); err != nil {
-		logger.Warning("l2tp job: accounting incident:", err)
+	// Restoration may be holding the allocation lock across retries; avoid
+	// recursively acquiring it before the collector can restore the marker.
+	if !l2tpJournalCollector.l2tpRestorePoll {
+		if err := service.PublishL2TPAccountingIncident(); err != nil {
+			logger.Warning("l2tp job: accounting incident:", err)
+		}
 	}
 	// Sample and commit before the periodic reconcile may stop or replace the
 	// daemon. Other runtime operations and traffic after the poll remain outside

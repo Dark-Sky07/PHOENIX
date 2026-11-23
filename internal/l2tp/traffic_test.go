@@ -110,6 +110,29 @@ func TestReadCounterRejectsValuesOutsideSignedAccountingRange(t *testing.T) {
 	}
 }
 
+func TestCollectTrafficKeepsBaselinesWhileHookPending(t *testing.T) {
+	root, _ := setupTrafficFilesystem(t)
+	dir := filepath.Join(root, "hook-incidents")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "pending.test")
+	if err := os.WriteFile(path, []byte("pending"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
+	last := map[string]interfaceCounter{"ppp0\x00alice": {rx: 50, tx: 100}}
+	m := &Manager{id: 12, proc: &managed{proc: &Process{ipsecCmd: cmd, xl2tpdCmd: cmd}, last: last}}
+	_, _, err := m.CollectTrafficChecked()
+	var pending *HookPendingError
+	if !errors.As(err, &pending) || pending.Path != path {
+		t.Fatalf("pending hook treated as a permanent read failure: %v", err)
+	}
+	if last["ppp0\x00alice"].rx != 50 || last["ppp0\x00alice"].tx != 100 {
+		t.Fatal("pending hook advanced baseline")
+	}
+}
+
 func TestCollectTrafficCheckedFailurePreservesBaselines(t *testing.T) {
 	setupTrafficFilesystem(t)
 	writeSession(t, 12, "ppp0", "alice@example.com", "bad", "200", true)

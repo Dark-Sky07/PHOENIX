@@ -19,6 +19,14 @@ func (e *HookIncidentError) Error() string {
 	return fmt.Sprintf("l2tp: hook incident %q requires manual reconciliation", e.Path)
 }
 
+// HookPendingError can be a live ip-up hook or an interrupted one. While it
+// exists, sensitive operations and polling must wait rather than infer success.
+type HookPendingError struct{ Path string }
+
+func (e *HookPendingError) Error() string {
+	return fmt.Sprintf("l2tp: hook operation pending at %q", e.Path)
+}
+
 // CheckHookIncidents must not inspect or remove incident contents. Even an
 // incomplete file is evidence that a hook started and may have been interrupted.
 func CheckHookIncidents() error {
@@ -37,8 +45,23 @@ func CheckHookIncidents() error {
 	if err != nil {
 		return fmt.Errorf("l2tp: inspect hook incidents: %w", err)
 	}
-	if len(entries) != 0 {
-		return &HookIncidentError{Path: filepath.Join(l2tpRoot(), "hook-incidents", entries[0].Name())}
+	var pending string
+	for _, entry := range entries {
+		path := filepath.Join(l2tpRoot(), "hook-incidents", entry.Name())
+		if strings.HasPrefix(entry.Name(), "pending.") {
+			info, err := entry.Info()
+			if err != nil {
+				return fmt.Errorf("l2tp: inspect pending hook evidence %q: %w", path, err)
+			}
+			if info.Mode().IsRegular() {
+				pending = path
+				continue
+			}
+		}
+		return &HookIncidentError{Path: path}
+	}
+	if pending != "" {
+		return &HookPendingError{Path: pending}
 	}
 	return nil
 }

@@ -19,9 +19,13 @@ import (
 
 // XrayTrafficJob collects and processes traffic statistics from Xray, updating the database and optionally informing external APIs.
 type XrayTrafficJob struct {
-	runMu           sync.Mutex
-	pending         *xrayTrafficBatch
-	captureUnlock   func()
+	runMu         sync.Mutex
+	pending       *xrayTrafficBatch
+	captureUnlock func()
+	// L2TP hooks can be live or interrupted. Keep their poll marker across
+	// retries so other panels cannot allocate against an unexamined interval.
+	l2tpHookPollID  string
+	l2tpRestorePoll bool
 	settingService  service.SettingService
 	xrayService     service.XrayService
 	inboundService  service.InboundService
@@ -142,18 +146,56 @@ func (j *XrayTrafficJob) prepareXrayBatch(
 	poll func() ([]*xray.Traffic, []*xray.ClientTraffic, error),
 	capture func([]*xray.ClientTraffic) ([]service.XrayTrafficIdentity, error),
 ) error {
+	if j.l2tpRestorePoll {
+		if j.captureUnlock == nil || j.l2tpHookPollID == "" {
+			return errors.New("invalid uncertain L2TP poll marker state")
+		}
+		// The lock has been held continuously since the uncertain delete.
+		if err := service.EnsureXrayPollMarker(j.l2tpHookPollID); err != nil {
+			return fmt.Errorf("restore uncertain L2TP poll marker: %w", err)
+		}
+		j.l2tpRestorePoll = false
+		j.captureUnlock()
+		j.captureUnlock = nil
+	}
 	if j.pending == nil {
-		unlock, err := service.LockResellerAllocation()
+		id := j.l2tpHookPollID
+		var unlock func()
+		var err error
+		if id != "" {
+			unlock, err = service.LockResellerAllocationForXrayRecovery()
+		} else {
+			unlock, err = service.LockResellerAllocation()
+		}
 		if err != nil {
 			return err
 		}
-		id := uuid.NewString()
-		if err := service.BeginXrayPoll(id); err != nil {
-			unlock()
-			return fmt.Errorf("create Xray poll marker: %w", err)
+		if id != "" {
+			if err := service.VerifyExclusiveXrayPollMarker(id); err != nil {
+				unlock()
+				return fmt.Errorf("verify pending L2TP hook poll marker: %w", err)
+			}
+		} else {
+			id = uuid.NewString()
+			if err := service.BeginXrayPoll(id); err != nil {
+				unlock()
+				return fmt.Errorf("create Xray poll marker: %w", err)
+			}
 		}
 		traffic, clients, err := poll()
 		if err != nil {
+			var hookPending *l2tp.HookPendingError
+			if errors.As(err, &hookPending) {
+				// Keep the same durable marker, but release the lock between
+				// retries so other journal recovery can make progress.
+				j.l2tpHookPollID = id
+				unlock()
+				return fmt.Errorf("L2TP hook pending; poll marker %s retained: %w", id, err)
+			}
+			wasHookRetry := j.l2tpHookPollID != ""
+			// Other failures either get a durable incident or require manual
+			// recovery. Do not retry this marker as though it were just live.
+			j.l2tpHookPollID = ""
 			var l2tpDecrease *l2tp.CounterDecrease
 			var l2tpMissing *l2tp.SessionDisappeared
 			var l2tpReadFailure *l2tp.SessionReadFailure
@@ -195,6 +237,16 @@ func (j *XrayTrafficJob) prepareXrayBatch(
 			// GetXrayTraffic does not advance its baseline on an error. If
 			// clearing the marker fails, leave it to block future mutations.
 			clearErr := service.FinishXrayPoll(id)
+			if clearErr != nil && wasHookRetry {
+				// A failed delete may have committed. Restore the fence while
+				// still holding the lock, or keep that lock until restoration.
+				j.l2tpHookPollID = id
+				if restoreErr := service.EnsureXrayPollMarker(id); restoreErr != nil {
+					j.l2tpRestorePoll = true
+					j.captureUnlock = unlock
+					return fmt.Errorf("L2TP poll marker delete uncertain: %v; restore marker: %w", clearErr, restoreErr)
+				}
+			}
 			unlock()
 			if clearErr != nil {
 				return fmt.Errorf("Xray poll failed: %v; clear poll marker: %w", err, clearErr)
@@ -202,6 +254,7 @@ func (j *XrayTrafficJob) prepareXrayBatch(
 			return err
 		}
 		j.pending = &xrayTrafficBatch{id: id, traffic: traffic, clients: clients}
+		j.l2tpHookPollID = ""
 		j.captureUnlock = unlock
 	}
 	if j.pending.identities == nil {

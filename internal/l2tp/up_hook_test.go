@@ -2,13 +2,96 @@ package l2tp
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestSuccessfulUpHookClearsPendingMarker(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux shell and sync")
+	}
+	setupTrafficFilesystem(t)
+	inst := validInstance()
+	script := filepath.Join(t.TempDir(), "ip-up")
+	if err := os.WriteFile(script, []byte(renderIPUpScript(inst)), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(script)
+	cmd.Env = []string{"IFNAME=lo", "PEERNAME=alice@example.test"}
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("up hook failed: %v: %s", err, output)
+	}
+	if err := CheckHookIncidents(); err != nil {
+		t.Fatalf("completed up hook left pending evidence: %v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(sessionDirForID(inst.Id), "lo")); err != nil || string(data) != "alice@example.test\n" {
+		t.Fatalf("session marker missing: %q %v", data, err)
+	}
+}
+
+func TestKilledUpHookLeavesPendingEvidence(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux process state")
+	}
+	setupTrafficFilesystem(t)
+	inst := validInstance()
+	content := renderIPUpScript(inst)
+	needle := "sync \"$pending\" \"$incidents\"\n"
+	if strings.Count(content, needle) != 1 {
+		t.Fatal("pending sync location not found")
+	}
+	content = strings.Replace(content, needle, needle+"kill -STOP $$\n", 1)
+	script := filepath.Join(t.TempDir(), "ip-up")
+	if err := os.WriteFile(script, []byte(content), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(script)
+	cmd.Env = []string{"IFNAME=lo", "PEERNAME=alice@example.test"}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	finished := false
+	defer func() {
+		if !finished {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	stopped := false
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(filepath.Join("/proc", fmt.Sprint(cmd.Process.Pid), "status"))
+		if err == nil && strings.Contains(string(data), "State:\tT") {
+			stopped = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !stopped {
+		t.Fatal("hook did not pause after syncing pending evidence")
+	}
+	var pending *HookPendingError
+	if err := CheckHookIncidents(); !errors.As(err, &pending) {
+		t.Fatalf("live pending hook not observed: %v", err)
+	}
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	_ = cmd.Wait()
+	finished = true
+	if err := CheckHookIncidents(); !errors.As(err, &pending) {
+		t.Fatalf("interrupted hook lost pending evidence: %v", err)
+	}
+	if _, err := os.Stat(pending.Path); err != nil {
+		t.Fatalf("pending evidence removed: %v", err)
+	}
+}
 
 func TestConcurrentUpHooksNeverReplaceSessionMarker(t *testing.T) {
 	if runtime.GOOS != "linux" {
