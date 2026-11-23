@@ -7,6 +7,7 @@ import (
 	"net"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -31,6 +32,43 @@ func TestUserRegistryBasic(t *testing.T) {
 	_, err := reg.Authenticate(&tls.ConnectionState{}, unknownUUID, [32]byte{})
 	if !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound, got %v", err)
+	}
+}
+
+func TestRetiredUserLastSessionEndSerializesWithCollection(t *testing.T) {
+	reg := NewUserRegistry()
+	id := uuid.New()
+	reg.SetUsers([]TuicClientSettings{{UUID: id.String(), Email: "retired@example.test"}})
+	user := reg.users[id]
+	user.sessions.Add(1)
+	reg.SetUsers(nil)
+
+	// Model a collector between its counter swaps and its retired-user check.
+	reg.mu.Lock()
+	done := make(chan struct{})
+	go func() { reg.sessionEnded(user); close(done) }()
+	select {
+	case <-done:
+		reg.mu.Unlock()
+		t.Fatal("session ended while collector held registry lock")
+	case <-time.After(20 * time.Millisecond):
+	}
+	// A relay can complete a write during collection. The session must remain
+	// visible until the collector finishes so the next poll can drain it.
+	user.Traffic.BytesUp.Add(17)
+	if user.sessions.Load() != 1 {
+		reg.mu.Unlock()
+		t.Fatal("last session disappeared during collection")
+	}
+	reg.mu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("session end did not complete")
+	}
+	got := reg.CollectTrafficDeltas()
+	if len(got) != 1 || got[0].Up != 17 {
+		t.Fatalf("late relay traffic lost: %+v", got)
 	}
 }
 

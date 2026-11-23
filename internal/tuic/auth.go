@@ -145,9 +145,15 @@ func (ur *UserRegistry) CollectTrafficDeltas() []ClientTrafficDelta {
 }
 
 func (ur *UserRegistry) sessionEnded(user *User) {
-	if user != nil {
-		user.sessions.Add(-1)
+	if user == nil {
+		return
 	}
+	// Serialize the last session's departure with the counter swap and
+	// retired-user removal. Otherwise a relay could write after the swap,
+	// finish, and let the collector discard its user before the next poll.
+	ur.mu.Lock()
+	defer ur.mu.Unlock()
+	user.sessions.Add(-1)
 }
 
 // Authenticate verifies the client's token using RFC 5705 Keying Material Exporter.

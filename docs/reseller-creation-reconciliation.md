@@ -64,7 +64,9 @@ proving the transaction already committed. Uncommitted journals lack a durable
 ownership snapshot and remain for manual reconciliation; they are not applied
 automatically. TUIC collection retains negative-only counter evidence for
 rejection and keeps distinct source identities separate in the manager's pending
-queue; neither measure proves immutable historical ownership or generation.
+queue. Retired-user removal is serialized with the last session's departure so
+a relay write after a counter swap cannot be dropped by that removal. These
+measures do not prove immutable historical ownership or generation.
 Ordinary cleanup failures release the lock behind the retained
 marker; an uncertain marker deletion keeps the lock. A crash before journal
 publication or after journal removal can

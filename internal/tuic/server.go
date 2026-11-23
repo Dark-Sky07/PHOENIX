@@ -201,18 +201,22 @@ func (s *Server) registerConn(user *User, conn *quic.Conn) {
 
 func (s *Server) unregisterConn(user *User, conn *quic.Conn) {
 	s.activeConnsMu.Lock()
+	ended := false
 	if conns := s.activeConns[user.UUID]; conns != nil {
 		if registered, ok := conns[conn]; ok {
 			delete(conns, conn)
-			if registered == user {
-				s.users.sessionEnded(user)
-			}
+			ended = registered == user
 		}
 		if len(conns) == 0 {
 			delete(s.activeConns, user.UUID)
 		}
 	}
 	s.activeConnsMu.Unlock()
+	// Authentication takes the registry lock before activeConnsMu. Drop the
+	// latter before sessionEnded takes the registry lock to avoid inversion.
+	if ended {
+		s.users.sessionEnded(user)
+	}
 }
 
 func (s *Server) closeUserConns(user *User) {
