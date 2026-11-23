@@ -42,27 +42,45 @@ func (j *TuicJob) Run() {
 		_, deltas := mgr.CollectAllTraffic()
 		return deltas
 	}, &j.inboundService)
-	tuicJournalMu.Unlock()
 	if pollErr != nil {
+		tuicJournalMu.Unlock()
 		logger.Warning("tuic job: poll or accounting failed; retaining fence:", pollErr)
 		return
 	}
 	if clientsDisabled {
 		websocket.BroadcastInvalidate(websocket.MessageTypeInbounds)
 	}
-	// The filtered desired state is reconciled below.
-	desired, err := j.inboundService.DesiredTuicInstances()
-	if err != nil {
-		logger.Warning("tuic job: get desired instances failed:", err)
+	// Reconciliation can stop a daemon and drain final counters into the
+	// manager. Put a second shared marker around the actual runtime mutation
+	// and its immediate drain, not just around the preceding periodic sample.
+	// Re-read desired state while the allocation lock is held.
+	var desired []tuic.Instance
+	var desiredErr error
+	reconciledDeltas, _, reconcileDisabled, reconcileErr := collectAndCommitTuic(&sharedTuicPoll, func() []tuic.ClientTrafficDelta {
+		desired, desiredErr = j.inboundService.DesiredTuicInstances()
+		if desiredErr == nil {
+			mgr.Reconcile(desired)
+		}
+		_, deltas := mgr.CollectAllTraffic()
+		return deltas
+	}, &j.inboundService)
+	tuicJournalMu.Unlock()
+	if reconcileErr != nil {
+		logger.Warning("tuic job: reconcile accounting failed; retaining fence:", reconcileErr)
 		return
 	}
-
+	if reconcileDisabled {
+		websocket.BroadcastInvalidate(websocket.MessageTypeInbounds)
+	}
+	if desiredErr != nil {
+		logger.Warning("tuic job: get desired instances failed:", desiredErr)
+		return
+	}
+	clientDeltas = append(clientDeltas, reconciledDeltas...)
 	activeTags := make([]string, 0, len(desired))
 	for _, inst := range desired {
 		activeTags = append(activeTags, inst.Tag)
 	}
-
-	mgr.Reconcile(desired)
 	onlineEmails, _ := mgr.GetActiveClients(30 * time.Second)
 
 	clientTraffics := aggregateTuicClientTraffic(clientDeltas, onlineEmails)

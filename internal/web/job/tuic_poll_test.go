@@ -13,6 +13,49 @@ import (
 	"github.com/google/uuid"
 )
 
+func TestTuicReconcileDrainRunsBehindMarkerAndRetainsFailedBatch(t *testing.T) {
+	setupIntegrationDB(t)
+	db := database.GetDB()
+	row := xray.ClientTraffic{Email: "reconcile-tuic@example.test", Enable: true}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("CREATE TRIGGER reject_reconcile_tuic BEFORE UPDATE ON client_traffics BEGIN SELECT RAISE(ABORT, 'injected'); END").Error; err != nil {
+		t.Fatal(err)
+	}
+	state := &tuicPollState{}
+	t.Cleanup(func() {
+		if state.unlock != nil {
+			state.unlock()
+		}
+	})
+	calls := 0
+	collectAfterReconcile := func() []tuic.ClientTrafficDelta {
+		calls++
+		var count int64
+		if err := db.Model(&model.XrayTrafficInFlight{}).Count(&count).Error; err != nil || count != 1 {
+			t.Fatalf("runtime mutation ran without marker: %d %v", count, err)
+		}
+		// Represent bytes drained from a daemon removed during reconcile.
+		return []tuic.ClientTrafficDelta{{Email: row.Email, TrafficID: row.Id, Up: 91}}
+	}
+	if _, _, _, err := collectAndCommitTuic(state, collectAfterReconcile, &service.InboundService{}); err == nil || state.batch == nil || state.unlock == nil {
+		t.Fatalf("reconcile drain not retained after failure: %v", err)
+	}
+	if err := service.VerifyXrayPollMarker(state.batch.ID); err != nil {
+		t.Fatalf("reconcile marker missing: %v", err)
+	}
+	if err := db.Exec("DROP TRIGGER reject_reconcile_tuic").Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := collectAndCommitTuic(state, collectAfterReconcile, &service.InboundService{}); err != nil || calls != 1 {
+		t.Fatalf("reconcile repeated instead of retrying its sample: calls=%d err=%v", calls, err)
+	}
+	if err := db.First(&row, row.Id).Error; err != nil || row.Up != 91 {
+		t.Fatalf("reconcile drain misaccounted: %+v %v", row, err)
+	}
+}
+
 func TestTuicPeriodicPollRetainsExactBatchAndFenceOnWriteFailure(t *testing.T) {
 	setupIntegrationDB(t)
 	db := database.GetDB()

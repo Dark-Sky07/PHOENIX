@@ -51,7 +51,9 @@ Database migration requires the upgraded receipt table and preserves its hashes.
 Periodic TUIC polling now creates a shared in-flight marker under the allocation
 lock before draining the manager, journals the exact delta batch, and commits a
 payload-bound receipt before attempting quota enforcement and clearing the
-journal and marker. A failed step retains the batch and allocation lock in the
+journal and marker. Periodic daemon reconciliation runs behind a second marker:
+it reads the desired state under the lock and immediately collects and journals
+any counters drained by stopping or replacing a daemon. A failed step retains the batch and allocation lock in the
 same process for retry; an uncertain marker deletion is restored under that lock.
 After restart, a periodic journal can be cleaned up automatically only under
 the recovery lock with its exclusive marker and a matching payload-bound receipt
@@ -64,9 +66,12 @@ leave only a marker; never infer missing bytes from it.
 This is not a complete TUIC accounting protocol. Other hosts cannot inspect this
 host's journal. The safeguards do not prove client generation or reseller
 ownership, protect unpolled in-memory traffic against a crash, or retroactively
-bind old TUIC receipts to their payloads. Daemon reconciliation and shutdown can
-also drain sessions outside the periodic poll. Operators must preserve evidence
-and reconcile rather than deleting a journal or inventing usage.
+bind old TUIC receipts to their payloads. Other runtime mutation and shutdown
+paths can still drain sessions outside this periodic barrier; a marker also does
+not prove that connections stopped or all final bytes were observed. Enforcement
+following the reconciliation drain may require another reconciliation tick.
+Operators must preserve evidence and reconcile rather than deleting a journal or
+inventing usage.
 
 ## Xray poll identity capture
 
