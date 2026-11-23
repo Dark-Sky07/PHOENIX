@@ -61,7 +61,7 @@ func collectAndCommitPPP(state *pppPollState, collect func() (*pppvpn.TrafficBat
 				return false, false, fmt.Errorf("create PPP poll marker: %w", err)
 			}
 			state.marker = id
-		} else if err := service.VerifyXrayPollMarker(state.marker); err != nil {
+		} else if err := service.VerifyExclusiveXrayPollMarker(state.marker); err != nil {
 			state.unlock()
 			state.unlock = nil
 			return false, false, fmt.Errorf("verify PPP poll marker: %w", err)

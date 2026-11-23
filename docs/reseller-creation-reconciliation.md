@@ -1031,8 +1031,11 @@ affected host before clearing local and shared incidents.
 PPP collection now acquires the participating allocation lock and writes an
 in-flight database marker before scanning the spool. It retains the marker
 on an uncertain scan or write and retries the same pending batch; the lock is
-released between retries so independent journal recovery can proceed. An
-uncertain marker deletion retains the lock until the marker is restored;
+released between retries so independent journal recovery can proceed. On
+reacquiring that lock, a PPP retry now requires its own marker to be the only
+unresolved poll marker; another marker must be recovered independently first.
+The PPP marker is retained while it waits. An uncertain marker deletion retains
+the lock until the marker is restored;
 absolute session checkpoints make an uncertain committed write idempotent.
 The marker is removed only after a successful write or after a counter-decrease
 incident is confirmed in both local evidence and the shared database. Closed

@@ -199,6 +199,43 @@ func TestPPPPollCrashLeavesCrossHostMarker(t *testing.T) {
 	}
 }
 
+func TestPPPPollRetryDefersWhileForeignMarkerIsUnresolved(t *testing.T) {
+	setupIntegrationDB(t)
+	t.Setenv("XUI_BIN_FOLDER", t.TempDir())
+	db := database.GetDB()
+	state := &pppPollState{}
+	if _, _, err := collectAndCommitPPP(state, func() (*pppvpn.TrafficBatch, error) {
+		return nil, errors.New("temporary spool failure")
+	}, nil, nil); err == nil || state.marker == "" {
+		t.Fatalf("initial failed poll did not retain a marker: %v", err)
+	}
+	original := state.marker
+	foreign := "foreign-unresolved-poll"
+	if err := db.Create(&model.XrayTrafficInFlight{ID: foreign}).Error; err != nil {
+		t.Fatal(err)
+	}
+	collects, acks := 0, 0
+	collect := func() (*pppvpn.TrafficBatch, error) {
+		collects++
+		return &pppvpn.TrafficBatch{Token: 1}, nil
+	}
+	ack := func(uint64) error { acks++; return nil }
+	if _, _, err := collectAndCommitPPP(state, collect, nil, ack); err == nil || collects != 0 || acks != 0 || state.marker != original || state.unlock != nil {
+		t.Fatalf("foreign marker did not defer retry: collects=%d acks=%d marker=%q err=%v", collects, acks, state.marker, err)
+	}
+	var count int64
+	if err := db.Model(&model.XrayTrafficInFlight{}).Count(&count).Error; err != nil || count != 2 {
+		t.Fatalf("poll fences not retained: %d %v", count, err)
+	}
+	// Simulate independent recovery of the foreign marker, not blind cleanup.
+	if err := db.Where("id = ?", foreign).Delete(&model.XrayTrafficInFlight{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := collectAndCommitPPP(state, collect, nil, ack); err != nil || collects != 1 || acks != 1 || state.marker != "" {
+		t.Fatalf("retry failed after foreign recovery: collects=%d acks=%d marker=%q err=%v", collects, acks, state.marker, err)
+	}
+}
+
 func TestPPPPollRetryRejectsMissingMarker(t *testing.T) {
 	setupIntegrationDB(t)
 	state := &pppPollState{}

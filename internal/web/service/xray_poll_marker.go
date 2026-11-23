@@ -57,7 +57,8 @@ func VerifyXrayPollMarker(id string) error {
 }
 
 // VerifyExclusiveXrayPollMarker additionally rejects a foreign unresolved poll.
-// Call under the allocation lock before re-polling after a temporary hook wait.
+// Call under the allocation lock before re-polling after a temporary wait or
+// retrying a PPP poll; a foreign unresolved marker must be recovered first.
 func VerifyExclusiveXrayPollMarker(id string) error {
 	if err := VerifyXrayPollMarker(id); err != nil {
 		return err

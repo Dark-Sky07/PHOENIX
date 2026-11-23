@@ -30,14 +30,25 @@ func TestXrayPollMarkerAcrossPostgresProcesses(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer database.CloseDB()
-		if mode == "recovery" {
+		if mode == "recovery" || mode == "exclusive" || mode == "nonexclusive" {
 			unlock, err := LockResellerAllocationForXrayRecovery()
 			if err != nil {
 				t.Fatalf("recovery lock blocked by marker: %v", err)
 			}
 			defer unlock()
-			if err := VerifyXrayPollMarker(os.Getenv("PHOENIX_POLL_MARKER_ID")); err != nil {
+			id := os.Getenv("PHOENIX_POLL_MARKER_ID")
+			if err := VerifyXrayPollMarker(id); err != nil {
 				t.Fatalf("shared marker unavailable: %v", err)
+			}
+			if mode == "exclusive" {
+				if err := VerifyExclusiveXrayPollMarker(id); err != nil {
+					t.Fatalf("sole marker rejected: %v", err)
+				}
+			}
+			if mode == "nonexclusive" {
+				if err := VerifyExclusiveXrayPollMarker(id); err == nil {
+					t.Fatal("foreign unresolved marker accepted")
+				}
 			}
 			return
 		}
@@ -88,6 +99,17 @@ func TestXrayPollMarkerAcrossPostgresProcesses(t *testing.T) {
 	}
 	run("blocked")
 	run("recovery")
+	run("exclusive")
+	foreign := uuid.NewString()
+	if err := db.Create(&model.XrayTrafficInFlight{ID: foreign}).Error; err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Where("id = ?", foreign).Delete(&model.XrayTrafficInFlight{}).Error })
+	run("nonexclusive")
+	if err := db.Where("id = ?", foreign).Delete(&model.XrayTrafficInFlight{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	run("exclusive")
 	if err := db.Where("id = ?", id).Delete(&model.XrayTrafficInFlight{}).Error; err != nil {
 		t.Fatal(err)
 	}
