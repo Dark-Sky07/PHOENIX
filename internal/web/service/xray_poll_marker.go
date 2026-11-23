@@ -30,13 +30,14 @@ func FinishXrayPoll(id string) error {
 // that the batch transaction committed. Call under the allocation recovery
 // lock. Receipts are deliberately retained: another host may still hold a
 // journal and must be able to replay it without charging the batch twice.
-// Markers without receipts remain for journal recovery or manual review.
+// Markers without versioned receipts remain for journal recovery or manual
+// review; legacy receipts cannot bind their marker to a particular payload.
 func RecoverCommittedXrayPollMarkers() error {
 	db := database.GetDB()
 	if db == nil {
 		return errors.New("database unavailable while recovering Xray poll markers")
 	}
-	receipts := db.Model(&model.XrayTrafficReceipt{}).Select("id")
+	receipts := db.Model(&model.XrayTrafficReceipt{}).Select("id").Where("payload_hash LIKE ? AND LENGTH(payload_hash) = ?", "v1:%", 67)
 	return db.Where("id IN (?)", receipts).Delete(&model.XrayTrafficInFlight{}).Error
 }
 

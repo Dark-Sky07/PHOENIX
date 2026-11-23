@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -91,6 +92,26 @@ func (s *InboundService) addTrafficBatchWithMarker(id string, inboundTraffics []
 	return
 }
 
+// Hash the exact serializable journal payload with an explicit version. The
+// digest binds retries to their committed transaction, not to a trusted sender.
+func xrayTrafficPayloadHash(id string, inbounds []*xray.Traffic, clients []*xray.ClientTraffic, identities []XrayTrafficIdentity) (string, error) {
+	for _, client := range clients {
+		if client != nil && (client.PPPSessionID != "" || client.PPPInboundID != 0 || client.PPPRxBytes != 0 || client.PPPTxBytes != 0 || client.TuicTrafficID != 0 || client.TuicUUID != "" || client.TuicInboundId != 0) {
+			return "", errors.New("Xray receipt payload contains nonserializable protocol fields")
+		}
+	}
+	data, err := json.Marshal(struct {
+		ID         string                `json:"id"`
+		Traffic    []*xray.Traffic       `json:"traffic"`
+		Clients    []*xray.ClientTraffic `json:"clients"`
+		Identities []XrayTrafficIdentity `json:"identities"`
+	}{id, inbounds, clients, identities})
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("v1:%x", sha256.Sum256(data)), nil
+}
+
 func (s *InboundService) addTrafficLocked(id string, inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic, identities []XrayTrafficIdentity, allocationHeld bool, markerID string) (needRestart bool, clientsDisabled bool, disabledNodeIDs []int, err error) {
 	db := database.GetDB()
 	tx := db.Begin()
@@ -110,12 +131,23 @@ func (s *InboundService) addTrafficLocked(id string, inboundTraffics []*xray.Tra
 		}
 	}()
 	if id != "" {
-		result := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&model.XrayTrafficReceipt{ID: id})
+		hash, hashErr := xrayTrafficPayloadHash(id, inboundTraffics, clientTraffics, identities)
+		if hashErr != nil {
+			return false, false, nil, hashErr
+		}
+		result := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&model.XrayTrafficReceipt{ID: id, PayloadHash: hash})
 		if result.Error != nil {
 			return false, false, nil, result.Error
 		}
 		if result.RowsAffected == 0 {
-			// An earlier commit succeeded despite returning an error. Request a
+			var receipt model.XrayTrafficReceipt
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", id).Take(&receipt).Error; err != nil {
+				return false, false, nil, err
+			}
+			if receipt.PayloadHash == "" || receipt.PayloadHash != hash {
+				return false, false, nil, errors.New("Xray traffic receipt lacks matching payload evidence; manual reconciliation required")
+			}
+			// A matching earlier commit may have returned an error. Request a
 			// conservative restart in case its runtime side effects were missed.
 			return true, false, nil, nil
 		}

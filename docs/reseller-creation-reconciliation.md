@@ -44,8 +44,11 @@ journal ID now requires the saved and retry payloads to match; publication does
 not overwrite another payload. Linux journal reads reject final symlinks and
 special files, and journal records are capped at 64 MiB; oversized records stay
 pending for review. This relies on a trusted journal directory and filesystem
-support for hard links. Receipts are still keyed by ID rather than a payload
-hash, so this check does not authenticate copies on other hosts or backups.
+support for hard links. New transactional receipts bind the ID to a versioned
+hash of the serialized payload, including the captured identities; conflicting
+replays fail closed. Legacy receipts lack that evidence and require manual review
+if replayed or paired with an unresolved marker. A hash is not sender
+authentication and does not make an unseen journal on another host visible.
 
 The Xray poll now holds the participating reseller-allocation lock from before
 reading runtime counters until their database identity snapshot is captured. A
@@ -420,7 +423,10 @@ covers only the configured local journal folder: an older, unmarked journal on
 another host with an independent folder is not visible to this guard.
 
 Recovery can automatically clear an interrupted poll marker when its matching
-Xray receipt proves that the traffic transaction committed. It retains the
+versioned Xray receipt records that a traffic transaction committed. Legacy
+receipts without a payload hash no longer authorize automatic marker cleanup;
+their markers need manual review. Recovery still cannot inspect journal copies
+on other hosts. It retains the
 receipt because a journal for that batch could still exist on another host;
 a later replay must not charge it twice. Markers without a matching receipt are
 not cleared by this recovery and still require their journal or documented

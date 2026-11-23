@@ -260,7 +260,7 @@ jobs:
       - name: Test PostgreSQL accounting locks
         env:
           PHOENIX_TEST_POSTGRES_DSN: postgres://phoenix:phoenix@localhost:5432/phoenix_test?sslmode=disable
-        run: go test ./internal/web/service -run '^(TestXrayTrafficIdentityLocksExistingRowsPostgres|TestResellerAllocationAdvisoryLockPostgres|TestConcurrentVoucherRedemptionPostgres|TestConcurrentResellerPaymentPostgres|TestEffectiveGlobalTrafficEnforcementPostgres|TestInboundTrafficOverflowPostgres|TestResellerNodeBaselinePostgres|TestResellerRemoteGuardOrphanedEvidencePostgres|TestCounterIncidentAcrossPostgresProcesses|TestL2TPIncidentAcrossPostgresProcesses|TestPPPCheckpointConcurrentWritersPostgres|TestPPPRemovalGuardPostgres|TestPPPIncidentAcrossPostgresProcesses|TestXrayPollMarkerAcrossPostgresProcesses)$' -count=1
+        run: go test ./internal/web/service -run '^(TestXrayTrafficIdentityLocksExistingRowsPostgres|TestResellerAllocationAdvisoryLockPostgres|TestConcurrentVoucherRedemptionPostgres|TestConcurrentResellerPaymentPostgres|TestEffectiveGlobalTrafficEnforcementPostgres|TestInboundTrafficOverflowPostgres|TestResellerNodeBaselinePostgres|TestResellerRemoteGuardOrphanedEvidencePostgres|TestCounterIncidentAcrossPostgresProcesses|TestL2TPIncidentAcrossPostgresProcesses|TestPPPCheckpointConcurrentWritersPostgres|TestPPPAccountingDestinationsPostgres|TestXrayReceiptPayloadBindingPostgres|TestPPPRemovalGuardPostgres|TestPPPIncidentAcrossPostgresProcesses|TestXrayPollMarkerAcrossPostgresProcesses)$' -count=1
       - name: Test ordered snapshot sequence concurrency on PostgreSQL
         env:
           PHOENIX_TEST_POSTGRES_DSN: postgres://phoenix:phoenix@localhost:5432/phoenix_test?sslmode=disable

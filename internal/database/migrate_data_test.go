@@ -12,6 +12,31 @@ import (
 	"gorm.io/gorm/logger"
 )
 
+func TestLegacyXrayReceiptSchemaUpgradePreservesUnknownPayload(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(t.TempDir()+"/legacy.db"), &gorm.Config{Logger: logger.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = pool.Close() })
+	if err := db.Exec("CREATE TABLE xray_traffic_receipts (id TEXT PRIMARY KEY)").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("INSERT INTO xray_traffic_receipts (id) VALUES (?)", "legacy").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&model.XrayTrafficReceipt{}); err != nil {
+		t.Fatal(err)
+	}
+	var receipt model.XrayTrafficReceipt
+	if err := db.First(&receipt, "id = ?", "legacy").Error; err != nil || receipt.PayloadHash != "" {
+		t.Fatalf("legacy receipt acquired invented payload evidence: %+v %v", receipt, err)
+	}
+}
+
 func TestMigrateData_CompositeKeyTableLargerThanBatch(t *testing.T) {
 	dsn := os.Getenv("XUI_TEST_PG_DSN")
 	if dsn == "" {
@@ -215,7 +240,7 @@ func TestCopyAllModelsPreservesTrafficProtocolEvidence(t *testing.T) {
 		&model.ResellerNodeCounterIncident{NodeId: -3, Email: "", Direction: "ppp-counter-decreased"},
 		&model.PPPClientTrafficCounter{SessionID: "ppp-migration", Email: "migration@example.test", InboundID: 27, RxBytes: 123, TxBytes: 321},
 		&model.ClientGlobalTraffic{MasterGuid: "master", Email: "migration@example.test", Up: 77},
-		&model.XrayTrafficReceipt{ID: "batch-committed"},
+		&model.XrayTrafficReceipt{ID: "batch-committed", PayloadHash: "v1:test-migration-hash"},
 		&model.XrayTrafficInFlight{ID: "batch-pending"},
 		&model.TrafficSnapshotReceiver{ID: "node-inbound:123", Sender: "sender", Generation: "epoch", LastSequence: 42},
 		&model.TrafficSnapshotSender{ID: "sender-token", Sender: "sender", Generation: "epoch", LastSequence: 43},
@@ -244,8 +269,8 @@ func TestCopyAllModelsPreservesTrafficProtocolEvidence(t *testing.T) {
 		t.Fatalf("global: %+v %v", global, err)
 	}
 	var receipt model.XrayTrafficReceipt
-	if err := dst.First(&receipt, "id = ?", "batch-committed").Error; err != nil {
-		t.Fatal(err)
+	if err := dst.First(&receipt, "id = ?", "batch-committed").Error; err != nil || receipt.PayloadHash != "v1:test-migration-hash" {
+		t.Fatalf("receipt hash migration failed: %+v %v", receipt, err)
 	}
 	var pending model.XrayTrafficInFlight
 	if err := dst.First(&pending, "id = ?", "batch-pending").Error; err != nil {

@@ -45,7 +45,7 @@ func TestXrayJournalSurvivesDatabaseFailureAndReplaysOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Simulate a commit followed by a crash before removing the journal.
-	if _, _, err := j.inboundService.AddXrayTrafficBatch(batch.id, nil, batch.clients); err != nil {
+	if _, _, err := j.inboundService.AddCheckedXrayTrafficBatch(batch.id, batch.traffic, batch.clients, batch.identities); err != nil {
 		t.Fatal(err)
 	}
 	if err := NewXrayTrafficJob().replayXrayJournal(); err != nil {
@@ -63,6 +63,49 @@ func TestXrayJournalSurvivesDatabaseFailureAndReplaysOnce(t *testing.T) {
 	var count int64
 	if err := db.Model(&model.XrayTrafficReceipt{}).Count(&count).Error; err != nil || count != 1 {
 		t.Fatalf("receipt not retained = %d, %v", count, err)
+	}
+}
+
+func TestXrayJournalConflictingCommittedReceiptPreservesOtherHostCopy(t *testing.T) {
+	setupIntegrationDB(t)
+	db := database.GetDB()
+	row := xray.ClientTraffic{Email: "cross-host@example.test", Enable: true}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	j := NewXrayTrafficJob()
+	batch := &xrayTrafficBatch{id: uuid.NewString(), clients: []*xray.ClientTraffic{{Email: row.Email, Up: 123}}}
+	var err error
+	batch.identities, err = j.inboundService.CaptureXrayTrafficIdentities(batch.clients)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.BeginXrayPoll(batch.id); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := j.applyJournaledXrayBatch(batch); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a conflicting copy arriving from another host after the first
+	// host has removed its own journal. The receipt is the only shared proof.
+	batch.clients[0].Up = 456
+	if err := service.BeginXrayPoll(batch.id); err != nil {
+		t.Fatal(err)
+	}
+	if err := storeXrayBatch(batch); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewXrayTrafficJob().replayXrayJournal(); err == nil {
+		t.Fatal("conflicting journal accepted against committed receipt")
+	}
+	if _, err := os.Stat(filepath.Join(xrayJournalDir(), batch.id+".json")); err != nil {
+		t.Fatalf("conflicting evidence removed: %v", err)
+	}
+	if err := service.VerifyXrayPollMarker(batch.id); err != nil {
+		t.Fatalf("conflict marker cleared: %v", err)
+	}
+	if err := db.First(&row, row.Id).Error; err != nil || row.Up != 123 {
+		t.Fatalf("conflicting replay changed usage: %+v %v", row, err)
 	}
 }
 
