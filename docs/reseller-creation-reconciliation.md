@@ -85,7 +85,9 @@ or PPTP inbound, or converting it to a different protocol, is deferred even
 when disabled: this implementation has no
 verified stop-and-final-accounting proof for the whole inbound, and a missing
 session marker alone is insufficient. An operator must reconcile it; no
-automatic resume path is provided yet. Node status counts use overflow-safe
+automatic resume path is provided yet. Inbound edits retain an omitted daemon
+client list before normalization and reject unproven PPP client removal from
+settings or canonical links. Node status counts use overflow-safe
 local totals but do not replace global enforcement.
 Ordinary cleanup failures release the lock behind the retained
 marker; an uncertain marker deletion keeps the lock. A crash before journal

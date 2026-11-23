@@ -9,6 +9,7 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
+	"gorm.io/gorm"
 )
 
 func seedPPPRemovalGuard(t *testing.T) (*model.Inbound, *model.ClientRecord, *model.Reseller) {
@@ -30,6 +31,64 @@ func seedPPPRemovalGuard(t *testing.T) (*model.Inbound, *model.ClientRecord, *mo
 		}
 	}
 	return ib, client, reseller
+}
+
+func TestPPPInboundEditRejectsUnprovenClientRemoval(t *testing.T) {
+	for _, protocol := range []model.Protocol{model.PPTP, model.SSTP, model.L2TP} {
+		t.Run(string(protocol), func(t *testing.T) {
+			ib, client, _ := seedPPPRemovalGuard(t)
+			db := database.GetDB()
+			ib.Protocol = protocol
+			if err := db.Model(ib).Update("protocol", protocol).Error; err != nil {
+				t.Fatal(err)
+			}
+			updated := *ib
+			updated.Settings = `{"clients":[]}`
+			err := db.Transaction(func(tx *gorm.DB) error {
+				return (&InboundService{}).updateClientTraffics(tx, ib, &updated)
+			})
+			if err == nil || !strings.Contains(err.Error(), "PPP") {
+				t.Fatalf("unproven PPP client removal accepted: %v", err)
+			}
+			var count int64
+			if err := db.Model(&xray.ClientTraffic{}).Where("email = ?", client.Email).Count(&count).Error; err != nil || count != 1 {
+				t.Fatalf("traffic evidence removed: %d %v", count, err)
+			}
+			if err := db.Model(&model.ClientInbound{}).Where("inbound_id = ? AND client_id = ?", ib.Id, client.Id).Count(&count).Error; err != nil || count != 1 {
+				t.Fatalf("client link removed: %d %v", count, err)
+			}
+		})
+	}
+}
+
+func TestPPPBlankSettingsPreserveClientListBeforeNormalization(t *testing.T) {
+	inbound := &model.Inbound{Protocol: model.PPTP, Settings: ""}
+	preserveDaemonInboundClients(inbound, `{"clients":[{"email":"keep@example.test"}]}`)
+	if !strings.Contains(inbound.Settings, "keep@example.test") {
+		t.Fatalf("blank settings lost client list: %s", inbound.Settings)
+	}
+}
+
+func TestPPPInboundEditOmittingClientsPreservesAttachments(t *testing.T) {
+	ib, client, _ := seedPPPRemovalGuard(t)
+	db := database.GetDB()
+	var old model.Inbound
+	if err := db.First(&old, ib.Id).Error; err != nil {
+		t.Fatal(err)
+	}
+	updated := old
+	updated.Settings = `{}`
+	if _, _, err := (&InboundService{}).UpdateInbound(&updated); err != nil {
+		t.Fatalf("edit without client list failed: %v", err)
+	}
+	var saved model.Inbound
+	if err := db.First(&saved, ib.Id).Error; err != nil || !strings.Contains(saved.Settings, client.Email) {
+		t.Fatalf("omitted client list was discarded: %+v %v", saved, err)
+	}
+	var count int64
+	if err := db.Model(&model.ClientInbound{}).Where("inbound_id = ? AND client_id = ?", ib.Id, client.Id).Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("client link removed: %d %v", count, err)
+	}
 }
 
 func TestLocalPPPInboundDeletionRetainsIdentityAndLinks(t *testing.T) {

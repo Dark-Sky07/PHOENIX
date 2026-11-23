@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"regexp"
@@ -800,8 +801,11 @@ func preserveDaemonInboundClients(inbound *model.Inbound, oldSettings string) {
 	if inbound == nil || (inbound.Protocol != model.OpenVPN && inbound.Protocol != model.L2TP && inbound.Protocol != model.SSTP && inbound.Protocol != model.PPTP) {
 		return
 	}
-	if strings.TrimSpace(oldSettings) == "" || strings.TrimSpace(inbound.Settings) == "" {
+	if strings.TrimSpace(oldSettings) == "" {
 		return
+	}
+	if strings.TrimSpace(inbound.Settings) == "" {
+		inbound.Settings = "{}"
 	}
 	var newMap map[string]any
 	if err := json.Unmarshal([]byte(inbound.Settings), &newMap); err != nil || newMap == nil {
@@ -1475,6 +1479,18 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 		l2tpInboundMu.Lock()
 		defer l2tpInboundMu.Unlock()
 	}
+	if inbound == nil {
+		return nil, false, errors.New("inbound is required")
+	}
+	oldInbound, err := s.GetInbound(inbound.Id)
+	if err != nil {
+		return inbound, false, err
+	}
+	// Preserve omitted daemon clients before normalization can synthesize an
+	// empty clients array. Only inherit from the same protocol.
+	if oldInbound.Protocol == inbound.Protocol {
+		preserveDaemonInboundClients(inbound, oldInbound.Settings)
+	}
 	if err := normalizeTuicSettings(inbound); err != nil {
 		return inbound, false, err
 	}
@@ -1508,10 +1524,6 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 		return inbound, false, common.NewError(conflict.String())
 	}
 
-	oldInbound, err := s.GetInbound(inbound.Id)
-	if err != nil {
-		return inbound, false, err
-	}
 	oldRuntime := *oldInbound
 	// Protocol conversion otherwise bypasses the local PPP inbound deletion
 	// guard, discarding the runtime identity while final child-session traffic
@@ -1901,6 +1913,31 @@ func (s *InboundService) updateClientTraffics(tx *gorm.DB, oldInbound *model.Inb
 	for i := range newClients {
 		if key := transferEmailKey(newClients[i].Email); key != "" {
 			newEmails[key] = struct{}{}
+		}
+	}
+	if oldInbound.NodeID == nil && (oldInbound.Protocol == model.L2TP || oldInbound.Protocol == model.SSTP || oldInbound.Protocol == model.PPTP) {
+		// Include canonical links as well as the JSON list: older inbounds may
+		// have drifted between these sources. Guard before deleting any stats.
+		var linked []string
+		if err := tx.Table("clients").Joins("JOIN client_inbounds ON client_inbounds.client_id = clients.id").
+			Where("client_inbounds.inbound_id = ?", oldInbound.Id).Pluck("clients.email", &linked).Error; err != nil {
+			return err
+		}
+		for _, client := range oldClients {
+			linked = append(linked, client.Email)
+		}
+		removed := make([]string, 0)
+		for _, email := range linked {
+			key := transferEmailKey(email)
+			if key == "" {
+				return errors.New("PPP client identity unavailable during inbound edit")
+			}
+			if _, kept := newEmails[key]; !kept {
+				removed = append(removed, key)
+			}
+		}
+		if err := rejectUnprovenPPPRemoval(tx, removed, []int{oldInbound.Id}); err != nil {
+			return err
 		}
 	}
 
