@@ -163,6 +163,9 @@ func readSessions(id int) (map[string]interfaceCounter, []string, error) {
 	}
 	root, err := os.OpenRoot(l2tpRoot())
 	if errors.Is(err, os.ErrNotExist) {
+		if err := CheckHookIncidents(); err != nil {
+			return nil, nil, err
+		}
 		return map[string]interfaceCounter{}, nil, nil
 	}
 	if err != nil {
@@ -172,6 +175,9 @@ func readSessions(id int) (map[string]interfaceCounter, []string, error) {
 	dir := filepath.Join(strconv.Itoa(id), "sessions")
 	entries, err := readEvidenceDir(root, dir)
 	if errors.Is(err, os.ErrNotExist) {
+		if err := CheckHookIncidents(); err != nil {
+			return nil, nil, err
+		}
 		return map[string]interfaceCounter{}, nil, nil
 	}
 	if err != nil {

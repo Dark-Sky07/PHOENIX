@@ -3,12 +3,42 @@
 package l2tp
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"golang.org/x/sys/unix"
 )
+
+func TestPendingHookSpecialFilesRequireManualReview(t *testing.T) {
+	for _, kind := range []string{"fifo", "symlink", "directory"} {
+		t.Run(kind, func(t *testing.T) {
+			root, _ := setupTrafficFilesystem(t)
+			dir := filepath.Join(root, "hook-incidents")
+			if err := os.MkdirAll(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, "pending.test")
+			var err error
+			switch kind {
+			case "fifo":
+				err = unix.Mkfifo(path, 0600)
+			case "symlink":
+				err = os.Symlink(filepath.Join(t.TempDir(), "missing"), path)
+			case "directory":
+				err = os.Mkdir(path, 0700)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var incident *HookIncidentError
+			if err := CheckHookIncidents(); !errors.As(err, &incident) {
+				t.Fatalf("%s not classified as incident: %v", kind, err)
+			}
+		})
+	}
+}
 
 func TestClientSessionEvidenceRejectsFIFOWithoutBlocking(t *testing.T) {
 	for _, relative := range []string{"7/sessions", "7/sessions/ppp0"} {

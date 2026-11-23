@@ -45,11 +45,21 @@ func CheckHookIncidents() error {
 	if err != nil {
 		return fmt.Errorf("l2tp: inspect hook incidents: %w", err)
 	}
+	return classifyHookIncidentEntries(entries)
+}
+
+// A completed hook may remove its pending file between ReadDir and Info.
+// Treat that observation as pending for this attempt, not as a durable incident.
+func classifyHookIncidentEntries(entries []os.DirEntry) error {
 	var pending string
 	for _, entry := range entries {
 		path := filepath.Join(l2tpRoot(), "hook-incidents", entry.Name())
 		if strings.HasPrefix(entry.Name(), "pending.") {
 			info, err := entry.Info()
+			if errors.Is(err, os.ErrNotExist) {
+				pending = path
+				continue
+			}
 			if err != nil {
 				return fmt.Errorf("l2tp: inspect pending hook evidence %q: %w", path, err)
 			}
@@ -95,7 +105,7 @@ func CheckClientSessionEvidence(emails []string, scope []int) error {
 	}
 	root, err := os.OpenRoot(l2tpRoot())
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		return CheckHookIncidents()
 	}
 	if err != nil {
 		return fmt.Errorf("l2tp: open runtime root: %w", err)
@@ -145,7 +155,9 @@ func CheckClientSessionEvidence(emails []string, scope []int) error {
 			}
 		}
 	}
-	return nil
+	// Catch a hook that began during the scan, even when its directory was
+	// not present in the root listing. Hooks remain unsynchronized with us.
+	return CheckHookIncidents()
 }
 
 func readEvidenceDir(root *os.Root, name string) ([]os.DirEntry, error) {

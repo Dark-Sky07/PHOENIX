@@ -839,7 +839,12 @@ session markers, and remove it only after syncing the marker. While observed,
 the collector retains its shared poll marker and retries under the allocation
 lock only if no other unresolved marker exists. Sensitive operations defer;
 a pending file that persists after a killed hook needs manual investigation,
-not automatic deletion. A failed, uncertain marker deletion is restored while
+not automatic deletion. If a pending entry disappears while being inspected,
+the current scan still defers instead of declaring a permanent read incident;
+other read errors and nonregular entries continue to fail closed. The collector
+and removal scan recheck hook evidence after an empty or completed scan, but do
+not synchronize with hooks and cannot close the observation race. A failed,
+uncertain marker deletion is restored while
 the allocation lock is held; if restoration fails, the collector retains that
 lock and retries. A process or database session failure can still release the
 lock before restoration, so this is not a durable fencing guarantee in that

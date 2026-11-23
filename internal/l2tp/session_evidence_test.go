@@ -1,12 +1,43 @@
 package l2tp
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 )
+
+type incidentTestEntry struct {
+	name string
+	info fs.FileInfo
+	err  error
+}
+
+func (e incidentTestEntry) Name() string               { return e.name }
+func (e incidentTestEntry) IsDir() bool                { return e.info != nil && e.info.IsDir() }
+func (e incidentTestEntry) Type() fs.FileMode          { return 0 }
+func (e incidentTestEntry) Info() (fs.FileInfo, error) { return e.info, e.err }
+
+func TestHookIncidentPendingDisappearsDuringScan(t *testing.T) {
+	root, _ := setupTrafficFilesystem(t)
+	entries := []os.DirEntry{incidentTestEntry{name: "pending.abc", err: os.ErrNotExist}}
+	var pending *HookPendingError
+	if err := classifyHookIncidentEntries(entries); !errors.As(err, &pending) || pending.Path != filepath.Join(root, "hook-incidents", "pending.abc") {
+		t.Fatalf("removed pending evidence did not defer this scan: %v", err)
+	}
+	entries = append(entries, incidentTestEntry{name: "up.failure"})
+	var incident *HookIncidentError
+	if err := classifyHookIncidentEntries(entries); !errors.As(err, &incident) {
+		t.Fatalf("pending disappearance concealed a permanent incident: %v", err)
+	}
+	entries = []os.DirEntry{incidentTestEntry{name: "pending.abc", err: os.ErrPermission}}
+	if err := classifyHookIncidentEntries(entries); !errors.Is(err, os.ErrPermission) || errors.As(err, &pending) {
+		t.Fatalf("uninspectable evidence was treated as transient: %v", err)
+	}
+}
 
 func TestClientSessionEvidenceChecksL2TPMarkersWithoutInterface(t *testing.T) {
 	setupTrafficFilesystem(t)
