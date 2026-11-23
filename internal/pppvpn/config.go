@@ -137,7 +137,6 @@ PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 iface="${IFNAME:-${1:-}}"
 peer="${PEERNAME:-}"
-case "$iface" in ''|.|..|*[!A-Za-z0-9_.-]*) exit 1 ;; esac
 session_dir=%s
 mkdir -p "$session_dir"
 chmod 700 "$session_dir"
@@ -159,6 +158,8 @@ trap incident EXIT
 pending=$(mktemp "$session_dir/hook-pending.XXXXXXXXXX")
 printf 'PPP hook in progress: %%s interface %%s\n' '%s' "$iface" > "$pending"
 sync "$pending" "$session_dir"
+# Invalid identity must leave incident evidence rather than silently exiting.
+case "$iface" in ''|.|..|*[!A-Za-z0-9_.-]*) exit 1 ;; esac
 mkdir -p "$session_dir/.hook-locks"
 exec 9>"$session_dir/.hook-locks/$iface"
 flock -x -w 5 9

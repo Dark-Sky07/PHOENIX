@@ -204,6 +204,51 @@ func TestAckTrafficRetainsReplacementAndRepolls(t *testing.T) {
 	}
 }
 
+func TestHiddenSessionEvidenceIsNotIgnored(t *testing.T) {
+	root := setupTrafficTest(t)
+	dir := filepath.Join(root, "sessions", "pptp-7")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, ".unexpected")
+	if err := os.WriteFile(path, []byte("unreadable accounting evidence"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CollectTraffic(); err == nil {
+		t.Fatal("collector ignored hidden malformed evidence")
+	}
+	if err := CheckClientSessionEvidence([]string{"alice"}, nil); err == nil {
+		t.Fatal("removal check ignored hidden malformed evidence")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("hidden evidence removed: %v", err)
+	}
+}
+
+func TestInvalidHookInterfaceLeavesEvidence(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux PPP hook")
+	}
+	root := setupTrafficTest(t)
+	dir := filepath.Join(root, "sessions", "pptp-7")
+	path := filepath.Join(t.TempDir(), "up")
+	if err := os.WriteFile(path, []byte(renderTrafficHook(dir, 7, false)), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(path)
+	cmd.Env = append(os.Environ(), "IFNAME=../invalid", "PEERNAME=alice")
+	if err := cmd.Run(); err == nil {
+		t.Fatal("invalid interface accepted")
+	}
+	var incident *HookIncidentError
+	if err := CheckHookIncidents(); !errors.As(err, &incident) {
+		t.Fatalf("invalid hook identity did not leave incident: %v", err)
+	}
+	if _, err := CollectTraffic(); err == nil {
+		t.Fatal("invalid hook identity did not fence collection")
+	}
+}
+
 func TestEmptySessionClaimRequiresReconciliation(t *testing.T) {
 	root := setupTrafficTest(t)
 	claim := filepath.Join(root, "sessions-staged", "claim-interrupted")

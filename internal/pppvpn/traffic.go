@@ -119,9 +119,8 @@ func CollectTraffic() (*TrafficBatch, error) {
 		if strings.HasPrefix(name, "hook-pending.") {
 			return nil, &HookPendingError{Path: path}
 		}
-		if strings.HasPrefix(name, ".") {
-			continue
-		}
+		// Only the lock directory is excluded by readSessionPaths. Unexpected
+		// hidden files may contain accounting evidence and must not be ignored.
 		// ip-up/down creates <session>.tmp.<pid> before an atomic rename.
 		// Never acknowledge a temporary file before the hook can rename it.
 		if _, suffix, ok := strings.Cut(name, ".tmp."); ok {
@@ -529,9 +528,6 @@ func CheckClientSessionEvidence(emails []string, scope []int) error {
 	}
 	for _, path := range paths {
 		name := filepath.Base(path)
-		if strings.HasPrefix(name, ".") {
-			continue
-		}
 		// A partially published file can contain usage or identity not yet
 		// readable; do not guess whether it belongs to these clients.
 		if _, suffix, ok := strings.Cut(name, ".tmp."); ok {

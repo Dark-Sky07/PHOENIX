@@ -1003,7 +1003,11 @@ blind removal. The mechanism still cannot protect the interval before a hook
 creates/syncs its marker, detect a hook that never started, fence hooks that
 start after the final check, or prove shutdown and final accounting. Hook sync
 requires a filesystem and `sync` implementation that support these operations;
-failures leave the operation fenced when their evidence can be written.
+failures leave the operation fenced when their evidence can be written. Invalid
+interface names are checked only after pending evidence and the failure trap
+are installed; failure to create or sync the initial spool still cannot be
+reported reliably by the hook. Unexpected hidden files in session directories
+are inspected rather than silently skipped (the hook lock directory is excluded).
 
 Until a per-client SSTP/PPTP drain and final accounting protocol exists, known
 local PPP attachments block client deletion and detach, including disabled
