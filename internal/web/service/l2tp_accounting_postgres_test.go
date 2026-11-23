@@ -44,7 +44,7 @@ func TestL2TPIncidentAcrossPostgresProcesses(t *testing.T) {
 			if _, err := os.Stat(l2tpAccountingIncidentPath()); !os.IsNotExist(err) {
 				t.Fatalf("reader not isolated: %v", err)
 			}
-			if err := checkL2TPAccountingIncident(database.GetDB()); err == nil {
+			if err := checkPPPAndL2TPAccountingIncidents(database.GetDB()); err == nil {
 				t.Fatal("reader missed shared L2TP incident")
 			}
 			unlock, err := LockResellerAllocation()

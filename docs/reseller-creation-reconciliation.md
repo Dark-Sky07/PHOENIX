@@ -900,10 +900,26 @@ retained indefinitely, so storage grows; migration requires and copies their
 table rather than silently starting empty.
 
 These changes only protect the same session ID and participating checkpoint
-writers. A lower/stale reading currently logs an error and retains its batch;
-it does not yet create a durable shared incident that blocks quota decisions.
-Different sessions or other traffic writers updating the same client across
+writers. Different sessions or other traffic writers updating the same client across
 processes still need independent serialization. The session ID alone does not
 prove immutable client generation; final hooks, children, undetected short-lived
 sessions and post-sample traffic are not proven drained. Older deployments may
 already have deleted checkpoints, and missing evidence cannot be reconstructed.
+
+A detected lower or out-of-order SSTP/PPTP PPP counter now retains the observed
+session identity and prior/current readings as local `ppp-accounting-evidence`,
+and attempts a separate database incident (reserved node ID -3) after the traffic
+transaction rolls back. Once committed, participating quota, renewal and
+client/inbound removal checks on upgraded panels sharing that database are
+blocked; the dashboard warns, while unrelated traffic polls are not deliberately
+stopped. Failed writes stay pending in process and are retried with the batch;
+local evidence remains independent of database migration and must be preserved.
+
+This detects a lower observation, not necessarily a real reset; no missing bytes
+are invented. There is an unprotected interval between the rejected transaction
+and shared incident publication, and another host can proceed if database
+publication fails. If both storage paths fail, a process crash can lose the
+in-memory warning. The current batch remains pending and can block later PPP
+samples, and parent/child shutdown, final hooks, distinct sessions and writers
+are still not fully fenced. Review must preserve evidence and reconcile every
+affected host before clearing local and shared incidents.

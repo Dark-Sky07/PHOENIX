@@ -61,6 +61,14 @@ func (s *InboundService) addTrafficBatch(id string, inboundTraffics []*xray.Traf
 	if err == nil && len(disabledNodeIDs) > 0 {
 		s.restartRemoteNodesOnDisable(disabledNodeIDs)
 	}
+	var decrease *PPPCounterDecrease
+	if errors.As(err, &decrease) {
+		// The traffic transaction rolled back. Persist independently so its
+		// rollback cannot erase the warning; keep the original error visible.
+		if incidentErr := recordPPPCounterDecrease(decrease, allocationHeld); incidentErr != nil {
+			err = errors.Join(err, fmt.Errorf("persist PPP counter incident: %w", incidentErr))
+		}
+	}
 	return
 }
 
@@ -311,6 +319,18 @@ func (s *InboundService) addClientTraffic(tx *gorm.DB, traffics []*xray.ClientTr
 	return nil
 }
 
+// PPPCounterDecrease represents an ambiguous stale sample or reset. It is
+// not evidence of a new session or of how many bytes may be missing.
+type PPPCounterDecrease struct {
+	SessionID, Email                               string
+	InboundID                                      int
+	PreviousRx, PreviousTx, ObservedRx, ObservedTx int64
+}
+
+func (e *PPPCounterDecrease) Error() string {
+	return fmt.Sprintf("PPP session %q client %q inbound %d counters decreased or arrived out of order (rx %d to %d, tx %d to %d); reconciliation required", e.SessionID, e.Email, e.InboundID, e.PreviousRx, e.ObservedRx, e.PreviousTx, e.ObservedTx)
+}
+
 // resolvePPPClientTraffic turns absolute PPP interface counters into deltas and
 // advances the per-session checkpoint in the same transaction as client_traffic
 // accounting. Replaying a batch after a process/database restart therefore
@@ -338,7 +358,8 @@ func resolvePPPClientTraffic(tx *gorm.DB, traffics []*xray.ClientTraffic) ([]*xr
 			return nil, errors.New("PPP session checkpoint identity mismatch or corruption")
 		}
 		if traffic.PPPRxBytes < previous.RxBytes || traffic.PPPTxBytes < previous.TxBytes {
-			return nil, fmt.Errorf("PPP session %q counters decreased or arrived out of order; reconciliation required", traffic.PPPSessionID)
+			return nil, &PPPCounterDecrease{SessionID: traffic.PPPSessionID, Email: traffic.Email, InboundID: traffic.PPPInboundID,
+				PreviousRx: previous.RxBytes, PreviousTx: previous.TxBytes, ObservedRx: traffic.PPPRxBytes, ObservedTx: traffic.PPPTxBytes}
 		}
 		rxDelta := traffic.PPPRxBytes - previous.RxBytes
 		txDelta := traffic.PPPTxBytes - previous.TxBytes

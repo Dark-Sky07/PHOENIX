@@ -64,7 +64,11 @@ func persistL2TPAccountingIncident(detail string) error {
 // Store each distinct observation separately so an earlier orphan incident
 // does not erase the counter values needed for manual reconciliation.
 func persistL2TPCounterEvidence(detail string) error {
-	dir := filepath.Join(config.GetDBFolderPath(), "l2tp-accounting-evidence")
+	return persistAccountingEvidence("l2tp-accounting-evidence", detail)
+}
+
+func persistAccountingEvidence(dirName, detail string) error {
+	dir := filepath.Join(config.GetDBFolderPath(), dirName)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
@@ -82,7 +86,7 @@ func persistL2TPCounterEvidence(detail string) error {
 			return readErr
 		}
 		if string(data) != detail+"\n" {
-			return errors.New("incomplete L2TP counter evidence requires manual review")
+			return errors.New("incomplete counter evidence requires manual review")
 		}
 		f, err = os.OpenFile(path, os.O_RDONLY, 0)
 		if err != nil {
@@ -183,10 +187,13 @@ func ObserveL2TPAccountingIncident() error {
 	return errors.New("L2TP accounting incident requires manual reconciliation")
 }
 
-// checkL2TPAccountingIncident is used by sensitive operations, including inside
+// checkPPPAndL2TPAccountingIncidents is used by sensitive operations, including inside
 // writer transactions. It never tries to insert the shared incident in the
 // caller's transaction: rolling that transaction back would erase evidence.
-func checkL2TPAccountingIncident(db *gorm.DB) error {
+func checkPPPAndL2TPAccountingIncidents(db *gorm.DB) error {
+	if err := checkPPPAccountingIncident(db); err != nil {
+		return err
+	}
 	if err := ObserveL2TPAccountingIncident(); err != nil {
 		return err
 	}

@@ -121,7 +121,7 @@ func TestPublishedL2TPIncidentBlocksOtherHostAndSurvivesLocalRemoval(t *testing.
 	// the same database. It must block sensitive paths without blocking polls.
 	t.Setenv("XUI_BIN_FOLDER", t.TempDir())
 	t.Setenv("XUI_DB_FOLDER", t.TempDir())
-	if err := checkL2TPAccountingIncident(db); err == nil || !strings.Contains(err.Error(), "shared L2TP") {
+	if err := checkPPPAndL2TPAccountingIncidents(db); err == nil || !strings.Contains(err.Error(), "shared L2TP") {
 		t.Fatalf("shared incident ignored: %v", err)
 	}
 	if err := (&ResellerService{}).CheckTrafficQuota(&reseller, 1); err == nil {
@@ -141,7 +141,7 @@ func TestPublishedL2TPIncidentBlocksOtherHostAndSurvivesLocalRemoval(t *testing.
 	if err := db.Where("node_id = ?", -2).Delete(&model.ResellerNodeCounterIncident{}).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := checkL2TPAccountingIncident(db); err != nil {
+	if err := checkPPPAndL2TPAccountingIncidents(db); err != nil {
 		t.Fatalf("barrier retained after simulated shared review: %v", err)
 	}
 	// The origin still retains its independent evidence and can publish again.
