@@ -64,7 +64,9 @@ proving the transaction already committed. Uncommitted journals lack a durable
 ownership snapshot and remain for manual reconciliation; they are not applied
 automatically. TUIC collection retains negative-only counter evidence for
 rejection and keeps distinct source identities separate in the manager's pending
-queue. Retired-user removal is serialized with the last session's departure so
+queue. Active TCP and UDP counters saturate at the signed 64-bit maximum
+instead of wrapping; excess beyond that limit cannot be represented exactly.
+Retired-user removal is serialized with the last session's departure so
 a relay write after a counter swap cannot be dropped by that removal. These
 measures do not prove immutable historical ownership or generation.
 Ordinary cleanup failures release the lock behind the retained

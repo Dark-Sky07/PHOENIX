@@ -4,8 +4,10 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"errors"
+	"math"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,6 +34,50 @@ func TestUserRegistryBasic(t *testing.T) {
 	_, err := reg.Authenticate(&tls.ConnectionState{}, unknownUUID, [32]byte{})
 	if !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound, got %v", err)
+	}
+}
+
+func TestTrafficCounterSaturatesAndPreservesInvalidEvidence(t *testing.T) {
+	var counter atomic.Int64
+	counter.Store(math.MaxInt64 - 2)
+	addTrafficCounter(&counter, 3)
+	addTrafficCounter(&counter, 5)
+	if got := counter.Load(); got != math.MaxInt64 {
+		t.Fatalf("counter wrapped: %d", got)
+	}
+	counter.Store(-7)
+	addTrafficCounter(&counter, 10)
+	if got := counter.Load(); got != -7 {
+		t.Fatalf("invalid counter evidence overwritten: %d", got)
+	}
+}
+
+func TestTrafficCounterConcurrentDrainDoesNotLoseIncrements(t *testing.T) {
+	var counter atomic.Int64
+	var workers sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for j := 0; j < 10000; j++ {
+				addTrafficCounter(&counter, 1)
+			}
+		}()
+	}
+	done := make(chan struct{})
+	go func() { workers.Wait(); close(done) }()
+	var total int64
+	for {
+		total += counter.Swap(0)
+		select {
+		case <-done:
+			total += counter.Swap(0)
+			if total != 80000 {
+				t.Fatalf("increment loss across poll: got %d", total)
+			}
+			return
+		default:
+		}
 	}
 }
 

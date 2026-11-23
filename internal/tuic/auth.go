@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
 
@@ -31,6 +32,29 @@ type User struct {
 type UserTraffic struct {
 	BytesUp   atomic.Int64
 	BytesDown atomic.Int64
+}
+
+// addTrafficCounter prevents an active counter from wrapping negative or back
+// to a small positive number before the next poll. A concurrent Swap(0) is
+// safe: a failed CAS retries against the new interval. Already-invalid
+// negative evidence remains negative until the collector drains it.
+func addTrafficCounter(counter *atomic.Int64, bytes int64) {
+	if counter == nil || bytes <= 0 {
+		return
+	}
+	for {
+		current := counter.Load()
+		if current < 0 || current == math.MaxInt64 {
+			return
+		}
+		next := int64(math.MaxInt64)
+		if current <= math.MaxInt64-bytes {
+			next = current + bytes
+		}
+		if counter.CompareAndSwap(current, next) {
+			return
+		}
+	}
 }
 
 // UserRegistry is a thread-safe registry of TUIC users for an inbound.

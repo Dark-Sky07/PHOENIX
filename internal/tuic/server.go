@@ -864,7 +864,7 @@ func (s *Server) forwardUDPPacket(
 		s.logLimited(tuicLogWarn, "udp-send", 30*time.Second, "UDP relay request failed: %v", err)
 		return
 	}
-	user.Traffic.BytesUp.Add(int64(len(payload)))
+	addTrafficCounter(&user.Traffic.BytesUp, int64(len(payload)))
 	s.markActive(user.Email)
 }
 
@@ -897,7 +897,7 @@ func (s *Server) relayUDPResponses(
 			continue
 		}
 
-		user.Traffic.BytesDown.Add(int64(len(respPayload)))
+		addTrafficCounter(&user.Traffic.BytesDown, int64(len(respPayload)))
 		s.markActive(user.Email)
 
 		nextPktID++
