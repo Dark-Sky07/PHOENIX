@@ -50,8 +50,8 @@ func TestReadSessionsSupportsConcurrentSessionsForOneEmail(t *testing.T) {
 	writeSession(t, 7, "ppp0", "alice@example.com", "100", "200", true)
 	writeSession(t, 7, "ppp1", "alice@example.com", "300", "400", true)
 
-	got, stale, ok := readSessions(7)
-	if !ok {
+	got, stale, err := readSessions(7)
+	if err != nil {
 		t.Fatal("readSessions reported a transient failure")
 	}
 	if len(got) != 2 || len(stale) != 0 {
@@ -66,8 +66,8 @@ func TestReadSessionsReportsStaleMarkerWithoutInterface(t *testing.T) {
 	setupTrafficFilesystem(t)
 	writeSession(t, 8, "ppp-stale", "offline@example.com", "10", "20", false)
 
-	got, stale, ok := readSessions(8)
-	if !ok {
+	got, stale, err := readSessions(8)
+	if err != nil {
 		t.Fatal("a stale marker should be readable as uncertain evidence")
 	}
 	if len(got) != 0 || len(stale) != 1 || stale[0] != "ppp-stale\x00offline@example.com" {
@@ -79,20 +79,27 @@ func TestReadSessionsFailsClosedOnInvalidCounter(t *testing.T) {
 	setupTrafficFilesystem(t)
 	writeSession(t, 9, "ppp0", "alice@example.com", "not-a-counter", "20", true)
 
-	got, _, ok := readSessions(9)
-	if ok || got != nil {
-		t.Fatalf("invalid interface counter was accepted: got=%#v ok=%v", got, ok)
+	got, _, err := readSessions(9)
+	if err == nil || got != nil {
+		t.Fatalf("invalid interface counter was accepted: got=%#v err=%v", got, err)
 	}
 }
 
-func TestReadCounterParsesUnsignedValuesWithoutNegativeWrap(t *testing.T) {
+func TestReadCounterRejectsValuesOutsideSignedAccountingRange(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "counter")
 	if err := os.WriteFile(path, []byte("18446744073709551615\n"), 0o640); err != nil {
 		t.Fatal(err)
 	}
 	value, ok := readCounter(path)
-	if !ok || value != maxInterfaceCounter {
-		t.Fatalf("unsigned counter = (%d, %v), want saturated MaxInt64", value, ok)
+	if ok || value != 0 {
+		t.Fatalf("unrepresentable counter accepted: (%d, %v)", value, ok)
+	}
+
+	if err := os.WriteFile(path, []byte("9223372036854775807\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if value, ok := readCounter(path); !ok || value != maxInterfaceCounter {
+		t.Fatalf("largest representable counter rejected: (%d, %v)", value, ok)
 	}
 
 	if err := os.WriteFile(path, []byte("-1\n"), 0o640); err != nil {
@@ -112,6 +119,11 @@ func TestCollectTrafficCheckedFailurePreservesBaselines(t *testing.T) {
 	m := &Manager{id: 12, proc: &managed{proc: p, tag: "tag", last: baseline}}
 	if _, _, err := m.CollectTrafficChecked(); err == nil {
 		t.Fatal("counter failure was not reported")
+	} else {
+		var failure *SessionReadFailure
+		if !errors.As(err, &failure) || failure.InboundID != 12 || len(failure.Previous) != 1 || failure.Previous[0].Email != "alice@example.com" || failure.Previous[0].PreviousRx != 50 {
+			t.Fatalf("read failure lost baseline evidence: %+v %v", failure, err)
+		}
 	}
 	if got := baseline["ppp0\x00alice@example.com"]; got.rx != 50 || got.tx != 100 {
 		t.Fatalf("baseline changed after failure: %+v", got)
@@ -162,8 +174,8 @@ func TestReadSessionsFailsClosedOnUnreadableMarker(t *testing.T) {
 	if err := os.Symlink(filepath.Join(t.TempDir(), "missing"), path); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	if got, _, ok := readSessions(14); ok || got != nil {
-		t.Fatalf("unreadable marker was ignored: %#v %v", got, ok)
+	if got, _, err := readSessions(14); err == nil || got != nil {
+		t.Fatalf("unreadable marker was ignored: %#v %v", got, err)
 	}
 }
 
@@ -177,8 +189,8 @@ func TestReadSessionsFailsClosedOnInterfaceLookupError(t *testing.T) {
 	if err := os.WriteFile(sysroot, []byte("not a directory"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if got, _, ok := readSessions(15); ok || got != nil {
-		t.Fatalf("interface lookup error was ignored: %#v %v", got, ok)
+	if got, _, err := readSessions(15); err == nil || got != nil {
+		t.Fatalf("interface lookup error was ignored: %#v %v", got, err)
 	}
 }
 

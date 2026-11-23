@@ -39,6 +39,9 @@ func TestClientSessionEvidenceFailsClosedOnInvalidMarkers(t *testing.T) {
 			if err := CheckClientSessionEvidence([]string{"other@example.test"}, nil); err == nil {
 				t.Fatal("malformed identity treated as unrelated")
 			}
+			if _, _, err := readSessions(7); err == nil {
+				t.Fatal("collector accepted malformed identity")
+			}
 			if _, err := os.Stat(path); err != nil {
 				t.Fatalf("marker evidence removed: %v", err)
 			}

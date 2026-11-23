@@ -136,6 +136,15 @@ func RecordL2TPSessionDisappearanceUnderAllocationLock(missing *l2tp.SessionDisa
 	return recordL2TPAccountingIncident(missing.Error(), "l2tp-session-disappeared")
 }
 
+// RecordL2TPSessionReadFailureUnderAllocationLock fences quota decisions when
+// an uninspectable session snapshot may have hidden uncommitted usage.
+func RecordL2TPSessionReadFailureUnderAllocationLock(failure *l2tp.SessionReadFailure) error {
+	if failure == nil {
+		return errors.New("missing L2TP read failure observation")
+	}
+	return recordL2TPAccountingIncident(failure.Error(), "l2tp-session-read-failed")
+}
+
 func recordL2TPAccountingIncident(detail, direction string) error {
 	l2tpIncidentPending.Store(true)
 	evidenceErr := persistL2TPCounterEvidence(detail)

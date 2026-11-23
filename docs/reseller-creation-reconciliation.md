@@ -799,7 +799,13 @@ allocation lock. Cron and dashboard job instances serialize the sample and its
 retry, retain a failed sample, and sample before their own periodic daemon
 reconciliation. Tests cover failed writes, an uncertain committed retry and
 journal replay after simulated process restart. A failed interface-counter read
-also defers the periodic reconcile without advancing the baseline.
+also defers the periodic reconcile without advancing the baseline. Unreadable or
+malformed L2TP samples now retain the known baselines as evidence and publish a
+shared incident before the poll marker is cleared; an incident-write failure
+retains the marker. Even a transient read failure can therefore require manual
+review. Collector marker reads are root-confined and bounded, rejecting special
+files and symlinks on Linux, and unsigned interface counters above the signed
+accounting range are rejected rather than silently saturated.
 
 This only protects observed deltas. L2TP interface baselines are still held in
 memory; a process change, missed ip-down counter, crash before journal creation,

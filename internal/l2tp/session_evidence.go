@@ -66,28 +66,11 @@ func CheckClientSessionEvidence(emails []string, scope []int) error {
 				return fmt.Errorf("l2tp: invalid session marker %q requires manual review", entry.Name())
 			}
 			path := filepath.Join(dir, entry.Name())
-			f, err := openEvidenceRecord(root, path)
+			email, err := readEvidenceEmail(root, path)
 			if err != nil {
-				return fmt.Errorf("l2tp: inspect session marker %q: %w", path, err)
+				return err
 			}
-			data, readErr := io.ReadAll(io.LimitReader(f, 4097))
-			closeErr := f.Close()
-			if readErr != nil || closeErr != nil {
-				return fmt.Errorf("l2tp: read session marker %q: %w", path, errors.Join(readErr, closeErr))
-			}
-			// The managed hook writes precisely one newline-terminated identity.
-			if len(data) > 4096 || len(data) == 0 || data[len(data)-1] != '\n' || strings.Count(string(data), "\n") != 1 || !utf8.Valid(data) {
-				return fmt.Errorf("l2tp: malformed session marker %q requires manual review", path)
-			}
-			for _, r := range string(data[:len(data)-1]) {
-				if r < 0x20 || r == 0x7f {
-					return fmt.Errorf("l2tp: invalid session identity in marker %q requires manual review", path)
-				}
-			}
-			email := strings.ToLower(strings.TrimSpace(string(data)))
-			if email == "" {
-				return fmt.Errorf("l2tp: empty session marker %q requires manual review", path)
-			}
+			email = strings.ToLower(email)
 			if wanted[email] {
 				return fmt.Errorf("l2tp: session evidence for inbound %d requires manual reconciliation before removal", id)
 			}
@@ -103,4 +86,30 @@ func readEvidenceDir(root *os.Root, name string) ([]os.DirEntry, error) {
 	}
 	defer f.Close()
 	return f.ReadDir(-1)
+}
+
+// readEvidenceEmail accepts only the single bounded line written by the hook.
+func readEvidenceEmail(root *os.Root, path string) (string, error) {
+	f, err := openEvidenceRecord(root, path)
+	if err != nil {
+		return "", fmt.Errorf("l2tp: inspect session marker %q: %w", path, err)
+	}
+	data, readErr := io.ReadAll(io.LimitReader(f, 4097))
+	closeErr := f.Close()
+	if readErr != nil || closeErr != nil {
+		return "", fmt.Errorf("l2tp: read session marker %q: %w", path, errors.Join(readErr, closeErr))
+	}
+	if len(data) > 4096 || len(data) == 0 || data[len(data)-1] != '\n' || strings.Count(string(data), "\n") != 1 || !utf8.Valid(data) {
+		return "", fmt.Errorf("l2tp: malformed session marker %q requires manual review", path)
+	}
+	for _, r := range string(data[:len(data)-1]) {
+		if r < 0x20 || r == 0x7f {
+			return "", fmt.Errorf("l2tp: invalid session identity in marker %q requires manual review", path)
+		}
+	}
+	email := strings.TrimSpace(string(data))
+	if email == "" {
+		return "", fmt.Errorf("l2tp: empty session marker %q requires manual review", path)
+	}
+	return email, nil
 }

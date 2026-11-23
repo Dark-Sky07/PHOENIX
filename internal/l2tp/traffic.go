@@ -1,7 +1,7 @@
 package l2tp
 
 import (
-	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -38,6 +38,24 @@ type CounterDecrease struct {
 
 func (e *CounterDecrease) Error() string {
 	return fmt.Sprintf("l2tp: counter decreased for inbound %d interface %q client %q (rx %d to %d, tx %d to %d); reconciliation required", e.InboundID, e.Interface, e.Email, e.PreviousRx, e.ObservedRx, e.PreviousTx, e.ObservedTx)
+}
+
+// SessionReadFailure records an unreadable or malformed L2TP observation.
+// Previous baselines remain unchanged and no missing usage is estimated.
+type SessionReadFailure struct {
+	InboundID int
+	Cause     string
+	Previous  []SessionObservation
+}
+
+func (e *SessionReadFailure) Error() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "l2tp: failed to read session counters for inbound %d: %s", e.InboundID, e.Cause)
+	for _, observation := range e.Previous {
+		fmt.Fprintf(&b, "; last sampled interface %q client %q rx %d tx %d", observation.Interface, observation.Email, observation.PreviousRx, observation.PreviousTx)
+	}
+	b.WriteString("; reconciliation required")
+	return b.String()
 }
 
 // SessionDisappeared reports a missing sampled session or a session marker
@@ -124,11 +142,10 @@ func readCounter(path string) (int64, bool) {
 	if parseErr != nil {
 		return 0, false
 	}
-	// Linux exposes unsigned 64-bit counters while the panel traffic model is
-	// signed. Saturating at MaxInt64 is safer than wrapping into a negative
-	// value and lets the next lower counter be treated as a reset.
+	// Saturation would silently discard subsequent usage while the unsigned
+	// kernel counter continues to grow. An unrepresentable sample is unsafe.
 	if value > uint64(maxInterfaceCounter) {
-		return maxInterfaceCounter, true
+		return 0, false
 	}
 	return int64(value), true
 }
@@ -140,38 +157,32 @@ func readInterfaceCounter(iface string) (interfaceCounter, bool) {
 	return interfaceCounter{rx: rx, tx: tx}, rxOK && txOK
 }
 
-func readSessions(id int) (map[string]interfaceCounter, []string, bool) {
-	entries, err := os.ReadDir(sessionDirForID(id))
+func readSessions(id int) (map[string]interfaceCounter, []string, error) {
+	root, err := os.OpenRoot(l2tpRoot())
+	if errors.Is(err, os.ErrNotExist) {
+		return map[string]interfaceCounter{}, nil, nil
+	}
 	if err != nil {
-		if os.IsNotExist(err) {
-			// No marker directory is the normal no-active-session state.
-			return map[string]interfaceCounter{}, nil, true
-		}
-		return nil, nil, false
+		return nil, nil, fmt.Errorf("open L2TP runtime root: %w", err)
+	}
+	defer root.Close()
+	dir := filepath.Join(strconv.Itoa(id), "sessions")
+	entries, err := readEvidenceDir(root, dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return map[string]interfaceCounter{}, nil, nil
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("read L2TP session directory: %w", err)
 	}
 	out := make(map[string]interfaceCounter, len(entries))
 	var stale []string
 	for _, entry := range entries {
 		if entry.IsDir() || !validInterfaceName(entry.Name()) {
-			continue
+			return nil, nil, fmt.Errorf("invalid L2TP session marker %q", entry.Name())
 		}
-		path := filepath.Join(sessionDirForID(id), entry.Name())
-		file, err := os.Open(path)
+		email, err := readEvidenceEmail(root, filepath.Join(dir, entry.Name()))
 		if err != nil {
-			// A disappearing marker can race an ip-down hook; it must not
-			// turn this entire sample into a trustworthy empty reading.
-			return nil, nil, false
-		}
-		line, readErr := bufio.NewReader(file).ReadString('\n')
-		_ = file.Close()
-		if readErr != nil {
-			// The hook writes a newline-terminated username. A partial write
-			// must not be attributed to an incomplete identity.
-			return nil, nil, false
-		}
-		email := strings.TrimSpace(line)
-		if email == "" || strings.ContainsAny(email, "\r\n") {
-			return nil, nil, false
+			return nil, nil, err
 		}
 		// An absent interface is not proof of zero final usage. Retain the
 		// marker identity even when this session was never sampled.
@@ -180,17 +191,15 @@ func readSessions(id int) (map[string]interfaceCounter, []string, bool) {
 				stale = append(stale, entry.Name()+"\x00"+email)
 				continue
 			}
-			return nil, nil, false
+			return nil, nil, fmt.Errorf("inspect L2TP interface %q: %w", entry.Name(), err)
 		}
 		counter, ok := readInterfaceCounter(entry.Name())
 		if !ok {
-			// Do not turn a temporarily unreadable counter into a zero delta;
-			// that would discard the baseline and double-count the next poll.
-			return nil, nil, false
+			return nil, nil, fmt.Errorf("read L2TP counters for interface %q", entry.Name())
 		}
 		out[entry.Name()+"\x00"+email] = counter
 	}
-	return out, stale, true
+	return out, stale, nil
 }
 
 func saturatingCounterAdd(current, delta int64) int64 {

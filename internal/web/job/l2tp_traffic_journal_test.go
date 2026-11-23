@@ -207,6 +207,58 @@ func TestL2TPSessionDisappearancePersistsEvidenceAndFencesQuota(t *testing.T) {
 	}
 }
 
+func TestL2TPReadFailurePersistsSharedIncident(t *testing.T) {
+	setupIntegrationDB(t)
+	db := database.GetDB()
+	failure := &l2tp.SessionReadFailure{InboundID: 4, Cause: "incomplete marker", Previous: []l2tp.SessionObservation{{Interface: "ppp0", Email: "alice@example.test", PreviousRx: 100, PreviousTx: 200}}}
+	poll := func() ([]*xray.Traffic, []*xray.ClientTraffic, error) { return nil, nil, failure }
+	if _, err := persistL2TPPoll(NewXrayTrafficJob(), poll); err == nil {
+		t.Fatal("incomplete sample reported success")
+	}
+	var markers, incidents int64
+	if err := db.Model(&model.XrayTrafficInFlight{}).Count(&markers).Error; err != nil || markers != 0 {
+		t.Fatalf("poll marker not cleared after durable incident: %d %v", markers, err)
+	}
+	if err := db.Model(&model.ResellerNodeCounterIncident{}).Where("node_id = ?", -2).Count(&incidents).Error; err != nil || incidents != 1 {
+		t.Fatalf("shared incident missing: %d %v", incidents, err)
+	}
+	dir := filepath.Join(os.Getenv("XUI_DB_FOLDER"), "l2tp-accounting-evidence")
+	files, err := os.ReadDir(dir)
+	if err != nil || len(files) != 1 {
+		t.Fatalf("read failure evidence missing: %v %v", files, err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, files[0].Name()))
+	if err != nil || !strings.Contains(string(data), failure.Error()) {
+		t.Fatalf("read failure baseline not preserved: %q %v", data, err)
+	}
+	t.Setenv("XUI_DB_FOLDER", t.TempDir())
+	if err := (&service.ResellerService{}).CheckTrafficQuota(&model.Reseller{}, 1); err == nil || !strings.Contains(err.Error(), "shared L2TP") {
+		t.Fatalf("shared incident did not fence quota: %v", err)
+	}
+}
+
+func TestL2TPReadFailureRetainsMarkerWhenIncidentWriteFails(t *testing.T) {
+	setupIntegrationDB(t)
+	db := database.GetDB()
+	if err := db.Exec("CREATE TRIGGER reject_l2tp_read BEFORE INSERT ON reseller_node_counter_incidents BEGIN SELECT RAISE(ABORT, 'injected failure'); END").Error; err != nil {
+		t.Fatal(err)
+	}
+	poll := func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
+		return nil, nil, &l2tp.SessionReadFailure{InboundID: 4, Cause: "incomplete marker"}
+	}
+	if _, err := persistL2TPPoll(NewXrayTrafficJob(), poll); err == nil || !strings.Contains(err.Error(), "poll marker") {
+		t.Fatalf("failed incident write did not retain marker: %v", err)
+	}
+	var markers int64
+	if err := db.Model(&model.XrayTrafficInFlight{}).Count(&markers).Error; err != nil || markers != 1 {
+		t.Fatalf("poll marker missing: %d %v", markers, err)
+	}
+	if unlock, err := service.LockResellerAllocation(); err == nil {
+		unlock()
+		t.Fatal("unresolved marker allowed allocation")
+	}
+}
+
 func TestL2TPSessionDisappearanceRetainsMarkerWhenEvidenceFails(t *testing.T) {
 	setupIntegrationDB(t)
 	db := database.GetDB()

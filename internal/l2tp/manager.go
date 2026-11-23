@@ -412,11 +412,22 @@ func (m *Manager) CollectTrafficChecked() (inbounds []InboundTraffic, clients []
 	if m.proc.online == nil {
 		m.proc.online = make(map[string]bool)
 	}
-	current, stale, countersOK := readSessions(m.id)
-	if !countersOK {
-		// A transient marker/interface read failure must not clear baselines or
-		// report a false zero. Retry on the next polling tick.
-		return nil, nil, fmt.Errorf("l2tp: failed to read session counters for inbound %d", m.id)
+	current, stale, readErr := readSessions(m.id)
+	if readErr != nil {
+		// An unreadable snapshot cannot prove that the missing interval is
+		// zero. Preserve every baseline before reporting the uncertainty.
+		failure := &SessionReadFailure{InboundID: m.id, Cause: readErr.Error()}
+		keys := make([]string, 0, len(m.proc.last))
+		for key := range m.proc.last {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			iface, email, _ := strings.Cut(key, "\x00")
+			counter := m.proc.last[key]
+			failure.Previous = append(failure.Previous, SessionObservation{Interface: iface, Email: email, PreviousRx: counter.rx, PreviousTx: counter.tx})
+		}
+		return nil, nil, failure
 	}
 	// A missing previously sampled session is not a zero-traffic disconnect:
 	// the down hook discards its marker without recording final counters.

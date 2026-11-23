@@ -22,7 +22,10 @@ func TestClientSessionEvidenceRejectsFIFOWithoutBlocking(t *testing.T) {
 				t.Fatal(err)
 			}
 			if err := CheckClientSessionEvidence([]string{"alice"}, nil); err == nil {
-				t.Fatal("FIFO accepted")
+				t.Fatal("FIFO accepted by removal check")
+			}
+			if _, _, err := readSessions(7); err == nil {
+				t.Fatal("FIFO accepted by collector")
 			}
 			if _, err := os.Lstat(path); err != nil {
 				t.Fatalf("FIFO evidence removed: %v", err)
