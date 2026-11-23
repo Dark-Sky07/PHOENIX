@@ -816,6 +816,21 @@ shared with these L2TP samples. A real session/counter drain and durable
 session baselines remain necessary before reconciliation or quota release. Do
 not infer missing bytes or treat a stopped parent daemon as proof of completeness.
 
+Newly generated L2TP ip-down hooks now create and sync a persistent incident
+under `l2tp/hook-incidents` before removing the active session marker. They
+retain the hook identity, the prior marker if readable, and available interface
+counters as investigation evidence. Even a session that starts and ends between
+polls can therefore leave an incident when the updated hook runs. The collector,
+sensitive removals and local incident publisher observe the incident; the
+publisher also creates the shared quota barrier. Ordinary disconnects now
+require manual reconciliation, and L2TP sampling is deferred while the incident
+persists. The collected counters are not certified final consumption and are not
+automatically credited. Existing running daemons may still use an older hook
+until their configuration is regenerated; a missing/failed hook, interruption
+before its marker is durable, cross-process races, failed incident publication,
+nonparticipating writers and lack of a final drain remain outside this measure.
+The node is not automatically stopped by the incident.
+
 When an L2TP session that was sampled in this process disappears from the next
 snapshot, polling now preserves all baselines and records the missing sessions
 and the remaining snapshot as evidence. A surviving session marker whose

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/Dark-Sky07/phoenix/internal/config"
@@ -216,7 +217,7 @@ func renderIPUpScript(inst Instance) string {
 		// that maps a session back to the panel client email.
 		"peer=\"${PEERNAME:-${PPP_PEERNAME:-}}\"\n" +
 		"case \"$iface\" in\n" +
-		"  ''|*[!A-Za-z0-9_.-]*) exit 0 ;;\n" +
+		"  ''|.|..|*[!A-Za-z0-9_.-]*) exit 0 ;;\n" +
 		"esac\n" +
 		"sysctl -w \"net.ipv4.conf.$iface.route_localnet=1\" >/dev/null 2>&1 || true\n" +
 		"sysctl -w \"net.ipv4.conf.$iface.rp_filter=0\" >/dev/null 2>&1 || true\n" +
@@ -227,14 +228,31 @@ func renderIPUpScript(inst Instance) string {
 
 func renderIPDownScript(inst Instance) string {
 	dir := strings.ReplaceAll(sessionDirPath(inst.Id), "'", "'\\''")
-	return "#!/bin/sh\nset -eu\n" +
+	root := strings.ReplaceAll(l2tpRoot(), "'", "'\\''")
+	return "#!/bin/sh\nset -eu\numask 077\n" +
 		"PATH=/usr/sbin:/usr/bin:/sbin:/bin\nexport PATH\n" +
-		"dir='" + dir + "'\n" +
+		"dir='" + dir + "'\nroot='" + root + "'\n" +
 		"iface=\"${PPP_IFACE:-${IFNAME:-${1:-}}}\"\n" +
+		"peer=\"${PEERNAME:-${PPP_PEERNAME:-}}\"\n" +
+		// A down hook does not prove a final drain or preserve a session
+		// generation. Persist an incident before deleting the active marker;
+		// operators must reconcile the evidence rather than infer zero usage.
+		"incidents=\"$root/hook-incidents\"\n" +
+		"mkdir -p \"$incidents\"\n" +
+		"sync \"$root\"\n" +
+		"evidence=$(mktemp \"$incidents/down.XXXXXXXXXX\")\n" +
+		"sync \"$evidence\" \"$incidents\"\n" +
+		"printf 'L2TP ip-down inbound %s interface %s peer %s pppd_pid %s hook_parent %s\\n' '" + strconv.Itoa(inst.Id) + "' \"$iface\" \"$peer\" \"${PPPD_PID:-}\" \"$PPID\" > \"$evidence\"\n" +
+		"if [ -r /proc/sys/kernel/random/boot_id ]; then printf 'boot_id: ' >> \"$evidence\"; cat /proc/sys/kernel/random/boot_id >> \"$evidence\"; fi\n" +
 		"case \"$iface\" in\n" +
-		"  ''|*[!A-Za-z0-9_.-]*) exit 0 ;;\n" +
+		"  ''|.|..|*[!A-Za-z0-9_.-]*) sync \"$evidence\" \"$incidents\"; exit 1 ;;\n" +
 		"esac\n" +
-		"rm -f \"$dir/$iface\"\n"
+		"if [ -f \"$dir/$iface\" ]; then printf 'active marker: ' >> \"$evidence\"; head -c 4096 \"$dir/$iface\" >> \"$evidence\"; printf '\\n' >> \"$evidence\"; fi\n" +
+		"for counter in ifindex statistics/rx_bytes statistics/tx_bytes; do\n" +
+		"  if [ -r \"/sys/class/net/$iface/$counter\" ]; then printf '%s: ' \"$counter\" >> \"$evidence\"; cat \"/sys/class/net/$iface/$counter\" >> \"$evidence\"; fi\n" +
+		"done\n" +
+		"sync \"$evidence\" \"$incidents\"\n" +
+		"if [ -d \"$dir\" ]; then rm -f \"$dir/$iface\"; sync \"$dir\"; fi\n"
 }
 
 func renderChapSecrets(inst Instance) string {

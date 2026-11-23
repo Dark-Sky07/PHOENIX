@@ -158,6 +158,9 @@ func readInterfaceCounter(iface string) (interfaceCounter, bool) {
 }
 
 func readSessions(id int) (map[string]interfaceCounter, []string, error) {
+	if err := CheckDownHookIncidents(); err != nil {
+		return nil, nil, err
+	}
 	root, err := os.OpenRoot(l2tpRoot())
 	if errors.Is(err, os.ErrNotExist) {
 		return map[string]interfaceCounter{}, nil, nil
@@ -198,6 +201,9 @@ func readSessions(id int) (map[string]interfaceCounter, []string, error) {
 			return nil, nil, fmt.Errorf("read L2TP counters for interface %q", entry.Name())
 		}
 		out[entry.Name()+"\x00"+email] = counter
+	}
+	if err := CheckDownHookIncidents(); err != nil {
+		return nil, nil, err
 	}
 	return out, stale, nil
 }

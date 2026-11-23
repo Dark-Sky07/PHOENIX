@@ -98,6 +98,43 @@ func TestL2TPIncidentPersistenceFailureStaysLatched(t *testing.T) {
 	}
 }
 
+func TestL2TPDownHookIncidentPublishesSharedBarrier(t *testing.T) {
+	reseller, _ := seedResellerRenewal(t)
+	origin := os.Getenv("XUI_DB_FOLDER")
+	bin := t.TempDir()
+	t.Setenv("XUI_BIN_FOLDER", bin)
+	dir := filepath.Join(bin, "l2tp", "hook-incidents")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "down.test")
+	if err := os.WriteFile(path, []byte("unpolled session evidence"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := PublishL2TPAccountingIncident(); err == nil {
+		t.Fatal("down-hook incident was not reported")
+	}
+	db := database.GetDB()
+	var count int64
+	if err := db.Model(&model.ResellerNodeCounterIncident{}).Where("node_id = ?", -2).Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("missing shared incident: %d %v", count, err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := ObserveL2TPAccountingIncident(); err == nil {
+		t.Fatal("removing hook evidence silently cleared local incident")
+	}
+	t.Setenv("XUI_DB_FOLDER", t.TempDir())
+	t.Setenv("XUI_BIN_FOLDER", t.TempDir())
+	if err := (&ResellerService{}).CheckTrafficQuota(&reseller, 1); err == nil || !strings.Contains(err.Error(), "shared L2TP") {
+		t.Fatalf("other panel did not see incident: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(origin, "l2tp-accounting-incident")); err != nil {
+		t.Fatalf("origin evidence marker missing: %v", err)
+	}
+}
+
 func TestPublishedL2TPIncidentBlocksOtherHostAndSurvivesLocalRemoval(t *testing.T) {
 	reseller, client := seedResellerRenewal(t)
 	firstDBFolder := os.Getenv("XUI_DB_FOLDER")
