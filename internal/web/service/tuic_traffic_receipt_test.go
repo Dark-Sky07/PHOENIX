@@ -5,8 +5,43 @@ import (
 
 	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
+	"github.com/Dark-Sky07/phoenix/internal/tuic"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
 )
+
+func TestTuicReceiptBindsOriginalDeltas(t *testing.T) {
+	setupBulkDB(t)
+	db := database.GetDB()
+	row := xray.ClientTraffic{Email: "tuic-receipt@example.test", Enable: true}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	svc := &InboundService{}
+	batch := []tuic.ClientTrafficDelta{{Email: row.Email, TrafficID: row.Id, Up: 12, UUID: "original"}}
+	for i := 0; i < 2; i++ {
+		if err := svc.AddTuicTrafficBatch("batch", batch); err != nil {
+			t.Fatal(err)
+		}
+	}
+	conflict := append([]tuic.ClientTrafficDelta(nil), batch...)
+	conflict[0].UUID = "different"
+	if err := svc.AddTuicTrafficBatch("batch", conflict); err == nil {
+		t.Fatal("same ID with different raw payload accepted")
+	}
+	if err := db.First(&row, row.Id).Error; err != nil || row.Up != 12 {
+		t.Fatalf("conflicting replay changed usage: %+v %v", row, err)
+	}
+	var receipt model.TuicTrafficReceipt
+	if err := db.First(&receipt, "id = ?", "batch").Error; err != nil || len(receipt.PayloadHash) != 67 {
+		t.Fatalf("receipt hash missing: %+v %v", receipt, err)
+	}
+	if err := db.Create(&model.TuicTrafficReceipt{ID: "legacy"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.AddTuicTrafficBatch("legacy", batch); err == nil {
+		t.Fatal("legacy receipt accepted without payload evidence")
+	}
+}
 
 func TestTuicJournalRejectsMissingAndAmbiguousDestinations(t *testing.T) {
 	setupBulkDB(t)
@@ -22,13 +57,13 @@ func TestTuicJournalRejectsMissingAndAmbiguousDestinations(t *testing.T) {
 	service := &InboundService{}
 	for _, tc := range []struct {
 		id     string
-		sample *xray.ClientTraffic
+		sample tuic.ClientTrafficDelta
 	}{
-		{"ambiguous", &xray.ClientTraffic{Email: first.Email, TuicTrafficID: first.Id, Up: 1}},
-		{"no-id", &xray.ClientTraffic{Email: first.Email, Up: 1}},
-		{"absent-id", &xray.ClientTraffic{Email: first.Email, TuicTrafficID: other.Id + 10000, Up: 1}},
+		{"ambiguous", tuic.ClientTrafficDelta{Email: first.Email, TrafficID: first.Id, Up: 1}},
+		{"no-id", tuic.ClientTrafficDelta{Email: first.Email, Up: 1}},
+		{"absent-id", tuic.ClientTrafficDelta{Email: first.Email, TrafficID: other.Id + 10000, Up: 1}},
 	} {
-		if err := service.AddTuicTrafficBatch(tc.id, []*xray.ClientTraffic{tc.sample}); err == nil {
+		if err := service.AddTuicTrafficBatch(tc.id, []tuic.ClientTrafficDelta{tc.sample}); err == nil {
 			t.Fatalf("%s destination accepted", tc.id)
 		}
 		var receipt model.TuicTrafficReceipt
@@ -40,7 +75,7 @@ func TestTuicJournalRejectsMissingAndAmbiguousDestinations(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A known traffic row can be renamed without redirecting to another row.
-	if err := service.AddTuicTrafficBatch("renamed", []*xray.ClientTraffic{{Email: "old@example.test", TuicTrafficID: first.Id, Up: 3}}); err != nil {
+	if err := service.AddTuicTrafficBatch("renamed", []tuic.ClientTrafficDelta{{Email: "old@example.test", TrafficID: first.Id, Up: 3}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.First(&first, first.Id).Error; err != nil || first.Up != 3 {

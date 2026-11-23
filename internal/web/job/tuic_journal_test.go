@@ -12,6 +12,67 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/xray"
 )
 
+func TestTuicJournalRejectsConflictingPublicationAndReplay(t *testing.T) {
+	setupIntegrationDB(t)
+	db := database.GetDB()
+	row := xray.ClientTraffic{Email: "receipt-tuic@example.test", Enable: true}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	batch := tuicTrafficBatch{ID: "receipt-identity", Deltas: []tuic.ClientTrafficDelta{{Email: row.Email, TrafficID: row.Id, Up: 10}}}
+	path, err := storeTuicBatch(batch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conflict := tuicTrafficBatch{ID: batch.ID, Deltas: []tuic.ClientTrafficDelta{{Email: row.Email, TrafficID: row.Id, Up: 99}}}
+	if _, err := storeTuicBatch(conflict); err == nil {
+		t.Fatal("conflicting publication overwrote original journal")
+	}
+	job := NewTuicJob()
+	if err := job.replayTuicJournal(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := storeTuicBatch(conflict); err != nil {
+		t.Fatal(err)
+	}
+	if err := job.replayTuicJournal(); err == nil {
+		t.Fatal("conflicting journal accepted against receipt")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("conflicting journal removed: %v", err)
+	}
+	if err := db.First(&row, row.Id).Error; err != nil || row.Up != 10 {
+		t.Fatalf("conflicting replay changed usage: %+v %v", row, err)
+	}
+}
+
+func TestTuicJournalRejectsUnsafeIDsAndSymlinks(t *testing.T) {
+	setupIntegrationDB(t)
+	if _, err := storeTuicBatch(tuicTrafficBatch{ID: "../outside"}); err == nil {
+		t.Fatal("unsafe journal ID accepted")
+	}
+	if err := os.MkdirAll(tuicJournalDir(), 0700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "outside")
+	if err := os.WriteFile(target, []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(tuicJournalDir(), "symlink.json")
+	if err := os.Symlink(target, path); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := storeTuicBatch(tuicTrafficBatch{ID: "symlink"}); err == nil {
+		t.Fatal("symlink journal accepted")
+	}
+	if err := NewTuicJob().replayTuicJournal(); err == nil {
+		t.Fatal("symlink journal replayed")
+	}
+	if got, err := os.ReadFile(target); err != nil || string(got) != "{}" {
+		t.Fatalf("symlink target changed: %q %v", got, err)
+	}
+}
+
 func TestTuicJournalMissingDestinationRetainsEvidence(t *testing.T) {
 	setupIntegrationDB(t)
 	db := database.GetDB()

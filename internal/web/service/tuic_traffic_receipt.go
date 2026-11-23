@@ -1,6 +1,8 @@
 package service
 
 import (
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -9,6 +11,7 @@ import (
 
 	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
+	"github.com/Dark-Sky07/phoenix/internal/tuic"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
 )
 
@@ -51,17 +54,36 @@ func validateTuicJournalDestinations(tx *gorm.DB, traffic []*xray.ClientTraffic)
 
 // AddTuicTrafficBatch commits a journal batch and its receipt atomically. A
 // retained journal can therefore be replayed after an ambiguous commit result.
-func (s *InboundService) AddTuicTrafficBatch(id string, traffic []*xray.ClientTraffic) error {
+func (s *InboundService) AddTuicTrafficBatch(id string, deltas []tuic.ClientTrafficDelta) error {
 	if id == "" {
 		return errors.New("TUIC traffic batch has no ID")
 	}
+	payload, err := json.Marshal(struct {
+		ID     string                    `json:"id"`
+		Deltas []tuic.ClientTrafficDelta `json:"deltas"`
+	}{id, deltas})
+	if err != nil {
+		return err
+	}
+	hash := fmt.Sprintf("v1:%x", sha256.Sum256(payload))
+	traffic := make([]*xray.ClientTraffic, 0, len(deltas))
+	for _, delta := range deltas {
+		traffic = append(traffic, &xray.ClientTraffic{Email: delta.Email, TuicTrafficID: delta.TrafficID, TuicUUID: delta.UUID, TuicInboundId: delta.InboundID, Up: delta.Up, Down: delta.Down})
+	}
 	return submitTrafficWrite(func() error {
 		return database.GetDB().Transaction(func(tx *gorm.DB) error {
-			result := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&model.TuicTrafficReceipt{ID: id})
+			result := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&model.TuicTrafficReceipt{ID: id, PayloadHash: hash})
 			if result.Error != nil {
 				return result.Error
 			}
 			if result.RowsAffected == 0 {
+				var receipt model.TuicTrafficReceipt
+				if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", id).Take(&receipt).Error; err != nil {
+					return err
+				}
+				if receipt.PayloadHash == "" || receipt.PayloadHash != hash {
+					return errors.New("TUIC receipt lacks matching payload evidence; manual reconciliation required")
+				}
 				return nil
 			}
 			if err := validateTuicJournalDestinations(tx, traffic); err != nil {

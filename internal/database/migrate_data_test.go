@@ -37,6 +37,31 @@ func TestLegacyXrayReceiptSchemaUpgradePreservesUnknownPayload(t *testing.T) {
 	}
 }
 
+func TestLegacyTuicReceiptSchemaUpgradePreservesUnknownPayload(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(t.TempDir()+"/legacy-tuic.db"), &gorm.Config{Logger: logger.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = pool.Close() })
+	if err := db.Exec("CREATE TABLE tuic_traffic_receipts (id TEXT PRIMARY KEY)").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("INSERT INTO tuic_traffic_receipts (id) VALUES (?)", "legacy").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&model.TuicTrafficReceipt{}); err != nil {
+		t.Fatal(err)
+	}
+	var receipt model.TuicTrafficReceipt
+	if err := db.First(&receipt, "id = ?", "legacy").Error; err != nil || receipt.PayloadHash != "" {
+		t.Fatalf("legacy TUIC receipt acquired invented payload evidence: %+v %v", receipt, err)
+	}
+}
+
 func TestMigrateData_CompositeKeyTableLargerThanBatch(t *testing.T) {
 	dsn := os.Getenv("XUI_TEST_PG_DSN")
 	if dsn == "" {
@@ -241,6 +266,7 @@ func TestCopyAllModelsPreservesTrafficProtocolEvidence(t *testing.T) {
 		&model.PPPClientTrafficCounter{SessionID: "ppp-migration", Email: "migration@example.test", InboundID: 27, RxBytes: 123, TxBytes: 321},
 		&model.ClientGlobalTraffic{MasterGuid: "master", Email: "migration@example.test", Up: 77},
 		&model.XrayTrafficReceipt{ID: "batch-committed", PayloadHash: "v1:test-migration-hash"},
+		&model.TuicTrafficReceipt{ID: "tuic-committed", PayloadHash: "v1:tuic-migration-hash"},
 		&model.XrayTrafficInFlight{ID: "batch-pending"},
 		&model.TrafficSnapshotReceiver{ID: "node-inbound:123", Sender: "sender", Generation: "epoch", LastSequence: 42},
 		&model.TrafficSnapshotSender{ID: "sender-token", Sender: "sender", Generation: "epoch", LastSequence: 43},
@@ -271,6 +297,10 @@ func TestCopyAllModelsPreservesTrafficProtocolEvidence(t *testing.T) {
 	var receipt model.XrayTrafficReceipt
 	if err := dst.First(&receipt, "id = ?", "batch-committed").Error; err != nil || receipt.PayloadHash != "v1:test-migration-hash" {
 		t.Fatalf("receipt hash migration failed: %+v %v", receipt, err)
+	}
+	var tuicReceipt model.TuicTrafficReceipt
+	if err := dst.First(&tuicReceipt, "id = ?", "tuic-committed").Error; err != nil || tuicReceipt.PayloadHash != "v1:tuic-migration-hash" {
+		t.Fatalf("TUIC receipt hash migration failed: %+v %v", tuicReceipt, err)
 	}
 	var pending model.XrayTrafficInFlight
 	if err := dst.First(&pending, "id = ?", "batch-pending").Error; err != nil {
@@ -352,6 +382,7 @@ func TestTrafficEvidenceMigrationPostgres(t *testing.T) {
 		&model.ResellerNodeCounterIncident{NodeId: -3, Email: "", Direction: "ppp-counter-decreased"},
 		&model.PPPClientTrafficCounter{SessionID: "ppp-pg-migration", Email: "migration@test", InboundID: 313, RxBytes: 123, TxBytes: 321},
 		&model.XrayTrafficReceipt{ID: "migration-receipt"}, &model.XrayTrafficInFlight{ID: "migration-inflight"},
+		&model.TuicTrafficReceipt{ID: "tuic-migration-receipt", PayloadHash: "v1:test-roundtrip"},
 	} {
 		if err := src.Create(row).Error; err != nil {
 			t.Fatal(err)
@@ -387,6 +418,10 @@ func TestTrafficEvidenceMigrationPostgres(t *testing.T) {
 	var receipt model.XrayTrafficReceipt
 	if err := dst.First(&receipt, "id = ?", "migration-receipt").Error; err != nil {
 		t.Fatal(err)
+	}
+	var tuicReceipt model.TuicTrafficReceipt
+	if err := dst.First(&tuicReceipt, "id = ?", "tuic-migration-receipt").Error; err != nil || tuicReceipt.PayloadHash != "v1:test-roundtrip" {
+		t.Fatalf("TUIC receipt: %+v %v", tuicReceipt, err)
 	}
 	var inflight model.XrayTrafficInFlight
 	if err := dst.First(&inflight, "id = ?", "migration-inflight").Error; err != nil {

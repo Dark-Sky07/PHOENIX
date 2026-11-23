@@ -41,12 +41,17 @@ instead of silently discarding or multiplying those bytes. Supported row renames
 continue to use the row ID. Unexpected or incomplete journal entries also stop
 replay, and the local dashboard and participating allocation checks report or
 block on any TUIC journal entry or inspection error. Periodic TUIC reconciliation
-is deferred while replay fails; listeners are not deliberately stopped.
+is deferred while replay fails; listeners are not deliberately stopped. Journal
+publication no longer overwrites a conflicting payload, and Linux recovery
+rejects symlinks and special files with a 64 MiB read limit. New transactional
+TUIC receipts bind the ID to a versioned hash of the original deltas; a legacy
+receipt without a hash cannot authorize replay and requires manual review.
+Database migration requires the upgraded receipt table and preserves its hashes.
 
 These are local safeguards, not a shared cross-host marker or a complete TUIC
 accounting protocol. They do not prove generation or reseller ownership, protect
-unpolled in-memory traffic against a crash, or bind old TUIC receipts to their
-payloads. Other hosts cannot see this host's journal. Normal periodic TUIC polls
+unpolled in-memory traffic against a crash, or retroactively bind old TUIC receipts
+to their payloads. Other hosts cannot see this host's journal. Normal periodic TUIC polls
 still use the existing non-journaled path, and a crash or uncertain commit can
 lose or duplicate those deltas. Operators must preserve evidence and reconcile
 rather than deleting a journal or inventing usage.
