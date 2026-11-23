@@ -837,7 +837,9 @@ The node is not automatically stopped by the incident.
 Updated L2TP ip-up hooks also create and sync a `pending.*` file before changing
 session markers, and remove it only after syncing the marker. While observed,
 the collector retains its shared poll marker and retries under the allocation
-lock only if no other unresolved marker exists. Sensitive operations defer;
+lock only if no other unresolved marker exists. The collector checks hook
+evidence even when it has no tracked running daemon, rather than treating a
+visible pending hook as an empty sample. Sensitive operations defer;
 a pending file that persists after a killed hook needs manual investigation,
 not automatic deletion. If a pending entry disappears while being inspected,
 the current scan still defers instead of declaring a permanent read incident;

@@ -110,6 +110,45 @@ func TestReadCounterRejectsValuesOutsideSignedAccountingRange(t *testing.T) {
 	}
 }
 
+func TestCollectTrafficChecksHookEvidenceWithoutRunningRuntime(t *testing.T) {
+	for _, runtime := range []string{"no-manager-process", "stopped-without-baselines"} {
+		t.Run(runtime, func(t *testing.T) {
+			root, _ := setupTrafficFilesystem(t)
+			dir := filepath.Join(root, "hook-incidents")
+			if err := os.MkdirAll(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			m := &Manager{id: 12}
+			if runtime == "stopped-without-baselines" {
+				m.proc = &managed{last: map[string]interfaceCounter{}}
+			}
+			path := filepath.Join(dir, "pending.test")
+			if err := os.WriteFile(path, []byte("pending"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			_, _, err := m.CollectTrafficChecked()
+			var pending *HookPendingError
+			if !errors.As(err, &pending) {
+				t.Fatalf("pending hook ignored without runtime: %v", err)
+			}
+			if err := os.Rename(path, filepath.Join(dir, "up.failed")); err != nil {
+				t.Fatal(err)
+			}
+			_, _, err = m.CollectTrafficChecked()
+			var failure *SessionReadFailure
+			if !errors.As(err, &failure) {
+				t.Fatalf("hook incident ignored without runtime: %v", err)
+			}
+			if err := os.Remove(filepath.Join(dir, "up.failed")); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := m.CollectTrafficChecked(); err != nil {
+				t.Fatalf("empty runtime unexpectedly failed: %v", err)
+			}
+		})
+	}
+}
+
 func TestCollectTrafficKeepsBaselinesWhileHookPending(t *testing.T) {
 	root, _ := setupTrafficFilesystem(t)
 	dir := filepath.Join(root, "hook-incidents")

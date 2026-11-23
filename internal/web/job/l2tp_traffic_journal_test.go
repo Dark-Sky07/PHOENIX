@@ -120,6 +120,71 @@ func TestL2TPSampledTrafficJournalReplaysAfterCollectorRestart(t *testing.T) {
 	}
 }
 
+func TestL2TPPendingHookWithoutTrackedRuntimeRetainsSharedMarker(t *testing.T) {
+	setupIntegrationDB(t)
+	bin := t.TempDir()
+	t.Setenv("XUI_BIN_FOLDER", bin)
+	dir := filepath.Join(bin, "l2tp", "hook-incidents")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "pending.test")
+	if err := os.WriteFile(path, []byte("pending"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	mgr := &l2tp.Manager{}
+	collector := NewXrayTrafficJob()
+	poll := func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
+		_, _, err := mgr.CollectTrafficChecked()
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, nil, errEmptyL2TPSample
+	}
+	if _, err := persistL2TPPoll(collector, poll); err == nil || collector.l2tpHookPollID == "" {
+		t.Fatalf("missing shared fence for pending hook without runtime: %v", err)
+	}
+	if unlock, err := service.LockResellerAllocation(); err == nil {
+		unlock()
+		t.Fatal("shared marker did not block allocation")
+	}
+	var incidents int64
+	if err := database.GetDB().Model(&model.ResellerNodeCounterIncident{}).Where("node_id = ?", -2).Count(&incidents).Error; err != nil || incidents != 0 {
+		t.Fatalf("transient pending hook created an incident: %d %v", incidents, err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := persistL2TPPoll(collector, poll); err != nil || collector.l2tpHookPollID != "" {
+		t.Fatalf("completed hook did not permit marker retry: %v", err)
+	}
+}
+
+func TestL2TPHookIncidentWithoutTrackedRuntimePublishesSharedBarrier(t *testing.T) {
+	setupIntegrationDB(t)
+	bin := t.TempDir()
+	t.Setenv("XUI_BIN_FOLDER", bin)
+	dir := filepath.Join(bin, "l2tp", "hook-incidents")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "up.failed"), []byte("uncertain"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	mgr := &l2tp.Manager{}
+	poll := func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
+		_, _, err := mgr.CollectTrafficChecked()
+		return nil, nil, err
+	}
+	if _, err := persistL2TPPoll(NewXrayTrafficJob(), poll); err == nil {
+		t.Fatal("hook incident was silently treated as an empty runtime")
+	}
+	var incidents int64
+	if err := database.GetDB().Model(&model.ResellerNodeCounterIncident{}).Where("node_id = ?", -2).Count(&incidents).Error; err != nil || incidents != 1 {
+		t.Fatalf("hook incident did not create a shared barrier: %d %v", incidents, err)
+	}
+}
+
 func TestL2TPPendingHookRetainsMarkerUntilSuccessfulRetry(t *testing.T) {
 	setupIntegrationDB(t)
 	db := database.GetDB()

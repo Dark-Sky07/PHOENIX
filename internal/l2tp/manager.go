@@ -398,6 +398,9 @@ func (m *Manager) CollectTrafficChecked() (inbounds []InboundTraffic, clients []
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.proc == nil {
+		if err := CheckHookIncidents(); err != nil {
+			return nil, nil, l2tpReadFailure(m.id, nil, err)
+		}
 		return nil, nil, nil
 	}
 	if m.proc.proc == nil || !m.proc.proc.IsRunning() {
@@ -405,6 +408,9 @@ func (m *Manager) CollectTrafficChecked() (inbounds []InboundTraffic, clients []
 		// final traffic was recorded. Preserve all known baselines as evidence.
 		if missing := missingL2TPSessions(m.id, m.proc.last, nil, nil, "tracked runtime unavailable"); missing != nil {
 			return nil, nil, missing
+		}
+		if err := CheckHookIncidents(); err != nil {
+			return nil, nil, l2tpReadFailure(m.id, m.proc.last, err)
 		}
 		m.proc.online = map[string]bool{}
 		return nil, nil, nil
@@ -417,24 +423,7 @@ func (m *Manager) CollectTrafficChecked() (inbounds []InboundTraffic, clients []
 	}
 	current, stale, readErr := readSessions(m.id)
 	if readErr != nil {
-		var pending *HookPendingError
-		if errors.As(readErr, &pending) {
-			return nil, nil, pending
-		}
-		// An unreadable snapshot cannot prove that the missing interval is
-		// zero. Preserve every baseline before reporting the uncertainty.
-		failure := &SessionReadFailure{InboundID: m.id, Cause: readErr.Error()}
-		keys := make([]string, 0, len(m.proc.last))
-		for key := range m.proc.last {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		for _, key := range keys {
-			iface, email, _ := strings.Cut(key, "\x00")
-			counter := m.proc.last[key]
-			failure.Previous = append(failure.Previous, SessionObservation{Interface: iface, Email: email, PreviousRx: counter.rx, PreviousTx: counter.tx})
-		}
-		return nil, nil, failure
+		return nil, nil, l2tpReadFailure(m.id, m.proc.last, readErr)
 	}
 	// A missing previously sampled session is not a zero-traffic disconnect:
 	// the down hook discards its marker without recording final counters.
@@ -491,6 +480,27 @@ func (m *Manager) CollectTrafficChecked() (inbounds []InboundTraffic, clients []
 		inbounds = append(inbounds, InboundTraffic{InboundId: m.id, Tag: m.proc.tag, Up: totalUp, Down: totalDown})
 	}
 	return inbounds, sortedClientDeltas(deltaByEmail), nil
+}
+
+// l2tpReadFailure distinguishes an in-progress hook from a snapshot that
+// needs permanent review; neither case advances or discards any baseline.
+func l2tpReadFailure(id int, last map[string]interfaceCounter, readErr error) error {
+	var pending *HookPendingError
+	if errors.As(readErr, &pending) {
+		return pending
+	}
+	failure := &SessionReadFailure{InboundID: id, Cause: readErr.Error()}
+	keys := make([]string, 0, len(last))
+	for key := range last {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		iface, email, _ := strings.Cut(key, "\x00")
+		counter := last[key]
+		failure.Previous = append(failure.Previous, SessionObservation{Interface: iface, Email: email, PreviousRx: counter.rx, PreviousTx: counter.tx})
+	}
+	return failure
 }
 
 // missingL2TPSessions retains every absent baseline in deterministic order.
