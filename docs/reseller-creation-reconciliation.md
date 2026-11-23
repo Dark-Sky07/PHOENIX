@@ -996,7 +996,10 @@ the transaction now requires exactly one normalized matching client-traffic row
 for every PPP sample. A missing or ambiguous destination rolls back the entire
 batch and keeps the collector's poll marker and spool evidence for review. The
 row check does not establish the original client's generation; do not recreate
-or merge rows without reconciling their history. The traffic writer converts
+or merge rows without reconciling their history. Duplicate session IDs within a
+PPP scan or accounting batch are rejected, even when identities and counters
+appear compatible: they may represent distinct sessions or ambiguous evidence,
+so no records are acknowledged until reviewed. The traffic writer converts
 private copies of absolute PPP samples, leaving caller-owned batches unchanged
 on failure or success so reusing a batch does not turn retries into raw deltas.
 

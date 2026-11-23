@@ -369,10 +369,15 @@ func (e *PPPCounterDecrease) Error() string {
 // This does not establish that an email belongs to the original client generation.
 func validatePPPAccountingDestinations(tx *gorm.DB, traffics []*xray.ClientTraffic) error {
 	wanted := make(map[string]struct{})
+	sessions := make(map[string]struct{})
 	for _, traffic := range traffics {
 		if traffic == nil || traffic.PPPSessionID == "" {
 			continue
 		}
+		if _, exists := sessions[traffic.PPPSessionID]; exists {
+			return fmt.Errorf("duplicate PPP session identity %q requires manual review", traffic.PPPSessionID)
+		}
+		sessions[traffic.PPPSessionID] = struct{}{}
 		key := transferEmailKey(traffic.Email)
 		if key == "" {
 			return errors.New("PPP sample has no accounting identity")

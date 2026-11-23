@@ -143,6 +143,29 @@ func TestPPPMissingDestinationRollsBackEveryCheckpoint(t *testing.T) {
 	}
 }
 
+func TestPPPDuplicateSessionBatchRollsBack(t *testing.T) {
+	setupBulkDB(t)
+	db := database.GetDB()
+	row := xray.ClientTraffic{Email: "duplicate@example.test", Enable: true}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	samples := []*xray.ClientTraffic{
+		{Email: row.Email, PPPSessionID: "reused", PPPInboundID: 7, PPPRxBytes: 100, PPPTxBytes: 200},
+		{Email: row.Email, PPPSessionID: "reused", PPPInboundID: 7, PPPRxBytes: 150, PPPTxBytes: 250},
+	}
+	if _, _, err := (&InboundService{}).AddTraffic(nil, samples); err == nil {
+		t.Fatal("duplicate session in one batch was accepted")
+	}
+	if err := db.First(&row, row.Id).Error; err != nil || row.Up != 0 || row.Down != 0 {
+		t.Fatalf("duplicate session changed usage: %+v %v", row, err)
+	}
+	var count int64
+	if err := db.Model(&model.PPPClientTrafficCounter{}).Where("session_id = ?", "reused").Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("duplicate session changed checkpoint: %d %v", count, err)
+	}
+}
+
 func TestPPPAmbiguousNormalizedDestinationIsRejected(t *testing.T) {
 	setupBulkDB(t)
 	db := database.GetDB()

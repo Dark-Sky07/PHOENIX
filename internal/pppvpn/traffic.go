@@ -120,6 +120,7 @@ func CollectTraffic() (*TrafficBatch, error) {
 		return nil, err
 	}
 	batch := &TrafficBatch{}
+	seenSessions := make(map[string]string, len(files))
 	for _, path := range files {
 		name := filepath.Base(path)
 		if strings.HasPrefix(name, "hook-error.") {
@@ -141,6 +142,10 @@ func CollectTraffic() (*TrafficBatch, error) {
 		if readErr != nil {
 			return nil, fmt.Errorf("pppvpn: cannot read session record %q: %w", path, readErr)
 		}
+		if previous, exists := seenSessions[session.sessionID]; exists {
+			return nil, fmt.Errorf("pppvpn: duplicate session identity %q in %q and %q requires manual review", session.sessionID, previous, path)
+		}
+		seenSessions[session.sessionID] = path
 		stagedRoot := filepath.Join(rootDir(), "sessions-staged") + string(os.PathSeparator)
 		if strings.HasPrefix(path, stagedRoot) && !session.closed {
 			return nil, fmt.Errorf("pppvpn: active session in claim %q requires manual review", path)

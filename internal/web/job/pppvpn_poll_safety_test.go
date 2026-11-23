@@ -96,6 +96,34 @@ func TestPPPPollRetainsSpoolWhenAccountingDestinationIsMissing(t *testing.T) {
 	}
 }
 
+func TestPPPPollKeepsFenceForDuplicateSessionRecords(t *testing.T) {
+	setupIntegrationDB(t)
+	t.Setenv("XUI_BIN_FOLDER", t.TempDir())
+	dir := filepath.Join(os.Getenv("XUI_BIN_FOLDER"), "pppvpn", "sessions", "pptp-7")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, iface := range []string{"ppp0", "ppp1"} {
+		path := filepath.Join(dir, iface+".closed.reused")
+		if err := os.WriteFile(path, []byte("closed\t"+iface+"\talice@example.test\t100\t200\treused\t7\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	state := &pppPollState{}
+	if _, _, err := collectAndCommitPPP(state, pppvpn.CollectTraffic, (&service.InboundService{}).AddPPPTrafficUnderAllocationLock, pppvpn.AckTraffic); err == nil || !strings.Contains(err.Error(), "duplicate session identity") || state.marker == "" || state.unlock != nil {
+		t.Fatalf("duplicate did not retain poll fence: %v", err)
+	}
+	for _, iface := range []string{"ppp0", "ppp1"} {
+		if _, err := os.Stat(filepath.Join(dir, iface+".closed.reused")); err != nil {
+			t.Fatalf("duplicate evidence removed: %v", err)
+		}
+	}
+	if unlock, err := service.LockResellerAllocation(); err == nil {
+		unlock()
+		t.Fatal("allocation bypassed duplicate session fence")
+	}
+}
+
 func TestPPPPollKeepsFenceForLegacyClaimWithoutOrigin(t *testing.T) {
 	setupIntegrationDB(t)
 	bin := t.TempDir()

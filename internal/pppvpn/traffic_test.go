@@ -386,6 +386,46 @@ func TestSessionSpoolIdentityMismatchFailsClosed(t *testing.T) {
 	}
 }
 
+func TestDuplicateSessionIdentityPreservesAllEvidence(t *testing.T) {
+	for _, staged := range []bool{false, true} {
+		t.Run(fmt.Sprintf("staged=%v", staged), func(t *testing.T) {
+			root := setupTrafficTest(t)
+			dir := filepath.Join(root, "sessions", "pptp-7")
+			if err := os.MkdirAll(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			first := filepath.Join(dir, "ppp0.closed.reused")
+			second := filepath.Join(dir, "ppp1.closed.reused")
+			firstData := "closed\tppp0\talice\t10\t20\treused\t7\n"
+			secondData := "closed\tppp1\talice\t30\t40\treused\t7\n"
+			if err := os.WriteFile(first, []byte(firstData), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if staged {
+				claim := filepath.Join(root, "sessions-staged", "claim-test")
+				if err := os.MkdirAll(claim, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(claim, "origin"), []byte("sessions/pptp-7/ppp1.closed.reused\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				second = filepath.Join(claim, "record")
+			}
+			if err := os.WriteFile(second, []byte(secondData), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if batch, err := CollectTraffic(); err == nil || batch != nil || !strings.Contains(err.Error(), "duplicate session identity") {
+				t.Fatalf("duplicate accepted: %+v %v", batch, err)
+			}
+			for path, want := range map[string]string{first: firstData, second: secondData} {
+				if got, err := os.ReadFile(path); err != nil || string(got) != want {
+					t.Fatalf("evidence changed: %q %v", got, err)
+				}
+			}
+		})
+	}
+}
+
 func TestSessionClaimRequiresMatchingDurableOrigin(t *testing.T) {
 	cases := []struct{ name, origin string }{
 		{"legacy-missing", ""},
