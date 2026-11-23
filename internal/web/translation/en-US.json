@@ -144,7 +144,7 @@
       "nodeSnapshotSafetyDescription": "All {{count}} registered nodes, including disabled nodes, require accounting review. Experimental verified snapshots do not prove historical or unpolled traffic is complete. Reconcile reseller usage before relying on totals.",
       "nodeSnapshotSafetyUnavailable": "Node traffic safety status is unavailable. Do not assume remote accounting is complete; investigate the database and node status.",
       "daemonIdentityTitle": "Daemon client accounting identities need review",
-      "daemonIdentityDescription": "{{count}} enabled local daemon credential(s) have missing or ambiguous traffic identities and are omitted from filtered configuration. Review the records before restoring access. This check does not prove that existing sessions have stopped or that historical usage is complete.",
+      "daemonIdentityDescription": "{{count}} enabled local daemon credential(s) have missing, ambiguous, or database-unresolvable traffic identities and are omitted from filtered configuration. Review the records before restoring access. This check does not prove that existing sessions have stopped or that historical usage is complete.",
       "daemonIdentityUnavailable": "This panel version cannot report daemon accounting identity issues. Upgrade and review its records before assuming they are safe.",
       "counterIncidentTitle": "Traffic accounting needs administrator review",
       "counterIncidentDescription": "Detected {{count}} database incident or in-flight Xray poll marker(s), a local fallback or journal, or a pending observation. Active polls may clear shortly. Investigate persistent markers before clearing them; saved totals may be incomplete.",

@@ -1859,6 +1859,14 @@ func (s *InboundService) buildRuntimeInboundForAPI(tx *gorm.DB, inbound *model.I
 		enableMap[key] = clientTraffic.Enable
 		trafficIDs[key] = clientTraffic.Id
 	}
+	var sqlTrafficIDs map[string]int
+	if strictDaemonIdentity {
+		var err error
+		sqlTrafficIDs, err = daemonSQLTrafficIDs(tx, emails)
+		if err != nil {
+			return nil, err
+		}
+	}
 	finalClients := make([]any, 0, len(clients))
 	for _, client := range clients {
 		c, ok := client.(map[string]any)
@@ -1870,7 +1878,7 @@ func (s *InboundService) buildRuntimeInboundForAPI(tx *gorm.DB, inbound *model.I
 		key := transferEmailKey(email)
 		// Missing or ambiguous accounting identities cannot safely authenticate.
 		// Exclude only the affected credential instead of stopping the node.
-		if strictDaemonIdentity && (key == "" || matchCounts[key] != 1) {
+		if strictDaemonIdentity && (key == "" || matchCounts[key] != 1 || sqlTrafficIDs[key] == 0 || sqlTrafficIDs[key] != trafficIDs[key]) {
 			continue
 		}
 		if enable, exists := enableMap[key]; exists && !enable {

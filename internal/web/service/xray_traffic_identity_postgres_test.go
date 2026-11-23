@@ -80,6 +80,18 @@ func TestXrayTrafficIdentityLocksExistingRowsPostgres(t *testing.T) {
 	if err := db.Where("email = ?", email).Delete(&model.ResellerClient{}).Error; err != nil {
 		t.Fatal(err)
 	}
+	// A single Go-normalized row that SQL cannot resolve must not be treated
+	// as a safe daemon destination even though it is not ambiguous.
+	hiddenEmail := uuid.NewString() + "@daemon-sql.test"
+	hidden := xray.ClientTraffic{Email: "\t" + hiddenEmail + "\n", Enable: true}
+	if err := db.Create(&hidden).Error; err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Delete(&hidden).Error })
+	ids, err := daemonSQLTrafficIDs(db, []string{hiddenEmail, email})
+	if err != nil || ids[hiddenEmail] != 0 || ids[email] != counter.Id {
+		t.Fatalf("SQL destination resolution: %+v %v", ids, err)
+	}
 }
 
 // Independent database sessions must contend on the same advisory lock.

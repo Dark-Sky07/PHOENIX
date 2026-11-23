@@ -94,7 +94,7 @@ client list before normalization and reject unproven PPP client removal from
 settings or canonical links. Local daemon inbound edits now reject a failed
 traffic-filter query instead of applying raw, unfiltered credentials; creation
 uses the same rule. TUIC, OpenVPN and PPP daemon filters omit credentials with
-missing or ambiguous normalized traffic identities rather than stopping the
+missing, ambiguous, or SQL-unresolvable normalized traffic identities rather than stopping the
 entire node. The dashboard reports a point-in-time count for enabled local
 daemon configurations and warns when that diagnostic is unavailable; it does not
 inventory old sessions, disabled inbounds, remote hosts or historical usage.

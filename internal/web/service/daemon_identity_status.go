@@ -52,19 +52,26 @@ func countDaemonIdentityProblems(db *gorm.DB) (int64, error) {
 		}
 	}
 	counts := make(map[string]int, len(identities))
+	ids := make(map[string]int, len(identities))
 	if len(identities) > 0 {
 		// Match the runtime filter's Unicode-aware normalization, not SQL's
 		// database-dependent LOWER/TRIM approximation.
 		var rows []xray.ClientTraffic
-		if err := db.Select("email").Find(&rows).Error; err != nil {
+		if err := db.Select("id", "email").Find(&rows).Error; err != nil {
 			return 0, err
 		}
 		for _, row := range rows {
-			counts[transferEmailKey(row.Email)]++
+			key := transferEmailKey(row.Email)
+			counts[key]++
+			ids[key] = row.Id
 		}
 	}
+	sqlIDs, err := daemonSQLTrafficIDs(db, identities)
+	if err != nil {
+		return 0, err
+	}
 	for _, key := range identities {
-		if counts[key] != 1 {
+		if counts[key] != 1 || sqlIDs[key] == 0 || sqlIDs[key] != ids[key] {
 			invalid++
 		}
 	}

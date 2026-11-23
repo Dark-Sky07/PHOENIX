@@ -92,7 +92,7 @@ func TestDaemonFilterDetectsGoNormalizedCrossInboundAmbiguity(t *testing.T) {
 		t.Run(string(protocol), func(t *testing.T) {
 			setupConflictDB(t)
 			db := database.GetDB()
-			ib := model.Inbound{Id: 123, Enable: true, Protocol: protocol, Settings: `{"clients":[{"email":"tab@example.test","enable":true},{"email":"üser@example.test","enable":true},{"email":"safe@example.test","enable":true}]}`}
+			ib := model.Inbound{Id: 123, Enable: true, Protocol: protocol, Settings: `{"clients":[{"email":"tab@example.test","enable":true},{"email":"üser@example.test","enable":true},{"email":"onlytab@example.test","enable":true},{"email":"öonly@example.test","enable":true},{"email":"safe@example.test","enable":true}]}`}
 			if err := db.Create(&ib).Error; err != nil {
 				t.Fatal(err)
 			}
@@ -101,6 +101,8 @@ func TestDaemonFilterDetectsGoNormalizedCrossInboundAmbiguity(t *testing.T) {
 				{InboundId: 999, Email: "\tTAB@example.test\n", Enable: false},
 				{InboundId: ib.Id, Email: "üser@example.test", Enable: true},
 				{InboundId: 999, Email: "ÜSER@example.test", Enable: false},
+				{InboundId: ib.Id, Email: "\tonlytab@example.test\n", Enable: true},
+				{InboundId: ib.Id, Email: "ÖONLY@example.test", Enable: true},
 				{InboundId: ib.Id, Email: "safe@example.test", Enable: true},
 			} {
 				if err := db.Create(&row).Error; err != nil {
@@ -122,8 +124,8 @@ func TestDaemonFilterDetectsGoNormalizedCrossInboundAmbiguity(t *testing.T) {
 			if len(settings.Clients) != 1 || settings.Clients[0].Email != "safe@example.test" {
 				t.Fatalf("Go-normalized ambiguous credentials were retained: %+v", settings.Clients)
 			}
-			if status := readCounterIncidentStatus(db); !status.Available || status.DaemonIdentityCount != 2 {
-				t.Fatalf("dashboard did not report both ambiguities: %+v", status)
+			if status := readCounterIncidentStatus(db); !status.Available || status.DaemonIdentityCount != 4 {
+				t.Fatalf("dashboard did not report ambiguous and SQL-unresolvable identities: %+v", status)
 			}
 		})
 	}
