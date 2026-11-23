@@ -1513,6 +1513,13 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 		return inbound, false, err
 	}
 	oldRuntime := *oldInbound
+	// Protocol conversion otherwise bypasses the local PPP inbound deletion
+	// guard, discarding the runtime identity while final child-session traffic
+	// is still unproven. Disabling the inbound remains a separate operation.
+	if oldInbound.NodeID == nil && oldInbound.Protocol != inbound.Protocol &&
+		(oldInbound.Protocol == model.L2TP || oldInbound.Protocol == model.SSTP || oldInbound.Protocol == model.PPTP) {
+		return inbound, false, fmt.Errorf("local PPP inbound %d requires verified disconnect and accounting before protocol conversion", oldInbound.Id)
+	}
 	inbound.NodeID = oldInbound.NodeID
 	if inbound.NodeID != nil && !isNodeEligibleProtocol(inbound.Protocol) {
 		return inbound, false, common.NewErrorf("%s inbounds cannot be assigned to a node", inbound.Protocol)

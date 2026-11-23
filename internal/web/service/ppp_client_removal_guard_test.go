@@ -55,6 +55,35 @@ func TestLocalPPPInboundDeletionRetainsIdentityAndLinks(t *testing.T) {
 	}
 }
 
+func TestLocalPPPProtocolConversionDoesNotBypassRemovalGuard(t *testing.T) {
+	for _, protocol := range []model.Protocol{model.PPTP, model.SSTP, model.L2TP} {
+		t.Run(string(protocol), func(t *testing.T) {
+			ib, client, _ := seedPPPRemovalGuard(t)
+			db := database.GetDB()
+			if err := db.Model(ib).Updates(map[string]any{"protocol": protocol, "enable": false}).Error; err != nil {
+				t.Fatal(err)
+			}
+			var original model.Inbound
+			if err := db.First(&original, ib.Id).Error; err != nil {
+				t.Fatal(err)
+			}
+			updated := original
+			updated.Protocol = model.VLESS
+			if _, _, err := (&InboundService{}).UpdateInbound(&updated); err == nil || !strings.Contains(err.Error(), "verified disconnect") {
+				t.Fatalf("PPP conversion accepted: %v", err)
+			}
+			var saved model.Inbound
+			if err := db.First(&saved, ib.Id).Error; err != nil || saved.Protocol != protocol || saved.Settings != original.Settings {
+				t.Fatalf("inbound mutated before rejection: %+v %v", saved, err)
+			}
+			var count int64
+			if err := db.Model(&model.ClientInbound{}).Where("inbound_id = ? AND client_id = ?", ib.Id, client.Id).Count(&count).Error; err != nil || count != 1 {
+				t.Fatalf("client link removed: %d %v", count, err)
+			}
+		})
+	}
+}
+
 func TestPPPRemovalAndUnassignmentStayBlockedBeforeMutation(t *testing.T) {
 	ib, client, reseller := seedPPPRemovalGuard(t)
 	db := database.GetDB()

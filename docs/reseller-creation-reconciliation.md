@@ -81,7 +81,8 @@ asked to delete traffic, before changing associations or runtimes. This is not
 proof that every deletion path or runtime mutation is atomic. Preflight checks
 precede existing runtime re-enable paths, but those side effects and the
 database reset are not a single atomic operation. Removing a local L2TP, SSTP,
-or PPTP inbound is deferred even when disabled: this implementation has no
+or PPTP inbound, or converting it to a different protocol, is deferred even
+when disabled: this implementation has no
 verified stop-and-final-accounting proof for the whole inbound, and a missing
 session marker alone is insufficient. An operator must reconcile it; no
 automatic resume path is provided yet. Node status counts use overflow-safe
