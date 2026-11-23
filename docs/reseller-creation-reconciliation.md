@@ -835,7 +835,13 @@ nonparticipating writers and lack of a final drain remain outside this measure.
 The node is not automatically stopped by the incident.
 
 Updated L2TP ip-up hooks also create and sync a `pending.*` file before changing
-session markers, and remove it only after syncing the marker. While observed,
+session markers, and remove it only after syncing the marker. The hook stages
+and syncs the complete identity in a second pending file, then publishes it with
+a no-replace hard link; readers cannot see a partially written new marker from
+this hook. This requires `ln -T` and hard links between the incident and session
+directories; if unavailable or on different filesystems the hook fails closed
+and leaves evidence for review. Existing hooks are not upgraded until daemon
+configuration is regenerated. While observed,
 the collector retains its shared poll marker and retries under the allocation
 lock only if no other unresolved marker exists. The collector checks hook
 evidence even when it has no tracked running daemon, rather than treating a

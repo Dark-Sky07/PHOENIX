@@ -237,13 +237,18 @@ func renderIPUpScript(inst Instance) string {
 		"esac\n" +
 		"[ -n \"$peer\" ] || exit 1\n" +
 		"mkdir -p \"$dir\"\n" +
+		"sync \"$root\" \"$(dirname \"$dir\")\" \"$dir\"\n" +
 		"sysctl -w \"net.ipv4.conf.$iface.route_localnet=1\" >/dev/null 2>&1 || true\n" +
 		"sysctl -w \"net.ipv4.conf.$iface.rp_filter=0\" >/dev/null 2>&1 || true\n" +
-		// POSIX noclobber creates the marker without replacing an existing
-		// file. A partially written marker remains evidence on failure.
-		"( set -C; printf '%s\\n' \"$peer\" > \"$dir/$iface\" )\n" +
+		// Write and sync a separate pending file first. A hard link publishes
+		// the completed marker atomically and fails on every existing target,
+		// including directories and symlinks; -T prevents directory traversal.
+		"staged=$(mktemp \"$incidents/pending.XXXXXXXXXX\")\n" +
+		"printf '%s\\n' \"$peer\" > \"$staged\"\n" +
+		"sync \"$staged\" \"$incidents\"\n" +
+		"ln -T \"$staged\" \"$dir/$iface\"\n" +
 		"sync \"$dir/$iface\" \"$dir\"\n" +
-		"rm \"$pending\"\n" +
+		"rm \"$staged\" \"$pending\"\n" +
 		"sync \"$incidents\"\n" +
 		"trap - EXIT\n"
 }

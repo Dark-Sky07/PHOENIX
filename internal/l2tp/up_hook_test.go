@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -93,6 +94,90 @@ func TestKilledUpHookLeavesPendingEvidence(t *testing.T) {
 	}
 }
 
+func TestUpHookPublishesOnlyCompleteSessionMarker(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux process state and hard links")
+	}
+	for _, afterLink := range []bool{false, true} {
+		t.Run(fmt.Sprintf("after-link-%t", afterLink), func(t *testing.T) {
+			setupTrafficFilesystem(t)
+			inst := validInstance()
+			content := renderIPUpScript(inst)
+			needle := "ln -T \"$staged\" \"$dir/$iface\"\n"
+			if strings.Count(content, needle) != 1 {
+				t.Fatal("atomic marker publication not found")
+			}
+			if afterLink {
+				content = strings.Replace(content, needle, needle+"kill -STOP $$\n", 1)
+			} else {
+				content = strings.Replace(content, needle, "kill -STOP $$\n"+needle, 1)
+			}
+			script := filepath.Join(t.TempDir(), "ip-up")
+			if err := os.WriteFile(script, []byte(content), 0700); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(script)
+			cmd.Env = []string{"IFNAME=lo", "PEERNAME=alice@example.test"}
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			finished := false
+			defer func() {
+				if !finished {
+					_ = cmd.Process.Kill()
+					_ = cmd.Wait()
+				}
+			}()
+			deadline := time.Now().Add(5 * time.Second)
+			stopped := false
+			for time.Now().Before(deadline) {
+				data, err := os.ReadFile(filepath.Join("/proc", fmt.Sprint(cmd.Process.Pid), "status"))
+				if err == nil && strings.Contains(string(data), "State:\tT") {
+					stopped = true
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if !stopped {
+				t.Fatal("hook did not stop at publication boundary")
+			}
+			var pending *HookPendingError
+			if err := CheckHookIncidents(); !errors.As(err, &pending) {
+				t.Fatalf("publication not fenced by pending evidence: %v", err)
+			}
+			marker := filepath.Join(sessionDirForID(inst.Id), "lo")
+			data, err := os.ReadFile(marker)
+			if !afterLink {
+				if !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("marker appeared before publication: %q %v", data, err)
+				}
+				// SIGCONT is 18 on Linux.
+				if err := cmd.Process.Signal(syscall.Signal(18)); err != nil {
+					t.Fatal(err)
+				}
+				if err := cmd.Wait(); err != nil {
+					finished = true
+					t.Fatalf("resumed hook failed: %v", err)
+				}
+				finished = true
+				data, err = os.ReadFile(marker)
+			} else {
+				if err := cmd.Process.Kill(); err != nil {
+					t.Fatal(err)
+				}
+				_ = cmd.Wait()
+				finished = true
+				if err := CheckHookIncidents(); !errors.As(err, &pending) {
+					t.Fatalf("killed publication lost pending evidence: %v", err)
+				}
+			}
+			if err != nil || string(data) != "alice@example.test\n" {
+				t.Fatalf("published marker incomplete: %q %v", data, err)
+			}
+		})
+	}
+}
+
 func TestConcurrentUpHooksNeverReplaceSessionMarker(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux shell and sync")
@@ -135,6 +220,51 @@ func TestConcurrentUpHooksNeverReplaceSessionMarker(t *testing.T) {
 	data, err = os.ReadFile(incident.Path)
 	if err != nil || !strings.Contains(string(data), loser) {
 		t.Fatalf("collision lost attempted identity: %q %v", data, err)
+	}
+}
+
+func TestUpHookNeverPublishesInsideExistingDirectoryOrSymlink(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux hard links")
+	}
+	for _, kind := range []string{"directory", "symlink"} {
+		t.Run(kind, func(t *testing.T) {
+			setupTrafficFilesystem(t)
+			inst := validInstance()
+			dir := sessionDirForID(inst.Id)
+			if err := os.MkdirAll(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			target := filepath.Join(dir, "lo")
+			outside := t.TempDir()
+			var err error
+			if kind == "directory" {
+				err = os.Mkdir(target, 0700)
+				outside = target
+			} else {
+				err = os.Symlink(outside, target)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			script := filepath.Join(t.TempDir(), "ip-up")
+			if err := os.WriteFile(script, []byte(renderIPUpScript(inst)), 0700); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(script)
+			cmd.Env = []string{"IFNAME=lo", "PEERNAME=alice"}
+			if err := cmd.Run(); err == nil {
+				t.Fatal("existing target accepted")
+			}
+			entries, err := os.ReadDir(outside)
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("hook wrote inside target directory: %v %v", entries, err)
+			}
+			var incident *HookIncidentError
+			if err := CheckHookIncidents(); !errors.As(err, &incident) {
+				t.Fatalf("collision not recorded: %v", err)
+			}
+		})
 	}
 }
 
