@@ -685,6 +685,9 @@ func (s *ClientService) BulkDelete(inboundSvc *InboundService, emails []string, 
 
 	db := database.GetDB()
 	// Preflight the entire batch before touching runtimes or tombstones.
+	if err := ObserveL2TPAccountingIncident(); err != nil {
+		return result, false, err
+	}
 	if err := rejectClientNodeIncidents(db, cleanEmails); err != nil {
 		return result, false, err
 	}

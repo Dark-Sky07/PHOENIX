@@ -842,3 +842,21 @@ not prove no orphan exists, and the directory check is not a cross-process
 fence. Operators must preserve the evidence and independently reconcile traffic
 and process/session state before resuming; merely deleting the directory is not
 proof of safety. A controlled evidence-backed recovery workflow is still needed.
+
+A locally observed untracked L2TP runtime or an uninspectable incident store
+now blocks participating reseller quota/renewal checks and checked client or
+inbound removal, and appears in the dashboard's accounting warning. The job
+and quota checks retain a separate local `l2tp-accounting-incident` file in the
+configured DB folder, so disappearance of the runtime directory alone does not
+clear the warning. If writing it fails, the process retains an in-memory retry
+barrier. Xray's poll lock is deliberately not blocked by this L2TP-specific
+marker, so unrelated traffic collection can continue.
+
+The file is local to a host and the in-memory retry is lost on process exit if
+storage was unavailable: another panel using the same PostgreSQL database can
+miss it, and a scan can miss an orphan that leaves no runtime directory. This is
+not a durable cross-host fence or proof of accounting completeness. Removing the
+incident file is an operator action only after preserving evidence and actual
+process, session and historical-traffic reconciliation; it must not be treated
+as an automatic recovery procedure. Other unguarded writers and unsampled
+sessions remain outside this protection.

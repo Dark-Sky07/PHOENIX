@@ -31,6 +31,9 @@ func readCounterIncidentStatus(db *gorm.DB) CounterIncidentStatus {
 		return status
 	}
 	status.FallbackPresent = status.FallbackPresent || journalPresent
+	if err := ObserveL2TPAccountingIncident(); err != nil {
+		status.FallbackPresent = true
+	}
 	if db == nil {
 		return status
 	}

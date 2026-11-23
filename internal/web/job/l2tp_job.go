@@ -80,6 +80,9 @@ func (j *L2TPJob) Run() {
 	}
 	defer l2tpRunMu.Unlock()
 	mgr := l2tp.GetManager()
+	if err := service.ObserveL2TPAccountingIncident(); err != nil {
+		logger.Warning("l2tp job: accounting incident:", err)
+	}
 	// Sample and commit before the periodic reconcile may stop or replace the
 	// daemon. Other runtime operations and traffic after the poll remain outside
 	// this barrier; a successful sample is not a final accounting proof.
