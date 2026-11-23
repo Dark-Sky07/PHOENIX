@@ -2,13 +2,17 @@ package service
 
 import (
 	"encoding/json"
+	"errors"
 	"net"
+	"strings"
 	"testing"
 
 	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
 	"github.com/Dark-Sky07/phoenix/internal/tuic"
 	"github.com/Dark-Sky07/phoenix/internal/web/runtime"
+	"github.com/Dark-Sky07/phoenix/internal/xray"
+	"gorm.io/gorm"
 )
 
 // Failed construction of the filtered configuration must not fall back to
@@ -78,6 +82,49 @@ func TestTunnelApplyRejectsUnfilteredSettingsOnDBFailure(t *testing.T) {
 				t.Fatal("traffic batch lost failed runtime apply")
 			}
 		})
+	}
+}
+
+func TestInboundEditDoesNotApplyUnfilteredTUICOnFilterError(t *testing.T) {
+	setupConflictDB(t)
+	db := database.GetDB()
+	cert, key := testTUICCertificate(t)
+	client := model.Client{Email: "edit-filter@example.test", ID: "a0000000-0000-0000-0000-000000000001", Password: "secret", Enable: true}
+	settings, err := json.Marshal(map[string]any{"certificate": cert, "private_key": key, "clients": []model.Client{client}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ib := model.Inbound{UserId: 1, Tag: "edit-filter-original", Listen: "127.0.0.1", Port: 24445, Protocol: model.TUIC, Enable: true, Settings: string(settings)}
+	if err := db.Create(&ib).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&xray.ClientTraffic{Email: client.Email, InboundId: ib.Id, Enable: true}).Error; err != nil {
+		t.Fatal(err)
+	}
+	oldManager := runtime.GetManager()
+	var runtimeCalls int
+	runtime.SetManager(runtime.NewManager(runtime.LocalDeps{SetNeedRestart: func() { runtimeCalls++ }}))
+	t.Cleanup(func() { runtime.SetManager(oldManager); tuic.GetManager().Remove(ib.Id) })
+	const callback = "test:fail-daemon-filter"
+	if err := db.Callback().Query().Before("gorm:query").Register(callback, func(tx *gorm.DB) {
+		if tx.Statement.Table == "client_traffics" && strings.Join(tx.Statement.Selects, ",") == "id,email,enable" {
+			tx.AddError(errors.New("injected daemon filter failure"))
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Callback().Query().Remove(callback) })
+	updated := ib
+	updated.Tag = "edit-filter-new"
+	if _, _, err := (&InboundService{}).UpdateInbound(&updated); err == nil || !strings.Contains(err.Error(), "filtered daemon settings") {
+		t.Fatalf("filter failure ignored: %v", err)
+	}
+	if runtimeCalls != 0 {
+		t.Fatalf("unfiltered runtime mutation attempted: %d", runtimeCalls)
+	}
+	var saved model.Inbound
+	if err := db.First(&saved, ib.Id).Error; err != nil || saved.Tag != ib.Tag {
+		t.Fatalf("failed edit committed: %+v %v", saved, err)
 	}
 }
 

@@ -1728,15 +1728,16 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 			oldSnapshot.Tag = tag
 			payload := oldInbound
 			if oldInbound.Enable && (oldInbound.Protocol == model.TUIC || oldInbound.Protocol == model.OpenVPN || oldInbound.Protocol == model.L2TP || oldInbound.Protocol == model.SSTP || oldInbound.Protocol == model.PPTP) {
-				if built, bErr := s.buildInboundForLocalRuntime(tx, oldInbound); bErr == nil {
-					payload = built
+				built, bErr := s.buildInboundForLocalRuntime(tx, oldInbound)
+				if bErr != nil {
+					err = fmt.Errorf("build filtered daemon settings: %w", bErr)
+					return inbound, false, err
 				}
+				payload = built
 			}
 			if err2 := rt.UpdateInbound(context.Background(), &oldSnapshot, payload); err2 != nil {
 				logger.Debug("Unable to update daemon/TUIC inbound on", rt.Name(), ":", err2)
-				if oldInbound.Protocol != model.TUIC && oldInbound.Protocol != model.OpenVPN && oldInbound.Protocol != model.L2TP && oldInbound.Protocol != model.SSTP && oldInbound.Protocol != model.PPTP {
-					needRestart = true
-				}
+				needRestart = true
 			}
 		} else {
 			oldSnapshot := oldRuntime
