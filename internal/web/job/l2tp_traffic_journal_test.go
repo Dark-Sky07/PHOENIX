@@ -179,7 +179,7 @@ func TestL2TPCounterDecreaseStoresIncidentBeforeClearingPollMarker(t *testing.T)
 func TestL2TPSessionDisappearancePersistsEvidenceAndFencesQuota(t *testing.T) {
 	setupIntegrationDB(t)
 	db := database.GetDB()
-	missing := &l2tp.SessionDisappeared{InboundID: 4, Interface: "ppp0", Email: "alice@example.test", PreviousRx: 100, PreviousTx: 200}
+	missing := &l2tp.SessionDisappeared{InboundID: 4, Interface: "ppp0", Email: "alice@example.test", PreviousRx: 100, PreviousTx: 200, Cause: "tracked runtime unavailable", Additional: []l2tp.SessionObservation{{Interface: "ppp1", Email: "bob@example.test", PreviousRx: 50, PreviousTx: 60}}}
 	poll := func() ([]*xray.Traffic, []*xray.ClientTraffic, error) { return nil, nil, missing }
 	if _, err := persistL2TPPoll(NewXrayTrafficJob(), poll); err == nil {
 		t.Fatal("missing session reported success")

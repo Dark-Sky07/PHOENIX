@@ -812,8 +812,11 @@ not infer missing bytes or treat a stopped parent daemon as proof of completenes
 
 When an L2TP session that was sampled in this process disappears from the next
 snapshot, including when its marker remains but its interface is gone, polling
-now preserves all baselines and records the last observed counters as evidence.
-A shared incident fences sensitive quota operations after the evidence is
+now preserves all baselines and records the missing sessions and the remaining
+snapshot as evidence. If the tracked runtime becomes unavailable while sampled
+sessions exist, all last baselines are likewise recorded as uncertain; parent
+exit is not treated as proof of child exit or complete usage. A shared incident
+fences sensitive quota operations after the evidence is
 durable; a failed incident write leaves the poll marker in place. This is
 intentionally restrictive: ordinary disconnects of sampled L2TP sessions can
 require manual reconciliation because the existing down hook does not save final

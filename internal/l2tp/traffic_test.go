@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -210,6 +211,50 @@ func TestCollectTrafficRejectsDisappearedSampleWithoutAdvancingBaselines(t *test
 				t.Fatalf("partial sample advanced: %#v %#v %#v", inbounds, clients, last)
 			}
 		})
+	}
+}
+
+func TestCollectTrafficPreservesAllMissingSessions(t *testing.T) {
+	setupTrafficFilesystem(t)
+	writeSession(t, 16, "ppp2", "remaining@example.com", "90", "100", true)
+	writeSession(t, 16, "ppp3", "new@example.com", "7", "8", true)
+	cmd := &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
+	last := map[string]interfaceCounter{
+		"ppp0\x00alice@example.com":     {rx: 10, tx: 20},
+		"ppp1\x00bob@example.com":       {rx: 30, tx: 40},
+		"ppp2\x00remaining@example.com": {rx: 50, tx: 60},
+	}
+	m := &Manager{id: 16, proc: &managed{proc: &Process{ipsecCmd: cmd, xl2tpdCmd: cmd}, tag: "tag", last: last}}
+	_, _, err := m.CollectTrafficChecked()
+	var missing *SessionDisappeared
+	if !errors.As(err, &missing) || missing.Interface != "ppp0" || missing.Cause != "session absent from sample" || len(missing.Additional) != 1 {
+		t.Fatalf("missing observations not captured: %+v %v", missing, err)
+	}
+	other := missing.Additional[0]
+	if other.Interface != "ppp1" || other.Email != "bob@example.com" || other.PreviousRx != 30 || other.PreviousTx != 40 {
+		t.Fatalf("additional baseline lost: %+v", other)
+	}
+	if len(missing.New) != 1 || missing.New[0].Email != "new@example.com" || missing.New[0].ObservedRx != 7 || !strings.Contains(missing.Error(), "new@example.com") {
+		t.Fatalf("new session observation lost: %+v", missing)
+	}
+	if len(missing.Retained) != 1 || missing.Retained[0].Email != "remaining@example.com" || missing.Retained[0].PreviousRx != 50 || missing.Retained[0].ObservedRx != 90 || !strings.Contains(missing.Error(), "bob@example.com") || !strings.Contains(missing.Error(), "remaining@example.com") || last["ppp2\x00remaining@example.com"].rx != 50 {
+		t.Fatalf("evidence or remaining baseline lost: %v %#v", missing, last)
+	}
+}
+
+func TestCollectTrafficPreservesBaselinesWhenRuntimeStops(t *testing.T) {
+	last := map[string]interfaceCounter{
+		"ppp0\x00alice": {rx: 10, tx: 20},
+		"ppp1\x00bob":   {rx: 30, tx: 40},
+	}
+	m := &Manager{id: 17, proc: &managed{proc: &Process{}, last: last, online: map[string]bool{"alice": true}}}
+	_, _, err := m.CollectTrafficChecked()
+	var missing *SessionDisappeared
+	if !errors.As(err, &missing) || missing.Cause != "tracked runtime unavailable" || len(missing.Additional) != 1 {
+		t.Fatalf("runtime exit silently erased accounting uncertainty: %+v %v", missing, err)
+	}
+	if len(last) != 2 || !m.proc.online["alice"] || !strings.Contains(missing.Error(), "bob") {
+		t.Fatalf("evidence or online state lost: %v %#v", missing, m.proc)
 	}
 }
 

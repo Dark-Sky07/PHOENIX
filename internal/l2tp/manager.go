@@ -394,10 +394,16 @@ func (m *Manager) CollectTraffic() (inbounds []InboundTraffic, clients []ClientT
 func (m *Manager) CollectTrafficChecked() (inbounds []InboundTraffic, clients []ClientTrafficDelta, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.proc == nil || !m.proc.proc.IsRunning() {
-		if m.proc != nil {
-			m.proc.online = map[string]bool{}
+	if m.proc == nil {
+		return nil, nil, nil
+	}
+	if m.proc.proc == nil || !m.proc.proc.IsRunning() {
+		// Parent exit is not proof that pppd children stopped or that their
+		// final traffic was recorded. Preserve all known baselines as evidence.
+		if missing := missingL2TPSessions(m.id, m.proc.last, nil, "tracked runtime unavailable"); missing != nil {
+			return nil, nil, missing
 		}
+		m.proc.online = map[string]bool{}
 		return nil, nil, nil
 	}
 	if m.proc.last == nil {
@@ -414,17 +420,8 @@ func (m *Manager) CollectTrafficChecked() (inbounds []InboundTraffic, clients []
 	}
 	// A missing previously sampled session is not a zero-traffic disconnect:
 	// the down hook discards its marker without recording final counters.
-	previousKeys := make([]string, 0, len(m.proc.last))
-	for key := range m.proc.last {
-		previousKeys = append(previousKeys, key)
-	}
-	sort.Strings(previousKeys)
-	for _, key := range previousKeys {
-		if _, present := current[key]; !present {
-			iface, email, _ := strings.Cut(key, "\x00")
-			previous := m.proc.last[key]
-			return nil, nil, &SessionDisappeared{InboundID: m.id, Interface: iface, Email: email, PreviousRx: previous.rx, PreviousTx: previous.tx}
-		}
+	if missing := missingL2TPSessions(m.id, m.proc.last, current, "session absent from sample"); missing != nil {
+		return nil, nil, missing
 	}
 	// Validate the entire snapshot before changing any baseline. A lower
 	// counter can reflect interface reuse or reset, neither of which proves
@@ -476,6 +473,52 @@ func (m *Manager) CollectTrafficChecked() (inbounds []InboundTraffic, clients []
 		inbounds = append(inbounds, InboundTraffic{InboundId: m.id, Tag: m.proc.tag, Up: totalUp, Down: totalDown})
 	}
 	return inbounds, sortedClientDeltas(deltaByEmail), nil
+}
+
+// missingL2TPSessions retains every absent baseline in deterministic order.
+// A nil current map marks all known sessions uncertain when runtime is down.
+func missingL2TPSessions(id int, last, current map[string]interfaceCounter, cause string) *SessionDisappeared {
+	keys := make([]string, 0, len(last))
+	retainedKeys := make([]string, 0, len(last))
+	for key := range last {
+		if _, present := current[key]; !present {
+			keys = append(keys, key)
+		} else {
+			retainedKeys = append(retainedKeys, key)
+		}
+	}
+	sort.Strings(keys)
+	sort.Strings(retainedKeys)
+	if len(keys) == 0 {
+		return nil
+	}
+	observation := func(key string) SessionObservation {
+		iface, email, _ := strings.Cut(key, "\x00")
+		counter := last[key]
+		return SessionObservation{Interface: iface, Email: email, PreviousRx: counter.rx, PreviousTx: counter.tx}
+	}
+	first := observation(keys[0])
+	missing := &SessionDisappeared{InboundID: id, Interface: first.Interface, Email: first.Email, PreviousRx: first.PreviousRx, PreviousTx: first.PreviousTx, Cause: cause}
+	for _, key := range keys[1:] {
+		missing.Additional = append(missing.Additional, observation(key))
+	}
+	for _, key := range retainedKeys {
+		retained := observation(key)
+		retained.ObservedRx, retained.ObservedTx = current[key].rx, current[key].tx
+		missing.Retained = append(missing.Retained, retained)
+	}
+	var newKeys []string
+	for key := range current {
+		if _, exists := last[key]; !exists {
+			newKeys = append(newKeys, key)
+		}
+	}
+	sort.Strings(newKeys)
+	for _, key := range newKeys {
+		iface, email, _ := strings.Cut(key, "\x00")
+		missing.New = append(missing.New, SessionObservation{Interface: iface, Email: email, ObservedRx: current[key].rx, ObservedTx: current[key].tx})
+	}
+	return missing
 }
 
 // OnlineEmails returns the currently connected L2TP usernames, deduplicated

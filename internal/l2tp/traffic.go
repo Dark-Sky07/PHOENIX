@@ -47,10 +47,33 @@ type SessionDisappeared struct {
 	InboundID              int
 	Interface, Email       string
 	PreviousRx, PreviousTx int64
+	Cause                  string
+	Additional             []SessionObservation
+	Retained               []SessionObservation
+	New                    []SessionObservation
+}
+
+// SessionObservation preserves another affected baseline from the same poll.
+type SessionObservation struct {
+	Interface, Email       string
+	PreviousRx, PreviousTx int64
+	ObservedRx, ObservedTx int64 // meaningful for Retained observations only
 }
 
 func (e *SessionDisappeared) Error() string {
-	return fmt.Sprintf("l2tp: session disappeared for inbound %d interface %q client %q after rx %d tx %d; final usage requires reconciliation", e.InboundID, e.Interface, e.Email, e.PreviousRx, e.PreviousTx)
+	var b strings.Builder
+	fmt.Fprintf(&b, "l2tp: session accounting uncertain for inbound %d (%s); last sampled interface %q client %q rx %d tx %d", e.InboundID, e.Cause, e.Interface, e.Email, e.PreviousRx, e.PreviousTx)
+	for _, observation := range e.Additional {
+		fmt.Fprintf(&b, "; missing interface %q client %q rx %d tx %d", observation.Interface, observation.Email, observation.PreviousRx, observation.PreviousTx)
+	}
+	for _, observation := range e.Retained {
+		fmt.Fprintf(&b, "; currently present: interface %q client %q previous rx %d tx %d observed rx %d tx %d", observation.Interface, observation.Email, observation.PreviousRx, observation.PreviousTx, observation.ObservedRx, observation.ObservedTx)
+	}
+	for _, observation := range e.New {
+		fmt.Fprintf(&b, "; no prior baseline: interface %q client %q observed rx %d tx %d", observation.Interface, observation.Email, observation.ObservedRx, observation.ObservedTx)
+	}
+	b.WriteString("; final usage requires reconciliation")
+	return b.String()
 }
 
 type interfaceCounter struct {
