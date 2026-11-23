@@ -3,11 +3,9 @@ package pppvpn
 import (
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -55,49 +53,6 @@ type Process struct {
 	log  *lineLogger
 }
 
-func stopOrphan(protocol Protocol, configPath string) {
-	if runtime.GOOS != "linux" {
-		return
-	}
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return
-	}
-	name := "pptpd"
-	if protocol == SSTP {
-		name = "sstpd"
-	}
-	for _, entry := range entries {
-		pid, err := strconv.Atoi(entry.Name())
-		if err != nil || pid <= 1 || pid == os.Getpid() {
-			continue
-		}
-		cmdline, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
-		if err != nil {
-			continue
-		}
-		line := string(cmdline)
-		if !strings.Contains(line, name) || !strings.Contains(line, configPath) {
-			continue
-		}
-		process, err := os.FindProcess(pid)
-		if err != nil {
-			continue
-		}
-		_ = process.Signal(syscall.SIGTERM)
-		deadline := time.Now().Add(3 * time.Second)
-		for time.Now().Before(deadline) {
-			if process.Signal(syscall.Signal(0)) != nil {
-				break
-			}
-			time.Sleep(50 * time.Millisecond)
-		}
-		if process.Signal(syscall.Signal(0)) == nil {
-			_ = process.Kill()
-		}
-	}
-}
-
 func daemonPath(protocol Protocol) (string, error) {
 	name := "pptpd"
 	if protocol == SSTP {
@@ -120,7 +75,6 @@ func (p *Process) Start(i Instance, configPath string) error {
 	if err != nil {
 		return err
 	}
-	stopOrphan(i.Protocol, configPath)
 	var cmd *exec.Cmd
 	if i.Protocol == PPTP {
 		cmd = exec.Command(bin, "--fg", "--conf", configPath)

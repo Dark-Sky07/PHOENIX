@@ -53,6 +53,9 @@ var trafficCollector pppTrafficCollector
 func CollectTraffic() (*TrafficBatch, error) {
 	trafficCollector.mu.Lock()
 	defer trafficCollector.mu.Unlock()
+	if err := GetManager().CheckUntrackedRuntime(); err != nil {
+		return nil, err
+	}
 	if trafficCollector.pending != nil {
 		return cloneTrafficBatch(trafficCollector.pending), nil
 	}

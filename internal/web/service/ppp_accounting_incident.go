@@ -13,6 +13,7 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/config"
 	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
+	"github.com/Dark-Sky07/phoenix/internal/pppvpn"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -37,6 +38,16 @@ func notePPPIncidentWrite(key string, done bool, failed bool) {
 const pppEvidenceDir = "ppp-accounting-evidence"
 
 func localPPPAccountingIncident() error {
+	if observation := pppvpn.GetManager().CheckUntrackedRuntime(); observation != nil {
+		detail := observation.Error()
+		notePPPIncidentWrite(detail, false, false)
+		err := persistAccountingEvidence(pppEvidenceDir, detail)
+		notePPPIncidentWrite(detail, true, err != nil)
+		if err != nil {
+			return fmt.Errorf("PPP untracked runtime requires manual reconciliation; persist evidence: %w", err)
+		}
+		return errors.New("PPP untracked runtime requires manual reconciliation")
+	}
 	if pppIncidentPending.Load() {
 		return errors.New("PPP accounting incident persistence pending; reconciliation required")
 	}

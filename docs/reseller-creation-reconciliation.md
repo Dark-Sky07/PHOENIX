@@ -959,3 +959,17 @@ can remain after interrupted cleanup and may require housekeeping; do not
 remove nonempty claims without reconciliation. These measures do not fence a
 new hook write after the claim, fix a missing hook, or establish final traffic
 or session drain.
+
+Untracked SSTP/PPTP runtime directories are no longer cleaned up by matching
+process names and command-line substrings: those do not prove process identity.
+The PPP manager refuses automatic start, replacement, or checked removal while
+unowned runtime files are present and preserves tracked startup failures. A
+local observation records evidence and blocks sensitive quota/removal paths;
+the periodic PPP collector also retains its durable shared poll marker for
+manual review, even if the directory later vanishes. Review the affected host,
+its active children, spool and database before removing evidence or a marker;
+a mere directory removal is not reconciliation. Other hosts remain exposed
+before observation or if evidence/DB writes both fail; absent directories do
+not prove an orphan or unpolled usage is absent. This is not a child-process
+termination or final-accounting guarantee, nor does it resolve interface reuse
+or the ordering of old and new ip-up/ip-down hooks.

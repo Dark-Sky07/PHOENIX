@@ -33,6 +33,7 @@ type pppPollState struct {
 	unlock          func()
 	marker          string
 	deleteUncertain bool
+	requiresReview  bool
 }
 
 // collectAndCommitPPP keeps a durable fence and the exact pending spool batch
@@ -66,6 +67,11 @@ func collectAndCommitPPP(state *pppPollState, collect func() (*pppvpn.TrafficBat
 			return false, false, fmt.Errorf("verify PPP poll marker: %w", err)
 		}
 	}
+	if state.requiresReview {
+		state.unlock()
+		state.unlock = nil
+		return false, false, errors.New("PPP untracked runtime requires manual reconciliation; poll marker retained")
+	}
 	if state.deleteUncertain {
 		// The delete may have committed despite returning an error. Do not
 		// release the lock until the durable fence has been restored.
@@ -77,6 +83,10 @@ func collectAndCommitPPP(state *pppPollState, collect func() (*pppvpn.TrafficBat
 	release := func() { state.unlock(); state.unlock = nil }
 	batch, err := collect()
 	if err != nil {
+		var orphan *pppvpn.UntrackedRuntimeError
+		if errors.As(err, &orphan) {
+			state.requiresReview = true
+		}
 		release()
 		return false, false, fmt.Errorf("collect PPP traffic; poll marker %s retained: %w", state.marker, err)
 	}

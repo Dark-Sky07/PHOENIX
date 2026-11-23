@@ -274,3 +274,49 @@ func TestPPPPollRecoversHookReplacementAfterCommittedBatch(t *testing.T) {
 		t.Fatal("marker not cleared")
 	}
 }
+
+func TestPPPPollOrphanRequiresReviewEvenIfDirectoryDisappears(t *testing.T) {
+	setupIntegrationDB(t)
+	state := &pppPollState{}
+	calls := 0
+	collect := func() (*pppvpn.TrafficBatch, error) {
+		calls++
+		return nil, &pppvpn.UntrackedRuntimeError{Detail: "test orphan"}
+	}
+	if _, _, err := collectAndCommitPPP(state, collect, nil, nil); err == nil || !state.requiresReview || state.marker == "" || state.unlock != nil {
+		t.Fatalf("orphan not fenced: %v", err)
+	}
+	if _, _, err := collectAndCommitPPP(state, collect, nil, nil); err == nil || calls != 1 || state.marker == "" {
+		t.Fatalf("orphan auto-cleared: %v calls=%d", err, calls)
+	}
+	if unlock, err := service.LockResellerAllocation(); err == nil {
+		unlock()
+		t.Fatal("allocation bypassed orphan marker")
+	}
+}
+
+func TestPPPRealCollectorFencesUntrackedRuntime(t *testing.T) {
+	setupIntegrationDB(t)
+	bin := t.TempDir()
+	t.Setenv("XUI_BIN_FOLDER", bin)
+	orphan := filepath.Join(bin, "pppvpn", "sstp", "888")
+	if err := os.MkdirAll(orphan, 0700); err != nil {
+		t.Fatal(err)
+	}
+	state := &pppPollState{}
+	if _, _, err := collectAndCommitPPP(state, pppvpn.CollectTraffic, nil, pppvpn.AckTraffic); err == nil || !state.requiresReview || state.marker == "" {
+		t.Fatalf("real orphan not fenced: %v", err)
+	}
+	if err := os.RemoveAll(orphan); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := collectAndCommitPPP(state, pppvpn.CollectTraffic, nil, pppvpn.AckTraffic); err == nil {
+		t.Fatal("orphan disappearance automatically cleared fence")
+	}
+	// Simulate process exit: the persistent marker blocks another host.
+	state = &pppPollState{}
+	if unlock, err := service.LockResellerAllocation(); err == nil {
+		unlock()
+		t.Fatal("orphan marker did not survive lost process state")
+	}
+}

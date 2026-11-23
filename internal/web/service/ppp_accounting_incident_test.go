@@ -135,3 +135,32 @@ func TestPPPConcurrentIncidentSuccessDoesNotClearAnotherFailure(t *testing.T) {
 		t.Fatal("successful retry did not clear pending observation")
 	}
 }
+
+func TestPPPOrphanBlocksQuotaAndLeavesEvidence(t *testing.T) {
+	reseller, client := seedResellerRenewal(t)
+	bin := t.TempDir()
+	t.Setenv("XUI_BIN_FOLDER", bin)
+	orphan := filepath.Join(bin, "pppvpn", "pptp", "712")
+	if err := os.MkdirAll(orphan, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&ResellerService{}).CheckTrafficQuota(&reseller, 1); err == nil || !strings.Contains(err.Error(), "PPP") {
+		t.Fatalf("orphan quota guard: %v", err)
+	}
+	if _, err := (&ClientService{}).Delete(nil, client.Id, false); err == nil {
+		t.Fatal("orphan deletion not blocked")
+	}
+	if status := readCounterIncidentStatus(database.GetDB()); !status.Available || !status.FallbackPresent {
+		t.Fatalf("dashboard missing PPP orphan: %+v", status)
+	}
+	if err := os.RemoveAll(orphan); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&ResellerService{}).CheckTrafficQuota(&reseller, 1); err == nil {
+		t.Fatal("disappearance cleared incident")
+	}
+	entries, err := os.ReadDir(filepath.Join(os.Getenv("XUI_DB_FOLDER"), pppEvidenceDir))
+	if err != nil || len(entries) == 0 {
+		t.Fatalf("missing local evidence: %v", err)
+	}
+}

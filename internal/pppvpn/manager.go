@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -30,6 +31,44 @@ func GetManager() *Manager {
 	return singleton
 }
 
+// UntrackedRuntimeError means local runtime files are not owned by this
+// manager. File presence is evidence to investigate, not proof a daemon lives.
+type UntrackedRuntimeError struct{ Detail string }
+
+func (e *UntrackedRuntimeError) Error() string {
+	return "pppvpn: untracked runtime requires manual review: " + e.Detail
+}
+
+func (m *Manager) checkUntrackedRuntimeLocked() error {
+	for _, protocol := range []Protocol{SSTP, PPTP} {
+		dir := filepath.Join(rootDir(), string(protocol))
+		entries, err := os.ReadDir(dir)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return &UntrackedRuntimeError{Detail: fmt.Sprintf("inspect %s: %v", dir, err)}
+		}
+		for _, entry := range entries {
+			id, err := strconv.Atoi(entry.Name())
+			old := m.inbounds[id]
+			if err == nil && id > 0 && entry.Name() == strconv.Itoa(id) && entry.IsDir() && old != nil && old.process != nil && old.instance.Protocol == protocol {
+				continue
+			}
+			return &UntrackedRuntimeError{Detail: filepath.Join(dir, entry.Name())}
+		}
+	}
+	return nil
+}
+
+// CheckUntrackedRuntime does not signal or clean up an unknown process. A
+// clean directory scan is not proof of process ownership or session drain.
+func (m *Manager) CheckUntrackedRuntime() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.checkUntrackedRuntimeLocked()
+}
+
 func (m *Manager) Ensure(i Instance) error {
 	if err := Validate(i); err != nil {
 		return err
@@ -38,6 +77,9 @@ func (m *Manager) Ensure(i Instance) error {
 	defer m.mu.Unlock()
 	if m.inbounds == nil {
 		m.inbounds = map[int]*managed{}
+	}
+	if err := m.checkUntrackedRuntimeLocked(); err != nil {
+		return err
 	}
 	fp := i.fingerprint()
 	if old := m.inbounds[i.ID]; old != nil && old.fingerprint == fp && old.process != nil && old.process.IsRunning() {
@@ -75,9 +117,9 @@ func (m *Manager) Ensure(i Instance) error {
 	}
 	proc := &Process{}
 	if err = proc.Start(i, cfg); err != nil {
-		networkManager().removeInstance(i)
-		removeChapSecrets(i)
-		_ = removeInstanceDir(i)
+		// Even a failed startup may have launched child processes. Preserve
+		// ownership and evidence rather than silently deleting runtime files.
+		m.inbounds[i.ID] = &managed{instance: i, fingerprint: fp, process: proc}
 		return err
 	}
 	m.inbounds[i.ID] = &managed{instance: i, fingerprint: fp, process: proc}
@@ -90,6 +132,9 @@ func (m *Manager) Ensure(i Instance) error {
 func (m *Manager) RemoveChecked(id int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := m.checkUntrackedRuntimeLocked(); err != nil {
+		return err
+	}
 	cur := m.inbounds[id]
 	if cur == nil {
 		return nil
