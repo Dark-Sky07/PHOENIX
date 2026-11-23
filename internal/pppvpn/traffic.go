@@ -1,17 +1,18 @@
 package pppvpn
 
 import (
-	"bufio"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/Dark-Sky07/phoenix/internal/xray"
 )
@@ -422,19 +423,22 @@ func readPPPSessionAt(root *os.Root, rel string) (pppSession, error) {
 		return pppSession{}, err
 	}
 	defer file.Close()
-	scanner := bufio.NewScanner(file)
-	if !scanner.Scan() {
-		if scanner.Err() != nil {
-			return pppSession{}, scanner.Err()
-		}
-		return pppSession{}, errors.New("pppvpn: empty session record")
-	}
-	line := scanner.Text()
-	if scanner.Scan() {
-		return pppSession{}, errors.New("pppvpn: extra session record data")
-	}
-	if err := scanner.Err(); err != nil {
+	// A complete hook record always ends in a newline. Scanner accepts an
+	// unterminated final line, which could turn torn evidence into a seemingly
+	// valid closed session and allow it to be acknowledged and deleted.
+	const maxRecordBytes = 64 * 1024
+	data, err := io.ReadAll(io.LimitReader(file, maxRecordBytes+1))
+	if err != nil {
 		return pppSession{}, err
+	}
+	if len(data) == 0 || len(data) > maxRecordBytes || data[len(data)-1] != '\n' || strings.Count(string(data), "\n") != 1 || !utf8.Valid(data) {
+		return pppSession{}, errors.New("pppvpn: incomplete or malformed session record")
+	}
+	line := string(data[:len(data)-1])
+	for _, r := range line {
+		if (r < 0x20 && r != '\t') || r == 0x7f {
+			return pppSession{}, errors.New("pppvpn: invalid control character in session record")
+		}
 	}
 	fields := strings.Split(line, "\t")
 	if (len(fields) != 7 && len(fields) != 9) || (fields[0] != "active" && fields[0] != "closed") || fields[1] == "" || fields[2] == "" || fields[5] == "" {

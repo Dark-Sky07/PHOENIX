@@ -343,6 +343,57 @@ func TestAckTrafficRejectsActiveReplacementInClaim(t *testing.T) {
 	}
 }
 
+func TestIncompleteClosedRecordCannotBeSampledOrAcknowledged(t *testing.T) {
+	root := setupTrafficTest(t)
+	dir := filepath.Join(root, "sessions", "pptp-7")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "ppp4.closed.session-uuid")
+	data := []byte("closed\tppp4\talice@example.test\t1200\t2500\tsession-uuid\t7")
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if batch, err := CollectTraffic(); err == nil || batch != nil {
+		t.Fatalf("unterminated closed record accepted: batch=%+v err=%v", batch, err)
+	}
+	if err := CheckClientSessionEvidence([]string{"unrelated@example.test"}, nil); err == nil {
+		t.Fatal("incomplete record treated as unrelated to client removal")
+	}
+	if err := AckTraffic(1); err == nil {
+		t.Fatal("incomplete record was acknowledged without a batch")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != string(data) {
+		t.Fatalf("incomplete evidence changed: %q %v", got, err)
+	}
+}
+
+func TestReadPPPSessionRejectsIncompleteAndInvalidBytes(t *testing.T) {
+	root := setupTrafficTest(t)
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "record")
+	for name, data := range map[string]string{
+		"unterminated": "closed\tppp0\talice\t10\t20\tsession\t7",
+		"extra-line":   "closed\tppp0\talice\t10\t20\tsession\t7\n\n",
+		"invalid-utf8": "closed\tppp0\talice\xff\t10\t20\tsession\t7\n",
+		"control":      "closed\tppp0\talice\x00\t10\t20\tsession\t7\n",
+		"carriage":     "closed\tppp0\talice\t10\t20\tsession\t7\r\n",
+		"oversized":    "closed\tppp0\t" + strings.Repeat("a", 65536) + "\t10\t20\tsession\t7\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := readPPPSession(path); err == nil {
+				t.Fatalf("%s session record accepted", name)
+			}
+		})
+	}
+}
+
 func TestReadPPPSessionRejectsExtraRecords(t *testing.T) {
 	root := setupTrafficTest(t)
 	if err := os.MkdirAll(root, 0700); err != nil {

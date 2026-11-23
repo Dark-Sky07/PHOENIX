@@ -1043,7 +1043,11 @@ spool acknowledgement follows successful accounting. A crash can leave an
 orphan marker requiring manual investigation; it is not proof of a final
 sample and must not be blindly cleared. Temporary hook files, unreadable or
 malformed records, and unavailable active interfaces now fail the scan instead
-of being silently skipped. This may block allocation and periodic PPP
+of being silently skipped. A spool record must be bounded valid UTF-8, contain
+one newline-terminated record and no disallowed control characters; an
+unterminated closed record is retained as uncertain evidence rather than
+credited and acknowledged. Legacy closed records that do not meet these rules
+need manual review. This may block allocation and periodic PPP
 reconciliation until the issue is corrected. Polling precedes periodic daemon
 reconciliation, but other runtime mutation paths, failed/missing hooks, vanished
 sessions, traffic after the sample, and nonparticipating writers are not
