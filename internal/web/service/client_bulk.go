@@ -685,6 +685,11 @@ func (s *ClientService) BulkDelete(inboundSvc *InboundService, emails []string, 
 
 	db := database.GetDB()
 	// Preflight the entire batch before touching runtimes or tombstones.
+	if !keepTraffic {
+		if err := rejectNegativeTrafficEvidence(db, cleanEmails); err != nil {
+			return result, false, err
+		}
+	}
 	if err := checkPPPAndL2TPAccountingIncidents(db); err != nil {
 		return result, false, err
 	}

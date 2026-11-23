@@ -75,8 +75,10 @@ review and reconciliation are required before re-enabling it. Automatic renewal
 checks both local and upstream counters before resetting any candidate; corrupt
 renewal evidence postpones that renewal batch rather than deleting it. Supported
 client counter resets, manual rewrites, and client-stat deletion helpers also
-reject negative local or upstream evidence, including for non-resellers; this is
-not proof that every deletion path or runtime mutation is atomic. Preflight
+reject negative local or upstream evidence, including for non-resellers. Single,
+scoped, bulk and inbound-client removal paths also preflight this evidence when
+asked to delete traffic, before changing associations or runtimes. This is not
+proof that every deletion path or runtime mutation is atomic. Preflight
 checks precede existing runtime re-enable paths,
 but those side effects and the database reset are not a single atomic operation.
 Node status

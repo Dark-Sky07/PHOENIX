@@ -1021,6 +1021,11 @@ func (s *ClientService) UpdateInboundClient(inboundSvc *InboundService, data *mo
 func (s *ClientService) DelInboundClientByEmail(inboundSvc *InboundService, inboundId int, email string, keepTraffic bool) (needRestart bool, err error) {
 	defer lockInbound(inboundId).Unlock()
 
+	if !keepTraffic {
+		if err := rejectNegativeTrafficEvidence(database.GetDB(), []string{email}); err != nil {
+			return false, err
+		}
+	}
 	oldInbound, err := inboundSvc.GetInbound(inboundId)
 	if err != nil {
 		logger.Error("Load Old Data Error")

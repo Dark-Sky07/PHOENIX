@@ -432,6 +432,11 @@ func (s *ClientService) Delete(inboundSvc *InboundService, id int, keepTraffic b
 	if err != nil {
 		return false, err
 	}
+	if !keepTraffic {
+		if err := rejectNegativeTrafficEvidence(database.GetDB(), []string{existing.Email}); err != nil {
+			return false, err
+		}
+	}
 	if err := checkPPPAndL2TPAccountingIncidents(database.GetDB()); err != nil {
 		return false, err
 	}
@@ -756,6 +761,11 @@ func (s *ClientService) DeleteByEmailForInbounds(inboundSvc *InboundService, ema
 	email = strings.TrimSpace(email)
 	if email == "" {
 		return false, common.NewError("client email is required")
+	}
+	if !keepTraffic {
+		if err := rejectNegativeTrafficEvidence(database.GetDB(), []string{email}); err != nil {
+			return false, err
+		}
 	}
 	rec, err := s.GetRecordByEmail(nil, email)
 	if err != nil {
