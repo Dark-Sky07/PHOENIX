@@ -154,8 +154,7 @@ func (l *Local) DelInbound(_ context.Context, ib *model.Inbound) error {
 		return nil
 	}
 	if ib.Protocol == model.SSTP || ib.Protocol == model.PPTP {
-		pppvpn.GetManager().Remove(ib.Id)
-		return nil
+		return pppvpn.GetManager().RemoveChecked(ib.Id)
 	}
 	if ib.Protocol == model.TUIC {
 		tuic.GetManager().Remove(ib.Id)
@@ -200,7 +199,9 @@ func (l *Local) UpdateInbound(ctx context.Context, oldIb, newIb *model.Inbound) 
 	if oldIb.Protocol == model.TUIC || newIb.Protocol == model.TUIC {
 		return l.updateTuicInbound(ctx, oldIb, newIb)
 	}
-	_ = l.DelInbound(ctx, oldIb)
+	if err := l.DelInbound(ctx, oldIb); err != nil {
+		return err
+	}
 	if !newIb.Enable {
 		return nil
 	}
@@ -219,7 +220,9 @@ func (l *Local) updateTuicInbound(ctx context.Context, oldIb, newIb *model.Inbou
 		return l.AddInbound(ctx, newIb)
 	}
 	if oldIb.Protocol != model.TUIC {
-		_ = l.DelInbound(ctx, oldIb)
+		if err := l.DelInbound(ctx, oldIb); err != nil {
+			return err
+		}
 		if l.deps.SetNeedRestart != nil {
 			l.deps.SetNeedRestart()
 		}
@@ -259,7 +262,9 @@ func (l *Local) updateAmneziaWGInbound(ctx context.Context, oldIb, newIb *model.
 		return l.AddInbound(ctx, newIb)
 	}
 	if oldIb.Protocol != model.AmneziaWG {
-		_ = l.DelInbound(ctx, oldIb)
+		if err := l.DelInbound(ctx, oldIb); err != nil {
+			return err
+		}
 	}
 	if !newIb.Enable {
 		amneziawgnet.GetManager().Remove(newIb.Id)

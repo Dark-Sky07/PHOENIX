@@ -785,3 +785,19 @@ runtime is available; a filter failure leaves the inbound disabled. These
 changes prevent a failed filter from reinstalling quota-disabled credentials,
 but a failed apply can leave the prior runtime running. They do not prove
 session termination, final PPP traffic accounting, or complete recovery.
+
+SSTP/PPTP replacement now waits for the supervised daemon's exit signal; if
+that signal is missing or times out, the old manager entry is retained and a
+replacement is not started. Checked removal returns the failure rather than
+pretending the parent exited. This is **not** a barrier for pppd children,
+active sessions, hook spool files, or counters; the unchecked periodic removal
+path logs failures and remains a recovery backstop.
+
+L2TP accounting has a separate unresolved loss window: its job reconciles the
+daemon before sampling, the manager holds interface baselines only in memory,
+and `CollectTraffic` advances them before `AddTraffic` commits. A process
+change, missed ip-down counter, database failure, or crash can therefore lose
+usage; blindly retrying a delta after an uncertain commit could double-count.
+A durable, identity-bound, idempotent journal and a real session/counter drain
+are needed before this path can support reconciliation or quota release. Do not
+infer missing bytes or treat a stopped parent daemon as proof of completeness.

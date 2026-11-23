@@ -16,6 +16,11 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/logger"
 )
 
+var (
+	pppGracefulStopTimeout = 5 * time.Second
+	pppForceStopTimeout    = 2 * time.Second
+)
+
 type lineLogger struct {
 	mu       sync.Mutex
 	protocol Protocol
@@ -165,12 +170,23 @@ func (p *Process) runningLocked() bool {
 }
 func (p *Process) IsRunning() bool { p.mu.Lock(); defer p.mu.Unlock(); return p.runningLocked() }
 
+// Stop waits for the supervised daemon's Wait goroutine, not merely for a
+// signal to be sent. This only covers the parent process; it is not evidence
+// that every pppd child, session, counter writer or traffic checkpoint drained.
 func (p *Process) Stop() error {
 	p.mu.Lock()
 	cmd, done := p.cmd, p.done
 	p.mu.Unlock()
-	if cmd == nil || cmd.Process == nil || done == nil {
+	if cmd == nil || cmd.Process == nil {
 		return nil
+	}
+	if done == nil {
+		return errors.New("pppvpn: cannot verify daemon exit without a wait signal")
+	}
+	select {
+	case <-done:
+		return nil
+	default:
 	}
 	if runtime.GOOS == "windows" {
 		_ = cmd.Process.Kill()
@@ -180,14 +196,15 @@ func (p *Process) Stop() error {
 	select {
 	case <-done:
 		return nil
-	case <-time.After(5 * time.Second):
+	case <-time.After(pppGracefulStopTimeout):
 		_ = cmd.Process.Kill()
 	}
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
+		return nil
+	case <-time.After(pppForceStopTimeout):
+		return errors.New("pppvpn: daemon exit was not observed after forced stop")
 	}
-	return nil
 }
 
 func processConfigPath(i Instance) string {

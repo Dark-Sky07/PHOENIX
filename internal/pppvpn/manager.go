@@ -2,6 +2,7 @@ package pppvpn
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -51,7 +52,11 @@ func (m *Manager) Ensure(i Instance) error {
 	}
 	if old := m.inbounds[i.ID]; old != nil {
 		if old.process != nil {
-			_ = old.process.Stop()
+			if err := old.process.Stop(); err != nil {
+				// Keep the old process and configuration tracked. Starting a
+				// replacement while its exit is uncertain can overlap sessions.
+				return fmt.Errorf("stop old %s daemon for inbound %d: %w", i.Protocol, i.ID, err)
+			}
 		}
 		networkManager().removeInstance(old.instance)
 		removeChapSecrets(old.instance)
@@ -80,19 +85,30 @@ func (m *Manager) Ensure(i Instance) error {
 	return nil
 }
 
-func (m *Manager) Remove(id int) {
+// RemoveChecked retains the managed process and configuration when its exit
+// cannot be observed. The signal says nothing about child PPP sessions.
+func (m *Manager) RemoveChecked(id int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	cur := m.inbounds[id]
-	if cur != nil {
-		if cur.process != nil {
-			_ = cur.process.Stop()
+	if cur == nil {
+		return nil
+	}
+	if cur.process != nil {
+		if err := cur.process.Stop(); err != nil {
+			return fmt.Errorf("stop %s daemon for inbound %d: %w", cur.instance.Protocol, id, err)
 		}
-		networkManager().removeInstance(cur.instance)
-		removeChapSecrets(cur.instance)
-		delete(m.inbounds, id)
-		_ = removeInstanceDir(cur.instance)
-		return
+	}
+	networkManager().removeInstance(cur.instance)
+	removeChapSecrets(cur.instance)
+	delete(m.inbounds, id)
+	_ = removeInstanceDir(cur.instance)
+	return nil
+}
+
+func (m *Manager) Remove(id int) {
+	if err := m.RemoveChecked(id); err != nil {
+		logger.Warningf("pppvpn: remove inbound %d failed: %v", id, err)
 	}
 }
 

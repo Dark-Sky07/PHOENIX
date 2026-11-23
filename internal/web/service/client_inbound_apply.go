@@ -60,8 +60,7 @@ func reconcilePPPVPNRuntime(inbound *model.Inbound) error {
 	}
 	if inbound.Protocol == model.SSTP || inbound.Protocol == model.PPTP {
 		if !inbound.Enable {
-			pppvpn.GetManager().Remove(inbound.Id)
-			return nil
+			return pppvpn.GetManager().RemoveChecked(inbound.Id)
 		}
 		instance, ok := pppvpn.InstanceFromInbound(inbound, nil)
 		if !ok {
