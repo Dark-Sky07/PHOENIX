@@ -13,6 +13,29 @@ import (
 	"github.com/google/uuid"
 )
 
+func TestTuicShutdownWithForeignMarkerDoesNotConsumePendingTraffic(t *testing.T) {
+	setupIntegrationDB(t)
+	mgr := tuic.GetManager()
+	mgr.StopAll()
+	mgr.CollectAllTraffic()
+	t.Cleanup(func() { mgr.StopAll(); mgr.CollectAllTraffic() })
+	mgr.RequeueClientTraffic([]tuic.ClientTrafficDelta{{Email: "shutdown-pending@example.test", TrafficID: 42, Up: 17}})
+	id := uuid.NewString()
+	if err := service.BeginXrayPoll(id); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewTuicJob().StopAndFlushTraffic(); err == nil {
+		t.Fatal("shutdown accepted a foreign in-flight marker")
+	}
+	if err := service.VerifyXrayPollMarker(id); err != nil {
+		t.Fatalf("foreign marker was lost: %v", err)
+	}
+	_, deltas := mgr.CollectAllTraffic()
+	if len(deltas) != 1 || deltas[0].Up != 17 {
+		t.Fatalf("unaccounted traffic was consumed: %+v", deltas)
+	}
+}
+
 func TestTuicReconcileDrainRunsBehindMarkerAndRetainsFailedBatch(t *testing.T) {
 	setupIntegrationDB(t)
 	db := database.GetDB()

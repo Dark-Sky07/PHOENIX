@@ -70,9 +70,13 @@ leave only a marker; never infer missing bytes from it.
 This is not a complete TUIC accounting protocol. Other hosts cannot inspect this
 host's journal. The safeguards do not prove client generation or reseller
 ownership, protect unpolled in-memory traffic against a crash, or retroactively
-bind old TUIC receipts to their payloads. Other runtime mutation and shutdown
-paths can still drain sessions outside this periodic barrier; a marker also does
-not prove that connections stopped or all final bytes were observed. Enforcement
+bind old TUIC receipts to their payloads. Normal panel shutdown now creates a
+marker before stopping TUIC listeners and commits their collected counters using
+the same receipt path. If prior recovery or marker creation fails, shutdown
+still closes listeners; their counters may then remain only in memory and need
+operator reconciliation. Other runtime mutation paths can still drain sessions
+outside this barrier. A marker does not prove that connections stopped or all
+final bytes were observed. Enforcement
 following the reconciliation drain may require another reconciliation tick.
 Operators must preserve evidence and reconcile rather than deleting a journal or
 inventing usage.

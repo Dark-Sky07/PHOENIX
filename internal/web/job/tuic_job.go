@@ -119,6 +119,43 @@ func tuicSpeedPayload(clientTraffics []*xray.ClientTraffic, sampleInterval time.
 	}
 }
 
+// StopAndFlushTraffic fences the shutdown mutation before stopping listeners.
+// Even if accounting cannot proceed, shutdown must still close listeners; in
+// that case drained counters may remain only in memory and the error requires
+// operator reconciliation. A marker is not proof of a complete final drain.
+func (j *TuicJob) StopAndFlushTraffic() error {
+	tuicJournalMu.Lock()
+	defer tuicJournalMu.Unlock()
+	mgr := tuic.GetManager()
+	stopped := false
+	defer func() {
+		if !stopped {
+			mgr.StopAll()
+		}
+	}()
+	if sharedTuicPoll.batch != nil {
+		if _, _, _, err := collectAndCommitTuic(&sharedTuicPoll, nil, &j.inboundService); err != nil {
+			return fmt.Errorf("finish pending TUIC poll before shutdown: %w", err)
+		}
+	}
+	if err := j.replayTuicJournal(); err != nil {
+		return fmt.Errorf("recover TUIC journal before shutdown: %w", err)
+	}
+	_, _, disabled, err := collectAndCommitTuic(&sharedTuicPoll, func() []tuic.ClientTrafficDelta {
+		mgr.StopAll()
+		stopped = true
+		_, deltas := mgr.CollectAllTraffic()
+		return deltas
+	}, &j.inboundService)
+	if disabled {
+		websocket.BroadcastInvalidate(websocket.MessageTypeInbounds)
+	}
+	if err != nil {
+		return fmt.Errorf("account TUIC shutdown: %w", err)
+	}
+	return nil
+}
+
 // FlushStoppedTraffic persists counters drained when the TUIC manager stops its
 // listeners. Call it after scheduled jobs have stopped and before the traffic
 // writer shuts down.

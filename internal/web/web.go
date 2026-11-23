@@ -22,7 +22,6 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/mtproto"
 	"github.com/Dark-Sky07/phoenix/internal/openvpn"
 	"github.com/Dark-Sky07/phoenix/internal/pppvpn"
-	"github.com/Dark-Sky07/phoenix/internal/tuic"
 	"github.com/Dark-Sky07/phoenix/internal/util/common"
 	"github.com/Dark-Sky07/phoenix/internal/web/controller"
 	"github.com/Dark-Sky07/phoenix/internal/web/job"
@@ -565,8 +564,7 @@ func (s *Server) stop(stopXray bool, stopTgBot bool) error {
 			logger.Warning("persist final Xray traffic on shutdown failed:", err)
 			err2 = common.Combine(err2, err)
 		}
-		tuic.GetManager().StopAll()
-		if err := job.NewTuicJob().FlushStoppedTraffic(); err != nil {
+		if err := job.NewTuicJob().StopAndFlushTraffic(); err != nil {
 			logger.Warning("persist final TUIC traffic on shutdown failed:", err)
 			err2 = common.Combine(err2, err)
 		}
