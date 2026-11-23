@@ -74,6 +74,33 @@ func TestPPPReconciliationResumesAfterReviewedIncident(t *testing.T) {
 	}
 }
 
+func TestPPPPollKeepsFenceForLegacyClaimWithoutOrigin(t *testing.T) {
+	setupIntegrationDB(t)
+	bin := t.TempDir()
+	t.Setenv("XUI_BIN_FOLDER", bin)
+	dir := filepath.Join(bin, "pppvpn", "sessions-staged", "claim-before-upgrade")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "record")
+	data := "closed\tppp4\talice@example.test\t1200\t2500\tsession-uuid\t7\n"
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	state := &pppPollState{}
+	if _, _, err := collectAndCommitPPP(state, pppvpn.CollectTraffic, (&service.InboundService{}).AddPPPTrafficUnderAllocationLock, pppvpn.AckTraffic); err == nil || state.marker == "" || state.unlock != nil {
+		t.Fatalf("unverified staged claim did not retain poll fence: %v", err)
+	}
+	if unlock, err := service.LockResellerAllocation(); err == nil {
+		unlock()
+		t.Fatal("allocation bypassed unverified staged claim")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != data {
+		t.Fatalf("claim evidence altered: %q %v", got, err)
+	}
+}
+
 func TestPPPPollKeepsFenceForMismatchedSpoolInbound(t *testing.T) {
 	setupIntegrationDB(t)
 	bin := t.TempDir()

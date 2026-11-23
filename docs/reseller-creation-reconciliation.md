@@ -1049,10 +1049,12 @@ unterminated closed record is retained as uncertain evidence rather than
 credited and acknowledged. Live spool groups must name a canonical PPTP/SSTP
 inbound, and their record's inbound, interface and session identity must match
 the group and filename before sampling or scoped removal checks. Legacy closed
-records that do not meet these rules need manual review. A staged claim does not
-retain its original group, so scoped removals defer while any such claim exists;
-its original attribution cannot be independently verified by the claim name. This may block allocation and periodic PPP
-reconciliation until the issue is corrected. Polling precedes periodic daemon
+records that do not meet these rules need manual review. New staged claims sync
+their original spool path before moving a record, and retries validate that path
+against the record. Old claims without this provenance require manual review;
+scoped removals still defer while any claim exists. The metadata depends on a
+trusted local claim directory and is not proof against a privileged writer. This
+may block allocation and periodic PPP reconciliation until the issue is corrected. Polling precedes periodic daemon
 reconciliation, but other runtime mutation paths, failed/missing hooks, vanished
 sessions, traffic after the sample, and nonparticipating writers are not
 fenced. Neither this marker nor a successful poll proves session drain or

@@ -237,18 +237,29 @@ func readSessionPaths() ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("pppvpn: read session claim: %w", err)
 		}
-		// An interrupted claim can be empty before a rename, after one, or
-		// after deletion. The directory alone cannot distinguish these states
-		// or prove that the source and its committed counters survived a crash.
-		if len(entries) == 0 {
-			return nil, &ClaimPendingError{Path: dir}
-		}
+		// Before/after a rename or deletion a claim may contain no record.
+		// An origin alone cannot prove whether a record survived a crash.
+		hasRecord, hasOrigin := false, false
 		for _, entry := range entries {
-			if entry.Name() != "record" || entry.IsDir() {
+			if entry.IsDir() {
 				return nil, fmt.Errorf("pppvpn: invalid session claim entry %q", entry.Name())
 			}
-			paths = append(paths, filepath.Join(rootDir(), dir, entry.Name()))
+			switch entry.Name() {
+			case "record":
+				hasRecord = true
+			case "origin":
+				hasOrigin = true
+			default:
+				return nil, fmt.Errorf("pppvpn: invalid session claim entry %q", entry.Name())
+			}
 		}
+		if !hasRecord {
+			return nil, &ClaimPendingError{Path: dir}
+		}
+		if !hasOrigin {
+			return nil, fmt.Errorf("pppvpn: session claim %q lacks origin; manual review required", dir)
+		}
+		paths = append(paths, filepath.Join(rootDir(), dir, "record"))
 	}
 	return paths, nil
 }
@@ -286,6 +297,10 @@ func acknowledgeClosedSample(sample closedSample) error {
 	if err != nil {
 		return err
 	}
+	origin, err := sessionOrigin(root, source, sample.session)
+	if err != nil {
+		return fmt.Errorf("pppvpn: verify claim source: %w", err)
+	}
 	staged := "sessions-staged"
 	if err := root.MkdirAll(staged, 0700); err != nil {
 		return fmt.Errorf("pppvpn: create claim directory: %w", err)
@@ -315,6 +330,25 @@ func acknowledgeClosedSample(sample closedSample) error {
 	if err := syncPPPDirectory(root, staged); err != nil {
 		return err
 	}
+	// Persist the original hook-controlled location before moving the record.
+	// A crash at any later phase leaves either validated provenance or a claim
+	// that blocks for manual investigation.
+	originFile, err := root.OpenFile(filepath.Join(dir, "origin"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return fmt.Errorf("pppvpn: create claim origin: %w", err)
+	}
+	_, writeErr := io.WriteString(originFile, filepath.ToSlash(origin)+"\n")
+	var syncErr error
+	if writeErr == nil {
+		syncErr = originFile.Sync()
+	}
+	closeErr := originFile.Close()
+	if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
+		return fmt.Errorf("pppvpn: persist claim origin: %w", err)
+	}
+	if err := syncPPPDirectory(root, dir); err != nil {
+		return err
+	}
 	claimed := filepath.Join(dir, "record")
 	if err := root.Rename(source, claimed); err != nil {
 		return fmt.Errorf("pppvpn: claim session record %q: %w", sample.path, err)
@@ -329,6 +363,12 @@ func acknowledgeClosedSample(sample closedSample) error {
 	// empty directory only after the destination and source are durable.
 	sourceDir := filepath.Dir(source)
 	if filepath.Dir(sourceDir) == staged && filepath.Base(source) == "record" {
+		if err := root.Remove(filepath.Join(sourceDir, "origin")); err != nil {
+			return fmt.Errorf("pppvpn: remove recovered claim origin: %w", err)
+		}
+		if err := syncPPPDirectory(root, sourceDir); err != nil {
+			return err
+		}
 		if err := root.Remove(sourceDir); err != nil {
 			return fmt.Errorf("pppvpn: remove recovered session claim: %w", err)
 		}
@@ -345,6 +385,12 @@ func acknowledgeClosedSample(sample closedSample) error {
 	}
 	if err := root.Remove(claimed); err != nil {
 		return fmt.Errorf("pppvpn: remove committed session claim: %w", err)
+	}
+	if err := syncPPPDirectory(root, dir); err != nil {
+		return err
+	}
+	if err := root.Remove(filepath.Join(dir, "origin")); err != nil {
+		return fmt.Errorf("pppvpn: remove committed claim origin: %w", err)
 	}
 	if err := syncPPPDirectory(root, dir); err != nil {
 		return err
@@ -418,14 +464,10 @@ func parseSessionGroup(group string) (int, error) {
 	return id, nil
 }
 
-// Staged claims have lost their original path. They can be retried as closed
-// samples but their scope cannot be authenticated by the claim name.
+// validateSessionPath verifies the original hook-controlled spool location.
 func validateSessionPath(rel string, session pppSession) error {
 	parts := strings.Split(filepath.ToSlash(rel), "/")
-	if len(parts) == 3 && parts[0] == "sessions-staged" && strings.HasPrefix(parts[1], "claim-") && parts[2] == "record" && session.closed {
-		return nil
-	}
-	if len(parts) != 3 || parts[0] != "sessions" {
+	if !filepath.IsLocal(rel) || filepath.Clean(rel) != rel || len(parts) != 3 || parts[0] != "sessions" {
 		return errors.New("pppvpn: invalid session record location")
 	}
 	id, err := parseSessionGroup(parts[1])
@@ -445,6 +487,39 @@ func validateSessionPath(rel string, session pppSession) error {
 	return nil
 }
 
+// sessionOrigin resolves a claim's durable, root-relative source path. The
+// private claim directory and its writer must be trusted; this is provenance
+// evidence, not authentication against a privileged or malicious writer.
+func sessionOrigin(root *os.Root, rel string, session pppSession) (string, error) {
+	parts := strings.Split(filepath.ToSlash(rel), "/")
+	if len(parts) != 3 || parts[0] != "sessions-staged" {
+		if err := validateSessionPath(rel, session); err != nil {
+			return "", err
+		}
+		return rel, nil
+	}
+	if !strings.HasPrefix(parts[1], "claim-") || parts[2] != "record" || !session.closed {
+		return "", errors.New("pppvpn: invalid staged session location")
+	}
+	file, err := openPPPRecord(root, filepath.Join(filepath.Dir(rel), "origin"))
+	if err != nil {
+		return "", fmt.Errorf("pppvpn: inspect session claim origin: %w", err)
+	}
+	data, readErr := io.ReadAll(io.LimitReader(file, 4097))
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil {
+		return "", fmt.Errorf("pppvpn: read session claim origin: %w", errors.Join(readErr, closeErr))
+	}
+	if len(data) == 0 || len(data) > 4096 || data[len(data)-1] != '\n' || strings.Count(string(data), "\n") != 1 || !utf8.Valid(data) {
+		return "", errors.New("pppvpn: malformed session claim origin")
+	}
+	origin := filepath.FromSlash(string(data[:len(data)-1]))
+	if err := validateSessionPath(origin, session); err != nil {
+		return "", fmt.Errorf("pppvpn: session claim origin mismatch: %w", err)
+	}
+	return origin, nil
+}
+
 func readPPPSession(path string) (pppSession, error) {
 	rel, err := pppRelativePath(path)
 	if err != nil {
@@ -459,7 +534,7 @@ func readPPPSession(path string) (pppSession, error) {
 	if err != nil {
 		return pppSession{}, err
 	}
-	if err := validateSessionPath(rel, session); err != nil {
+	if _, err := sessionOrigin(root, rel, session); err != nil {
 		return pppSession{}, err
 	}
 	return session, nil

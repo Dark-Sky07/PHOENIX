@@ -187,6 +187,14 @@ func TestAckTrafficRetainsReplacementAndRepolls(t *testing.T) {
 	if err := AckTraffic(batch.Token); err == nil {
 		t.Fatal("changed session was acknowledged")
 	}
+	claims, err := os.ReadDir(filepath.Join(root, "sessions-staged"))
+	if err != nil || len(claims) != 1 {
+		t.Fatalf("expected one retained claim: %v %v", claims, err)
+	}
+	origin, err := os.ReadFile(filepath.Join(root, "sessions-staged", claims[0].Name(), "origin"))
+	if err != nil || string(origin) != "sessions/pptp-7/ppp0.closed.session\n" {
+		t.Fatalf("claim origin not retained: %q %v", origin, err)
+	}
 	// Simulate panel restart: claimed records must be rediscovered without memory.
 	trafficCollector = pppTrafficCollector{}
 	retry, err := CollectTraffic()
@@ -378,6 +386,58 @@ func TestSessionSpoolIdentityMismatchFailsClosed(t *testing.T) {
 	}
 }
 
+func TestSessionClaimRequiresMatchingDurableOrigin(t *testing.T) {
+	cases := []struct{ name, origin string }{
+		{"legacy-missing", ""},
+		{"wrong-inbound", "sessions/pptp-8/ppp0.closed.session\n"},
+		{"wrong-session", "sessions/pptp-7/ppp0.closed.other\n"},
+		{"outside", "../pptp-7/ppp0.closed.session\n"},
+		{"unterminated", "sessions/pptp-7/ppp0.closed.session"},
+		{"extra-lines", "sessions/pptp-7/ppp0.closed.session\nextra\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := setupTrafficTest(t)
+			dir := filepath.Join(root, "sessions-staged", "claim-test")
+			if err := os.MkdirAll(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, "record")
+			data := "closed\tppp0\talice\t10\t20\tsession\t7\n"
+			if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if tc.origin != "" {
+				if err := os.WriteFile(filepath.Join(dir, "origin"), []byte(tc.origin), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if batch, err := CollectTraffic(); err == nil || batch != nil {
+				t.Fatalf("unverified claim accepted: batch=%+v err=%v", batch, err)
+			}
+			if got, err := os.ReadFile(path); err != nil || string(got) != data {
+				t.Fatalf("claim evidence altered: %q %v", got, err)
+			}
+		})
+	}
+}
+
+func TestOriginOnlyClaimRemainsPending(t *testing.T) {
+	root := setupTrafficTest(t)
+	dir := filepath.Join(root, "sessions-staged", "claim-test")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "origin"), []byte("sessions/pptp-7/ppp0.closed.session\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := CollectTraffic()
+	var pending *ClaimPendingError
+	if !errors.As(err, &pending) {
+		t.Fatalf("origin-only claim did not defer: %v", err)
+	}
+}
+
 func TestEmptyInvalidSessionGroupIsNotIgnored(t *testing.T) {
 	root := setupTrafficTest(t)
 	if err := os.MkdirAll(filepath.Join(root, "sessions", "pptp-007"), 0700); err != nil {
@@ -396,6 +456,9 @@ func TestStagedClaimBlocksScopedRemovalWithoutTrustedGroup(t *testing.T) {
 	}
 	path := filepath.Join(dir, "record")
 	if err := os.WriteFile(path, []byte("closed\tppp0\tbob\t10\t20\tsession\t8\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "origin"), []byte("sessions/pptp-8/ppp0.closed.session\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := CheckClientSessionEvidence([]string{"alice"}, []int{7}); err == nil {
