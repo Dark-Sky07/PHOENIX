@@ -65,6 +65,51 @@ func TestCorruptNegativeResellerTrafficBlocksAllocationAndRenewal(t *testing.T) 
 	}
 }
 
+func TestNonResellerRenewalPreservesNegativeEvidenceBeforeDisable(t *testing.T) {
+	for _, kind := range []string{"local", "global"} {
+		t.Run(kind, func(t *testing.T) {
+			_, client := seedResellerRenewal(t)
+			db := database.GetDB()
+			if err := db.Where("email = ?", client.Email).Delete(&model.ResellerClient{}).Error; err != nil {
+				t.Fatal(err)
+			}
+			var original xray.ClientTraffic
+			if err := db.Where("email = ?", client.Email).First(&original).Error; err != nil {
+				t.Fatal(err)
+			}
+			if kind == "local" {
+				if err := db.Model(&xray.ClientTraffic{}).Where("id = ?", original.Id).Update("up", -1).Error; err != nil {
+					t.Fatal(err)
+				}
+			} else if err := db.Create(&model.ClientGlobalTraffic{MasterGuid: "invalid-master", Email: client.Email, Up: -5, Down: 20}).Error; err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Transaction(func(tx *gorm.DB) error { _, _, err := (&InboundService{}).autoRenewClients(tx); return err }); err == nil {
+				t.Fatal("renewal accepted invalid non-reseller evidence")
+			}
+			if _, disabled, err := (&InboundService{}).AddTraffic(nil, nil); err != nil || !disabled {
+				t.Fatalf("traffic tick did not disable affected client: disabled=%v err=%v", disabled, err)
+			}
+			var saved xray.ClientTraffic
+			if err := db.Where("id = ?", original.Id).First(&saved).Error; err != nil {
+				t.Fatal(err)
+			}
+			if saved.Enable || saved.ExpiryTime != original.ExpiryTime || saved.Down != original.Down {
+				t.Fatalf("renewal changed traffic or enabled client: %+v", saved)
+			}
+			if kind == "local" && saved.Up != -1 {
+				t.Fatalf("local evidence lost: %+v", saved)
+			}
+			if kind == "global" {
+				var global model.ClientGlobalTraffic
+				if err := db.Where("email = ?", client.Email).Take(&global).Error; err != nil || global.Up != -5 || global.Down != 20 {
+					t.Fatalf("global evidence lost: %+v %v", global, err)
+				}
+			}
+		})
+	}
+}
+
 func TestTrafficWriterDoesNotEraseCorruptClientCounter(t *testing.T) {
 	_, client := seedResellerRenewal(t)
 	db := database.GetDB()

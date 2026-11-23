@@ -682,6 +682,27 @@ func (s *InboundService) autoRenewClients(tx *gorm.DB) (bool, int64, error) {
 	if len(traffics) == 0 {
 		return false, 0, nil
 	}
+	// Renewal precedes disabling in the traffic transaction. Never reset a
+	// corrupt local counter or delete a corrupt upstream snapshot before that
+	// later fail-closed check gets to see it. This applies to non-resellers too.
+	candidateEmails := make([]string, 0, len(traffics))
+	for _, traffic := range traffics {
+		if traffic.Up < 0 || traffic.Down < 0 {
+			return false, 0, fmt.Errorf("negative renewal traffic for %q requires reconciliation", traffic.Email)
+		}
+		candidateEmails = append(candidateEmails, transferEmailKey(traffic.Email))
+	}
+	for _, batch := range chunkStrings(candidateEmails, sqliteMaxVars) {
+		var count int64
+		if err := tx.Model(&model.ClientGlobalTraffic{}).
+			Where("LOWER(TRIM(email)) IN ? AND (up < 0 OR down < 0)", batch).
+			Count(&count).Error; err != nil {
+			return false, 0, fmt.Errorf("inspect renewal global traffic: %w", err)
+		}
+		if count > 0 {
+			return false, 0, errors.New("negative renewal global traffic requires reconciliation")
+		}
+	}
 
 	renewalSchedules, err := loadCalendarRenewalSchedules(tx, traffics)
 	if err != nil {
