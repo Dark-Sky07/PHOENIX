@@ -1002,3 +1002,16 @@ creates/syncs its marker, detect a hook that never started, fence hooks that
 start after the final check, or prove shutdown and final accounting. Hook sync
 requires a filesystem and `sync` implementation that support these operations;
 failures leave the operation fenced when their evidence can be written.
+
+Until a per-client SSTP/PPTP drain and final accounting protocol exists, known
+local PPP attachments block client deletion and detach, including disabled
+inbounds. Matching active, closed, or staged PPP spool records also block
+removal even if database associations have drifted. Admin bulk deletion
+preflights its whole batch; lower-level detach and reseller archive/unassignment
+paths recheck the guard. This is an intentionally restrictive interim fence: it
+does **not** disconnect the user, and there is not yet an automated verified
+reconciliation/override flow to resume these removals. Do not remove records or
+associations merely to bypass it. An absent spool or association is not proof
+that no session exists; nonparticipating writers, concurrent hook/attachment
+changes and remote nodes remain outside this local check. Other protocols and
+other removal routes still need their own drain and accounting guarantees.

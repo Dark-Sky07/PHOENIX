@@ -692,6 +692,10 @@ func (s *ClientService) BulkDelete(inboundSvc *InboundService, emails []string, 
 		return result, false, err
 	}
 
+	if err := rejectUnprovenPPPRemoval(db, cleanEmails, nil); err != nil {
+		return result, false, err
+	}
+
 	var records []model.ClientRecord
 	for _, batch := range chunkStrings(cleanEmails, sqlInChunk) {
 		var rows []model.ClientRecord
@@ -982,6 +986,13 @@ func (s *ClientService) bulkDelInboundClients(
 		if !foundEmails[email] {
 			res.perEmailSkipped[email] = "Client Not Found In Inbound"
 		}
+	}
+
+	if err := rejectUnprovenPPPRemoval(database.GetDB(), emails, []int{inboundId}); err != nil {
+		for email := range foundEmails {
+			res.perEmailSkipped[email] = err.Error()
+		}
+		return res
 	}
 
 	db := database.GetDB()

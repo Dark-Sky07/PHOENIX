@@ -412,3 +412,57 @@ func readCounter(path string) (uint64, error) {
 	}
 	return strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
 }
+
+// CheckClientSessionEvidence blocks destructive accounting operations while a
+// matching local spool record exists, whether active, closed or staged. A
+// missing record does not prove that no hook, session or unpolled usage exists.
+// scope == nil checks all inbound IDs; a non-nil empty scope checks none.
+func CheckClientSessionEvidence(emails []string, scope []int) error {
+	if scope != nil && len(scope) == 0 {
+		return nil
+	}
+	wanted := make(map[string]bool, len(emails))
+	for _, email := range emails {
+		if key := strings.ToLower(strings.TrimSpace(email)); key != "" {
+			wanted[key] = true
+		}
+	}
+	if len(wanted) == 0 {
+		return nil
+	}
+	if err := GetManager().CheckUntrackedRuntime(); err != nil {
+		return err
+	}
+	if err := CheckHookIncidents(); err != nil {
+		return err
+	}
+	allowed := make(map[int]bool, len(scope))
+	for _, id := range scope {
+		allowed[id] = true
+	}
+	paths, err := readSessionPaths()
+	if err != nil {
+		return err
+	}
+	for _, path := range paths {
+		name := filepath.Base(path)
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		// A partially published file can contain usage or identity not yet
+		// readable; do not guess whether it belongs to these clients.
+		if _, suffix, ok := strings.Cut(name, ".tmp."); ok {
+			if _, err := strconv.ParseUint(suffix, 10, 64); err == nil {
+				return fmt.Errorf("pppvpn: unfinished session record %q", path)
+			}
+		}
+		session, err := readPPPSession(path)
+		if err != nil {
+			return fmt.Errorf("pppvpn: inspect session evidence %q: %w", path, err)
+		}
+		if wanted[strings.ToLower(strings.TrimSpace(session.email))] && (scope == nil || allowed[session.inboundID]) {
+			return fmt.Errorf("pppvpn: session evidence for inbound %d requires manual reconciliation before removal", session.inboundID)
+		}
+	}
+	return nil
+}

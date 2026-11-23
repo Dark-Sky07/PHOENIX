@@ -43,6 +43,9 @@ func archiveResellerClientUsageTx(tx *gorm.DB, client *model.ClientRecord, resel
 	if len(mappings) == 0 {
 		return nil
 	}
+	if err := rejectUnprovenPPPRemoval(tx, []string{client.Email}, nil); err != nil {
+		return err
+	}
 	if err := checkPPPAndL2TPAccountingIncidents(tx); err != nil {
 		return err
 	}

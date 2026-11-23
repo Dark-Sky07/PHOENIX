@@ -131,6 +131,14 @@ func (s *ClientService) delInboundClients(inboundSvc *InboundService, inboundId 
 		return false, nil
 	}
 
+	removedEmailsForGuard := make([]string, 0, len(removed))
+	for _, r := range removed {
+		removedEmailsForGuard = append(removedEmailsForGuard, r.email)
+	}
+	if err := rejectUnprovenPPPRemoval(database.GetDB(), removedEmailsForGuard, []int{inboundId}); err != nil {
+		return false, err
+	}
+
 	db := database.GetDB()
 	newClients = compactOrphans(db, newClients)
 	if newClients == nil {
@@ -1047,6 +1055,9 @@ func (s *ClientService) DelInboundClientByEmail(inboundSvc *InboundService, inbo
 
 	if !found {
 		return false, fmt.Errorf("%w for email: %s", ErrClientNotInInbound, email)
+	}
+	if err := rejectUnprovenPPPRemoval(database.GetDB(), []string{email}, []int{inboundId}); err != nil {
+		return false, err
 	}
 	db := database.GetDB()
 	newClients = compactOrphans(db, newClients)
