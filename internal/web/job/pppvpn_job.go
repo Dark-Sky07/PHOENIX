@@ -3,7 +3,6 @@ package job
 import (
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
@@ -152,16 +151,10 @@ func (j *PPPVPNJob) reconcile() bool {
 			logger.Warningf("pppvpn job: list clients for inbound %d failed: %v", ib.Id, err)
 			return false
 		}
-		disabled := make(map[string]bool, len(ib.ClientStats))
-		for _, stat := range ib.ClientStats {
-			disabled[strings.ToLower(strings.TrimSpace(stat.Email))] = !stat.Enable
-		}
-		active := make([]model.Client, 0, len(clients))
-		for _, client := range clients {
-			if !client.Enable || disabled[strings.ToLower(strings.TrimSpace(client.Email))] {
-				continue
-			}
-			active = append(active, client)
+		active, err := j.inboundService.FilterDaemonAccountingClients(clients)
+		if err != nil {
+			logger.Warningf("pppvpn job: filter accounting identities for inbound %d failed: %v", ib.Id, err)
+			return false
 		}
 		inst, ok := pppvpn.InstanceFromInbound(ib, active)
 		if !ok {

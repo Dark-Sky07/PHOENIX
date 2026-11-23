@@ -3,7 +3,6 @@ package job
 import (
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
@@ -33,21 +32,12 @@ func (j *L2TPJob) enabledClientsForInbound(ib *model.Inbound) ([]model.Client, b
 		// should it make Reconcile([]) tear down a healthy current daemon.
 		return nil, false
 	}
-	enableMap := make(map[string]bool, len(ib.ClientStats))
-	for _, stat := range ib.ClientStats {
-		enableMap[strings.ToLower(strings.TrimSpace(stat.Email))] = stat.Enable
+	filtered, err := j.inboundService.FilterDaemonAccountingClients(clients)
+	if err != nil {
+		logger.Warning("l2tp job: filter accounting identities failed:", err)
+		return nil, false
 	}
-	out := make([]model.Client, 0, len(clients))
-	for _, client := range clients {
-		if !client.Enable {
-			continue
-		}
-		if enabled, exists := enableMap[strings.ToLower(strings.TrimSpace(client.Email))]; exists && !enabled {
-			continue
-		}
-		out = append(out, client)
-	}
-	return out, true
+	return filtered, true
 }
 
 // Multiple scheduler instances and dashboard actions share one collector.

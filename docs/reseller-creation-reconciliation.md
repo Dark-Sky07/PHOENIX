@@ -108,9 +108,14 @@ inbound edits now reject a failed
 traffic-filter query instead of applying raw, unfiltered credentials; creation
 uses the same rule. TUIC, OpenVPN and PPP daemon filters omit credentials with
 missing, ambiguous, or SQL-unresolvable normalized traffic identities rather than stopping the
-entire node. The dashboard reports a point-in-time count for enabled local
-daemon configurations and warns when that diagnostic is unavailable; it does not
-inventory old sessions, disabled inbounds, remote hosts or historical usage.
+entire node. Periodic OpenVPN, L2TP, SSTP and PPTP jobs now apply the same
+identity policy to canonical linked clients rather than trusting preloaded
+traffic rows or raw inbound credentials. A failed database check defers that
+reconciliation; an empty successful filter remains explicitly empty. This does
+not prove old daemon sessions stopped or that their final traffic was recorded.
+The dashboard reports a point-in-time count for enabled local daemon settings
+and warns when that diagnostic is unavailable; it does not inventory canonical-
+link-only clients, old sessions, disabled inbounds, remote hosts or historical usage.
 Runtime apply failures request recovery. Updating an existing client traffic row to
 an enabled state also checks the proposed quota and expiry against local and
 upstream counters, rejecting exhausted or corrupt values rather than silently

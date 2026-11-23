@@ -1,8 +1,6 @@
 package job
 
 import (
-	"strings"
-
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
 	"github.com/Dark-Sky07/phoenix/internal/logger"
 	"github.com/Dark-Sky07/phoenix/internal/openvpn"
@@ -42,20 +40,14 @@ func (j *OpenvpnJob) enabledClientsForInbound(ib *model.Inbound) ([]string, bool
 		// the current daemon configuration intact until the next healthy poll.
 		return nil, false
 	}
-	enableMap := make(map[string]bool, len(ib.ClientStats))
-	for _, ct := range ib.ClientStats {
-		enableMap[strings.ToLower(strings.TrimSpace(ct.Email))] = ct.Enable
+	clients, err := j.inboundService.FilterDaemonAccountingClients(dbClients)
+	if err != nil {
+		logger.Warning("openvpn job: filter accounting identities failed:", err)
+		return nil, false
 	}
-	emails := make([]string, 0, len(dbClients))
-	for i := range dbClients {
-		c := dbClients[i]
-		if enable, exists := enableMap[strings.ToLower(strings.TrimSpace(c.Email))]; exists && !enable {
-			continue
-		}
-		if !c.Enable {
-			continue
-		}
-		emails = append(emails, c.Email)
+	emails := make([]string, 0, len(clients))
+	for _, client := range clients {
+		emails = append(emails, client.Email)
 	}
 	return emails, true
 }

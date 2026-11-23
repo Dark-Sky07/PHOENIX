@@ -62,11 +62,18 @@ func TestTuicCommittedPollRecoveryPostgres(t *testing.T) {
 	}
 	// PostgreSQL's trim does not remove tabs; this colliding row must still
 	// block a fresh batch and leave neither a receipt nor changed counters.
+	canonical := []model.Client{{Email: row.Email, Enable: true}}
+	if filtered, err := (&service.InboundService{}).FilterDaemonAccountingClients(canonical); err != nil || len(filtered) != 1 {
+		t.Fatalf("valid daemon identity rejected: %+v %v", filtered, err)
+	}
 	other := xray.ClientTraffic{Email: "\t" + row.Email + "\n", Enable: true}
 	if err := db.Create(&other).Error; err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Delete(&other).Error })
+	if filtered, err := (&service.InboundService{}).FilterDaemonAccountingClients(canonical); err != nil || len(filtered) != 0 || filtered == nil {
+		t.Fatalf("ambiguous daemon identity accepted or filter returned nil: %+v %v", filtered, err)
+	}
 	badID := uuid.NewString()
 	t.Cleanup(func() { _ = db.Where("id = ?", badID).Delete(&model.TuicTrafficReceipt{}).Error })
 	if err := (&service.InboundService{}).AddTuicTrafficBatch(badID, batch.Deltas); err == nil {
