@@ -309,7 +309,10 @@ func (a *ServerController) updateOpenVPNService(c *gin.Context) {
 }
 
 func (a *ServerController) stopL2TPService(c *gin.Context) {
-	l2tp.GetManager().StopManually()
+	if err := l2tp.GetManager().StopManually(); err != nil {
+		jsonMsg(c, "L2TP service stop failed", err)
+		return
+	}
 	jsonMsg(c, "L2TP service stopped", nil)
 }
 
@@ -320,7 +323,10 @@ func (a *ServerController) startL2TPService(c *gin.Context) {
 }
 
 func (a *ServerController) restartL2TPService(c *gin.Context) {
-	l2tp.GetManager().Restart()
+	if err := l2tp.GetManager().Restart(); err != nil {
+		jsonMsg(c, "L2TP service restart failed", err)
+		return
+	}
 	job.NewL2TPJob().Run()
 	jsonMsg(c, "L2TP service restarted", nil)
 }

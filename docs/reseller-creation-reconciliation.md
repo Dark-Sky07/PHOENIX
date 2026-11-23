@@ -809,3 +809,12 @@ replay on another host is not guaranteed, and the Xray-named marker/journal is
 shared with these L2TP samples. A real session/counter drain and durable
 session baselines remain necessary before reconciliation or quota release. Do
 not infer missing bytes or treat a stopped parent daemon as proof of completeness.
+
+L2TP daemon replacement and checked removal now preserve their tracked process,
+interface baselines and runtime directory if either tracked strongSwan/xl2tpd
+parent exit cannot be observed. Dashboard stop/restart and local runtime removal
+report that error; periodic reconciliation retains state and reports it in the
+runtime status. This protection is process-local: orphan cleanup after a panel
+restart is not covered. Parent exit is not evidence that pppd children, hooks,
+active sessions or outstanding traffic have drained, so it does not authorize
+quota release or claim that removal disconnected every active user.

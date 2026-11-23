@@ -48,8 +48,7 @@ func reconcilePPPVPNRuntime(inbound *model.Inbound) error {
 	}
 	if inbound.Protocol == model.L2TP {
 		if !inbound.Enable {
-			l2tp.GetManager().Remove(inbound.Id)
-			return nil
+			return l2tp.GetManager().RemoveChecked(inbound.Id)
 		}
 		instance, ok := l2tp.InstanceFromInbound(inbound, nil)
 		if !ok {

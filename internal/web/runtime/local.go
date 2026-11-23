@@ -150,8 +150,7 @@ func (l *Local) DelInbound(_ context.Context, ib *model.Inbound) error {
 		return nil
 	}
 	if ib.Protocol == model.L2TP {
-		l2tp.GetManager().Remove(ib.Id)
-		return nil
+		return l2tp.GetManager().RemoveChecked(ib.Id)
 	}
 	if ib.Protocol == model.SSTP || ib.Protocol == model.PPTP {
 		return pppvpn.GetManager().RemoveChecked(ib.Id)
@@ -188,8 +187,7 @@ func (l *Local) UpdateInbound(ctx context.Context, oldIb, newIb *model.Inbound) 
 	}
 	if oldIb.Protocol == model.L2TP && newIb.Protocol == model.L2TP {
 		if !newIb.Enable {
-			l2tp.GetManager().Remove(newIb.Id)
-			return nil
+			return l2tp.GetManager().RemoveChecked(newIb.Id)
 		}
 		return l.AddInbound(ctx, newIb)
 	}

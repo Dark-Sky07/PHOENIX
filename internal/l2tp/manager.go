@@ -105,7 +105,9 @@ func (m *Manager) ensureLocked(inst Instance) error {
 		return nil
 	}
 	if m.proc != nil {
-		_ = m.proc.proc.Stop()
+		if err := m.proc.proc.Stop(); err != nil {
+			return fmt.Errorf("stop l2tp daemon group for inbound %d: %w", m.id, err)
+		}
 		GetNetworkManager().Remove(m.id)
 		removeStrongSwanRuntime(m.id)
 		_ = clearSystemChapSecrets()
@@ -151,7 +153,11 @@ func (m *Manager) Reconcile(desired []Instance) {
 	defer m.mu.Unlock()
 	if m.manualStop {
 		if m.proc != nil {
-			_ = m.proc.proc.Stop()
+			if err := m.proc.proc.Stop(); err != nil {
+				m.lastError = err.Error()
+				logger.Warningf("l2tp: cannot reconcile stopped daemon group: %v", err)
+				return
+			}
 			GetNetworkManager().Remove(m.id)
 			removeStrongSwanRuntime(m.id)
 			_ = os.RemoveAll(dataDirForID(m.id))
@@ -166,7 +172,11 @@ func (m *Manager) Reconcile(desired []Instance) {
 	if len(desired) == 0 {
 		m.lastError = ""
 		if m.proc != nil {
-			_ = m.proc.proc.Stop()
+			if err := m.proc.proc.Stop(); err != nil {
+				m.lastError = err.Error()
+				logger.Warningf("l2tp: cannot reconcile stopped daemon group: %v", err)
+				return
+			}
 			GetNetworkManager().Remove(m.id)
 			removeStrongSwanRuntime(m.id)
 			_ = os.RemoveAll(dataDirForID(m.id))
@@ -185,7 +195,9 @@ func (m *Manager) Reconcile(desired []Instance) {
 	}
 	inst := desired[0]
 	err := m.ensureLocked(inst)
-	cleanupOrphanData(inst.Id)
+	if err == nil {
+		cleanupOrphanData(inst.Id)
+	}
 	if err != nil {
 		m.lastError = err.Error()
 		if m.proc != nil && time.Since(m.proc.lastErrAt) < time.Minute {
@@ -202,13 +214,16 @@ func (m *Manager) Reconcile(desired []Instance) {
 
 // StopManually stops the L2TP/IPsec daemon group and holds reconciliation
 // until Resume is called by the dashboard.
-func (m *Manager) StopManually() {
+func (m *Manager) StopManually() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.manualStop = true
 	m.lastError = ""
 	if m.proc != nil {
-		_ = m.proc.proc.Stop()
+		if err := m.proc.proc.Stop(); err != nil {
+			m.lastError = err.Error()
+			return fmt.Errorf("stop l2tp daemon group for inbound %d: %w", m.id, err)
+		}
 		GetNetworkManager().Remove(m.id)
 		removeStrongSwanRuntime(m.id)
 		_ = os.RemoveAll(dataDirForID(m.id))
@@ -219,6 +234,7 @@ func (m *Manager) StopManually() {
 	cleanupOrphanData(0)
 	GetNetworkManager().RemoveAll()
 	_ = clearSystemChapSecrets()
+	return nil
 }
 
 // Resume clears an explicit dashboard stop request. The next reconcile tick
@@ -231,13 +247,16 @@ func (m *Manager) Resume() {
 }
 
 // Restart stops the current daemon group while leaving reconciliation enabled.
-func (m *Manager) Restart() {
+func (m *Manager) Restart() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.manualStop = false
 	m.lastError = ""
 	if m.proc != nil {
-		_ = m.proc.proc.Stop()
+		if err := m.proc.proc.Stop(); err != nil {
+			m.lastError = err.Error()
+			return fmt.Errorf("stop l2tp daemon group for inbound %d: %w", m.id, err)
+		}
 		GetNetworkManager().Remove(m.id)
 		removeStrongSwanRuntime(m.id)
 		_ = os.RemoveAll(dataDirForID(m.id))
@@ -248,6 +267,7 @@ func (m *Manager) Restart() {
 	cleanupOrphanData(0)
 	GetNetworkManager().RemoveAll()
 	_ = clearSystemChapSecrets()
+	return nil
 }
 
 // Status returns the secret-free state used by the dashboard.
@@ -265,11 +285,14 @@ func (m *Manager) Status() RuntimeStatus {
 	return status
 }
 
-func (m *Manager) Remove(id int) {
+func (m *Manager) RemoveChecked(id int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.proc != nil && (id == 0 || m.id == id) {
-		_ = m.proc.proc.Stop()
+		if err := m.proc.proc.Stop(); err != nil {
+			m.lastError = err.Error()
+			return fmt.Errorf("stop l2tp daemon group for inbound %d: %w", m.id, err)
+		}
 		GetNetworkManager().Remove(m.id)
 		removeStrongSwanRuntime(m.id)
 		_ = os.RemoveAll(dataDirForID(m.id))
@@ -282,7 +305,7 @@ func (m *Manager) Remove(id int) {
 		if err := clearSystemChapSecrets(); err != nil {
 			logger.Warningf("l2tp: failed to clear system PPP chap-secrets: %v", err)
 		}
-		return
+		return nil
 	}
 	if m.proc == nil || m.id == id {
 		stopOrphan(id)
@@ -295,6 +318,13 @@ func (m *Manager) Remove(id int) {
 			logger.Warningf("l2tp: failed to clear system PPP chap-secrets: %v", err)
 		}
 	}
+	return nil
+}
+
+func (m *Manager) Remove(id int) {
+	if err := m.RemoveChecked(id); err != nil {
+		logger.Warningf("l2tp: remove inbound %d failed: %v", id, err)
+	}
 }
 
 func (m *Manager) StopAll() {
@@ -302,7 +332,10 @@ func (m *Manager) StopAll() {
 	m.manualStop = false
 	m.lastError = ""
 	m.mu.Unlock()
-	m.Remove(0)
+	if err := m.RemoveChecked(0); err != nil {
+		logger.Warningf("l2tp: stop all failed: %v", err)
+		return
+	}
 	GetNetworkManager().RemoveAll()
 }
 
