@@ -3,6 +3,7 @@ package job
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/Dark-Sky07/phoenix/internal/database"
@@ -62,6 +63,149 @@ func TestXrayJournalSurvivesDatabaseFailureAndReplaysOnce(t *testing.T) {
 	var count int64
 	if err := db.Model(&model.XrayTrafficReceipt{}).Count(&count).Error; err != nil || count != 1 {
 		t.Fatalf("receipt not retained = %d, %v", count, err)
+	}
+}
+
+func TestXrayJournalRejectsChangedRetryPayload(t *testing.T) {
+	setupIntegrationDB(t)
+	db := database.GetDB()
+	row := xray.ClientTraffic{Email: "journal-payload@example.test", Enable: true}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	j := NewXrayTrafficJob()
+	batch := &xrayTrafficBatch{id: uuid.NewString(), clients: []*xray.ClientTraffic{{Email: row.Email, Up: 123}}}
+	var err error
+	batch.identities, err = j.inboundService.CaptureXrayTrafficIdentities(batch.clients)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.BeginXrayPoll(batch.id); err != nil {
+		t.Fatal(err)
+	}
+	if err := storeXrayBatch(batch); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(xrayJournalDir(), batch.id+".json")
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := storeXrayBatch(batch); err != nil {
+		t.Fatalf("identical retry rejected: %v", err)
+	}
+	batch.clients[0].Up = 456
+	if _, _, err := j.applyJournaledXrayBatch(batch); err == nil {
+		t.Fatal("changed retry payload accepted")
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != string(original) {
+		t.Fatalf("original journal changed: %v", err)
+	}
+	if err := service.VerifyXrayPollMarker(batch.id); err != nil {
+		t.Fatalf("poll marker lost: %v", err)
+	}
+	if err := db.First(&row, row.Id).Error; err != nil || row.Up != 0 {
+		t.Fatalf("changed retry charged: %+v %v", row, err)
+	}
+	var receipts int64
+	if err := db.Model(&model.XrayTrafficReceipt{}).Where("id = ?", batch.id).Count(&receipts).Error; err != nil || receipts != 0 {
+		t.Fatalf("receipt created for rejected payload: %d %v", receipts, err)
+	}
+}
+
+func TestXrayJournalConcurrentConflictingPublication(t *testing.T) {
+	t.Setenv("XUI_DB_FOLDER", t.TempDir())
+	id := uuid.NewString()
+	batches := []*xrayTrafficBatch{
+		{id: id, identities: []service.XrayTrafficIdentity{}, clients: []*xray.ClientTraffic{{Email: "alice", Up: 1}}},
+		{id: id, identities: []service.XrayTrafficIdentity{}, clients: []*xray.ClientTraffic{{Email: "alice", Up: 2}}},
+	}
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	for _, batch := range batches {
+		wg.Add(1)
+		go func(batch *xrayTrafficBatch) {
+			defer wg.Done()
+			<-start
+			errs <- storeXrayBatch(batch)
+		}(batch)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	successes := 0
+	for err := range errs {
+		if err == nil {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("expected one published payload, got %d", successes)
+	}
+	// Exactly one original payload must match the retained evidence.
+	matches := 0
+	for _, batch := range batches {
+		if err := storeXrayBatch(batch); err == nil {
+			matches++
+		}
+	}
+	if matches != 1 {
+		t.Fatalf("retained journal matches %d payloads", matches)
+	}
+}
+
+func TestXrayJournalRejectsSymlinkOnRetryAndReplay(t *testing.T) {
+	setupIntegrationDB(t)
+	if err := os.MkdirAll(xrayJournalDir(), 0700); err != nil {
+		t.Fatal(err)
+	}
+	batch := &xrayTrafficBatch{id: uuid.NewString(), identities: []service.XrayTrafficIdentity{}}
+	target := filepath.Join(t.TempDir(), "outside")
+	if err := os.WriteFile(target, []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(xrayJournalDir(), batch.id+".json")
+	if err := os.Symlink(target, path); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := storeXrayBatch(batch); err == nil {
+		t.Fatal("symlink journal accepted on retry")
+	}
+	if err := NewXrayTrafficJob().replayXrayJournal(); err == nil {
+		t.Fatal("symlink journal accepted on recovery")
+	}
+	if got, err := os.ReadFile(target); err != nil || string(got) != "{}" {
+		t.Fatalf("symlink target changed: %q %v", got, err)
+	}
+}
+
+func TestXrayJournalRejectsOversizedEvidence(t *testing.T) {
+	setupIntegrationDB(t)
+	if err := os.MkdirAll(xrayJournalDir(), 0700); err != nil {
+		t.Fatal(err)
+	}
+	batch := &xrayTrafficBatch{id: uuid.NewString(), identities: []service.XrayTrafficIdentity{}}
+	path := filepath.Join(xrayJournalDir(), batch.id+".json")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(maxXrayJournalBytes + 1); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := storeXrayBatch(batch); err == nil {
+		t.Fatal("oversized journal accepted on retry")
+	}
+	if err := NewXrayTrafficJob().replayXrayJournal(); err == nil {
+		t.Fatal("oversized journal accepted on recovery")
+	}
+	if info, err := os.Stat(path); err != nil || info.Size() != maxXrayJournalBytes+1 {
+		t.Fatalf("oversized evidence changed: %v %v", info, err)
 	}
 }
 

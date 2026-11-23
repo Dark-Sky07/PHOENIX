@@ -39,7 +39,13 @@ an unchanged identity with no unique client-traffic destination now fails
 closed, including for non-reseller clients. The journal and poll marker remain
 for evidence-based review instead of silently dropping or multiplying usage.
 This does not infer ownership or recreate missing rows; the existing verified
-reseller-archive path remains available for changed identities.
+reseller-archive path remains available for changed identities. Reusing a local
+journal ID now requires the saved and retry payloads to match; publication does
+not overwrite another payload. Linux journal reads reject final symlinks and
+special files, and journal records are capped at 64 MiB; oversized records stay
+pending for review. This relies on a trusted journal directory and filesystem
+support for hard links. Receipts are still keyed by ID rather than a payload
+hash, so this check does not authenticate copies on other hosts or backups.
 
 The Xray poll now holds the participating reseller-allocation lock from before
 reading runtime counters until their database identity snapshot is captured. A

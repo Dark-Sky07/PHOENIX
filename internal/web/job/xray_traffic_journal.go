@@ -3,8 +3,10 @@ package job
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 
 	"github.com/Dark-Sky07/phoenix/internal/web/service"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
@@ -28,6 +30,49 @@ func validXrayBatchID(id string) bool {
 	return err == nil && parsed.String() == id
 }
 
+// Bound memory use on both creation and recovery; oversized snapshots remain
+// pending instead of being truncated or applied without their full evidence.
+const maxXrayJournalBytes = 64 << 20
+
+func readXrayJournal(dir, name string) ([]byte, error) {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	f, err := openXrayJournalRecord(root, name)
+	if err != nil {
+		return nil, err
+	}
+	data, readErr := io.ReadAll(io.LimitReader(f, maxXrayJournalBytes+1))
+	closeErr := f.Close()
+	if readErr != nil {
+		return nil, readErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	if len(data) > maxXrayJournalBytes {
+		return nil, fmt.Errorf("Xray journal %q exceeds size limit", name)
+	}
+	return data, nil
+}
+
+func verifyStoredXrayBatch(dir, name string, wanted xrayTrafficJournalEntry) error {
+	data, err := readXrayJournal(dir, name)
+	if err != nil {
+		return err
+	}
+	var saved xrayTrafficJournalEntry
+	if err := json.Unmarshal(data, &saved); err != nil {
+		return fmt.Errorf("invalid existing Xray journal %q: %w", name, err)
+	}
+	if !reflect.DeepEqual(saved, wanted) {
+		return fmt.Errorf("existing Xray journal %q differs from retry payload; manual reconciliation required", name)
+	}
+	return nil
+}
+
 func storeXrayBatch(batch *xrayTrafficBatch) error {
 	if batch == nil || !validXrayBatchID(batch.id) {
 		return fmt.Errorf("invalid Xray batch ID")
@@ -39,16 +84,25 @@ func storeXrayBatch(batch *xrayTrafficBatch) error {
 	if err := syncJournalDir(filepath.Dir(dir)); err != nil {
 		return err
 	}
-	// A retry must never replace its original on-disk payload. In particular,
-	// the database code may normalize fields on the in-memory traffic objects.
-	path := filepath.Join(dir, batch.id+".json")
-	if _, err := os.Stat(path); err == nil {
-		return syncJournalDir(dir)
-	} else if !os.IsNotExist(err) {
-		return err
-	}
+	// Compare the serialized representation, including legacy null/empty slice
+	// distinctions, before using an existing ID for a retry. Never silently
+	// apply different in-memory data and delete the original journal.
+	name := batch.id + ".json"
+	path := filepath.Join(dir, name)
 	data, err := json.Marshal(xrayTrafficJournalEntry{ID: batch.id, Traffic: batch.traffic, Clients: batch.clients, Identities: batch.identities})
 	if err != nil {
+		return err
+	}
+	if len(data) > maxXrayJournalBytes {
+		return fmt.Errorf("Xray batch exceeds journal size limit")
+	}
+	var wanted xrayTrafficJournalEntry
+	if err := json.Unmarshal(data, &wanted); err != nil {
+		return err
+	}
+	if err := verifyStoredXrayBatch(dir, name, wanted); err == nil {
+		return syncJournalDir(dir)
+	} else if !os.IsNotExist(err) {
 		return err
 	}
 	f, err := os.CreateTemp(dir, ".pending-")
@@ -68,7 +122,17 @@ func storeXrayBatch(batch *xrayTrafficBatch) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	// Publish without replacement: concurrent writers for one ID must compare
+	// against the winner, not overwrite its durable evidence.
+	if err := os.Link(tmp, path); err != nil {
+		if !os.IsExist(err) {
+			return err
+		}
+		if err := verifyStoredXrayBatch(dir, name, wanted); err != nil {
+			return err
+		}
+	}
+	if err := os.Remove(tmp); err != nil {
 		return err
 	}
 	return syncJournalDir(dir)
@@ -128,7 +192,7 @@ func (j *XrayTrafficJob) replayXrayJournal() error {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
 			return fmt.Errorf("unexpected Xray journal entry %q; manual reconciliation required", entry.Name())
 		}
-		data, err := os.ReadFile(filepath.Join(xrayJournalDir(), entry.Name()))
+		data, err := readXrayJournal(xrayJournalDir(), entry.Name())
 		if err != nil {
 			return err
 		}
