@@ -42,7 +42,9 @@ func generateTestCertForJob(t *testing.T) (certPEM, keyPEM []byte) {
 }
 
 func TestTuicJob_TrafficAccounting(t *testing.T) {
-	if err := database.InitDB(filepath.Join(t.TempDir(), "tuic_job.db")); err != nil {
+	dir := t.TempDir()
+	t.Setenv("XUI_DB_FOLDER", dir)
+	if err := database.InitDB(filepath.Join(dir, "tuic_job.db")); err != nil {
 		t.Fatalf("database.InitDB failed: %v", err)
 	}
 	t.Cleanup(func() { _ = database.CloseDB() })
@@ -102,9 +104,19 @@ func TestTuicJob_TrafficAccounting(t *testing.T) {
 	t.Cleanup(mgr.StopAll)
 
 	job := NewTuicJob()
+	t.Cleanup(func() {
+		if sharedTuicPoll.unlock != nil {
+			sharedTuicPoll.unlock()
+		}
+		sharedTuicPoll = tuicPollState{}
+	})
 
 	// Initial run reconciles desired instances and starts the server
 	job.Run()
+	if sharedTuicPoll.batch != nil {
+		_, _, _, err := collectAndCommitTuic(&sharedTuicPoll, nil, &job.inboundService)
+		t.Fatalf("initial poll left state pending: %+v, retry: %v", sharedTuicPoll, err)
+	}
 
 	// Add test traffic to the running client
 	const wantUp = int64(1024)

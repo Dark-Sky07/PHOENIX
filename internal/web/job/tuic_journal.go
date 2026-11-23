@@ -20,8 +20,9 @@ import (
 var tuicJournalMu sync.Mutex
 
 type tuicTrafficBatch struct {
-	ID     string                    `json:"id"`
-	Deltas []tuic.ClientTrafficDelta `json:"deltas"`
+	ID         string                    `json:"id"`
+	Deltas     []tuic.ClientTrafficDelta `json:"deltas"`
+	PollMarker bool                      `json:"pollMarker,omitempty"`
 }
 
 func tuicJournalDir() string { return service.TuicTrafficJournalDir() }
@@ -145,6 +146,12 @@ func (j *TuicJob) replayTuicJournal() error {
 		if !validTuicBatchID(batch.ID) || batch.ID+".json" != entry.Name() {
 			return fmt.Errorf("TUIC journal batch ID mismatch")
 		}
+		// Periodic batches carry a shared marker. Their crash recovery needs
+		// the allocation recovery lock and explicit reconciliation; the older
+		// shutdown-journal replay must never erase their evidence or fence.
+		if batch.PollMarker {
+			return fmt.Errorf("TUIC periodic journal %s requires manual reconciliation", entry.Name())
+		}
 		for _, delta := range batch.Deltas {
 			if delta.Up < 0 || delta.Down < 0 {
 				return fmt.Errorf("TUIC journal %s has negative traffic", entry.Name())
@@ -166,6 +173,11 @@ func (j *TuicJob) replayTuicJournal() error {
 func (j *TuicJob) flushTuicJournal() error {
 	tuicJournalMu.Lock()
 	defer tuicJournalMu.Unlock()
+	if sharedTuicPoll.batch != nil {
+		if _, _, _, err := collectAndCommitTuic(&sharedTuicPoll, nil, &j.inboundService); err != nil {
+			return fmt.Errorf("finish pending TUIC poll before shutdown: %w", err)
+		}
+	}
 	manager := tuic.GetManager()
 	_, deltas := manager.CollectAllTraffic()
 	if len(deltas) > 0 {

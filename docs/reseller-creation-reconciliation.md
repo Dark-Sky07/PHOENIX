@@ -48,15 +48,22 @@ TUIC receipts bind the ID to a versioned hash of the original deltas; a legacy
 receipt without a hash cannot authorize replay and requires manual review.
 Database migration requires the upgraded receipt table and preserves its hashes.
 
-These are local safeguards, not a shared cross-host marker or a complete TUIC
-accounting protocol. They do not prove generation or reseller ownership, protect
-unpolled in-memory traffic against a crash, or retroactively bind old TUIC receipts
-to their payloads. Other hosts cannot see this host's journal. Normal periodic TUIC polls
-still use the existing non-journaled path. Nonzero live samples carrying TUIC
-identity fields are now rejected and requeued in memory if their recorded row
-is missing or ambiguous, rather than discarded or charged to multiple rows.
-A crash or uncertain commit can still lose or duplicate those in-memory deltas. Operators must preserve evidence and reconcile
-rather than deleting a journal or inventing usage.
+Periodic TUIC polling now creates a shared in-flight marker under the allocation
+lock before draining the manager, journals the exact delta batch, and commits a
+payload-bound receipt before attempting quota enforcement and clearing the
+journal and marker. A failed step retains the batch and allocation lock in the
+same process for retry; an uncertain marker deletion is restored under that lock.
+On restart, periodic journals are deliberately not replayed by the older shutdown
+recovery path: retain the journal and marker for manual reconciliation. A crash
+before journal publication or after journal removal can leave only a marker;
+never infer missing bytes from it.
+
+This is not a complete TUIC accounting protocol. Other hosts cannot inspect this
+host's journal. The safeguards do not prove client generation or reseller
+ownership, protect unpolled in-memory traffic against a crash, or retroactively
+bind old TUIC receipts to their payloads. Daemon reconciliation and shutdown can
+also drain sessions outside the periodic poll. Operators must preserve evidence
+and reconcile rather than deleting a journal or inventing usage.
 
 ## Xray poll identity capture
 

@@ -30,13 +30,27 @@ func (j *TuicJob) Run() {
 	defer j.runMu.Unlock()
 
 	tuicJournalMu.Lock()
-	journalErr := j.replayTuicJournal()
+	if sharedTuicPoll.batch == nil {
+		if err := j.replayTuicJournal(); err != nil {
+			tuicJournalMu.Unlock()
+			logger.Warning("tuic job: recover traffic journal failed; reconciliation deferred:", err)
+			return
+		}
+	}
+	mgr := tuic.GetManager()
+	clientDeltas, _, clientsDisabled, pollErr := collectAndCommitTuic(&sharedTuicPoll, func() []tuic.ClientTrafficDelta {
+		_, deltas := mgr.CollectAllTraffic()
+		return deltas
+	}, &j.inboundService)
 	tuicJournalMu.Unlock()
-	if journalErr != nil {
-		logger.Warning("tuic job: recover traffic journal failed; reconciliation deferred:", journalErr)
+	if pollErr != nil {
+		logger.Warning("tuic job: poll or accounting failed; retaining fence:", pollErr)
 		return
 	}
-
+	if clientsDisabled {
+		websocket.BroadcastInvalidate(websocket.MessageTypeInbounds)
+	}
+	// The filtered desired state is reconciled below.
 	desired, err := j.inboundService.DesiredTuicInstances()
 	if err != nil {
 		logger.Warning("tuic job: get desired instances failed:", err)
@@ -48,35 +62,16 @@ func (j *TuicJob) Run() {
 		activeTags = append(activeTags, inst.Tag)
 	}
 
-	mgr := tuic.GetManager()
 	mgr.Reconcile(desired)
-
-	_, clientDeltas := mgr.CollectAllTraffic()
 	onlineEmails, _ := mgr.GetActiveClients(30 * time.Second)
 
 	clientTraffics := aggregateTuicClientTraffic(clientDeltas, onlineEmails)
 	sampledAt := time.Now()
 	sampleInterval := tuicSpeedSampleInterval(j.lastSpeedSample, sampledAt)
-
-	// Inbound total traffic is already metered through the loopback SOCKS relay
-	// by xray_traffic_job (matching mtproto); only per-client deltas are submitted here.
-	persisted := true
-	if len(clientTraffics) > 0 {
-		needRestart, _, err := j.inboundService.AddTraffic(nil, clientTraffics)
-		if err != nil {
-			logger.Warning("tuic job: add traffic failed:", err)
-			mgr.RequeueClientTraffic(clientDeltas)
-			persisted = false
-		} else if needRestart {
-			if desired, err := j.inboundService.DesiredTuicInstances(); err == nil {
-				mgr.Reconcile(desired)
-			}
-		}
-	}
-	if persisted {
-		websocket.BroadcastTraffic(tuicSpeedPayload(clientTraffics, sampleInterval))
-		j.lastSpeedSample = sampledAt
-	}
+	// Inbound totals are metered through the Xray relay; this is only client
+	// traffic, now committed before periodic daemon reconciliation.
+	websocket.BroadcastTraffic(tuicSpeedPayload(clientTraffics, sampleInterval))
+	j.lastSpeedSample = sampledAt
 
 	if len(onlineEmails) > 0 {
 		if err := j.inboundService.BumpClientsLastOnline(onlineEmails); err != nil {
