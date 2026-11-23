@@ -85,6 +85,47 @@ func TestTunnelApplyRejectsUnfilteredSettingsOnDBFailure(t *testing.T) {
 	}
 }
 
+func TestInboundCreateDoesNotApplyUnfilteredTUICOnFilterError(t *testing.T) {
+	setupConflictDB(t)
+	db := database.GetDB()
+	cert, key := testTUICCertificate(t)
+	client := model.Client{Email: "create-filter@example.test", ID: "a0000000-0000-0000-0000-000000000001", Password: "secret", Enable: true}
+	settings, err := json.Marshal(map[string]any{"certificate": cert, "private_key": key, "clients": []model.Client{client}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := pc.LocalAddr().(*net.UDPAddr).Port
+	_ = pc.Close()
+	ib := model.Inbound{UserId: 1, Tag: "create-filter", Listen: "127.0.0.1", Port: port, Protocol: model.TUIC, Enable: true, Settings: string(settings)}
+	oldManager := runtime.GetManager()
+	var runtimeCalls int
+	runtime.SetManager(runtime.NewManager(runtime.LocalDeps{SetNeedRestart: func() { runtimeCalls++ }}))
+	t.Cleanup(func() { runtime.SetManager(oldManager); tuic.GetManager().Remove(ib.Id) })
+	const callback = "test:fail-create-daemon-filter"
+	if err := db.Callback().Query().Before("gorm:query").Register(callback, func(tx *gorm.DB) {
+		if tx.Statement.Table == "client_traffics" && strings.Join(tx.Statement.Selects, ",") == "id,email,enable" {
+			tx.AddError(errors.New("injected daemon filter failure"))
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Callback().Query().Remove(callback) })
+	if _, _, err := (&InboundService{}).AddInbound(&ib); err == nil || !strings.Contains(err.Error(), "filtered daemon settings") {
+		t.Fatalf("filter failure ignored: %v", err)
+	}
+	if runtimeCalls != 0 || tuic.GetManager().HasRunning() {
+		t.Fatal("unfiltered runtime started")
+	}
+	var count int64
+	if err := db.Model(&model.Inbound{}).Where("tag = ?", ib.Tag).Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("failed inbound creation committed: %d %v", count, err)
+	}
+}
+
 func TestInboundEditDoesNotApplyUnfilteredTUICOnFilterError(t *testing.T) {
 	setupConflictDB(t)
 	db := database.GetDB()
@@ -142,6 +183,9 @@ func TestTUICClientUpdateReportsFailedApplyAfterCommit(t *testing.T) {
 	}
 	svc := &ClientService{}
 	if err := svc.SyncInbound(nil, ib.Id, []model.Client{client}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&xray.ClientTraffic{InboundId: ib.Id, Email: client.Email, Enable: true}).Error; err != nil {
 		t.Fatal(err)
 	}
 	old := runtime.GetManager()

@@ -31,6 +31,9 @@ func TestPPPFilteredRuntimeOmitsQuotaDisabledCredentials(t *testing.T) {
 			if err := db.Create(&xray.ClientTraffic{InboundId: ib.Id, Email: "disabled@example.test", Enable: false}).Error; err != nil {
 				t.Fatal(err)
 			}
+			if err := db.Create(&xray.ClientTraffic{InboundId: ib.Id, Email: "active@example.test", Enable: true}).Error; err != nil {
+				t.Fatal(err)
+			}
 			filtered, err := (&InboundService{}).buildRuntimeInboundForAPI(db, &ib)
 			if err != nil {
 				t.Fatal(err)
@@ -45,6 +48,40 @@ func TestPPPFilteredRuntimeOmitsQuotaDisabledCredentials(t *testing.T) {
 				if !ok || len(instance.Credentials) != 1 || instance.Credentials[0].Username != "active@example.test" {
 					t.Fatalf("unexpected credentials: %+v", instance.Credentials)
 				}
+			}
+		})
+	}
+}
+
+func TestDaemonFilterOmitsMissingOrAmbiguousTrafficIdentities(t *testing.T) {
+	for _, protocol := range []model.Protocol{model.TUIC, model.OpenVPN, model.L2TP, model.SSTP, model.PPTP} {
+		t.Run(string(protocol), func(t *testing.T) {
+			setupConflictDB(t)
+			db := database.GetDB()
+			ib := model.Inbound{Id: 123, Protocol: protocol, Settings: `{"clients":[{"email":"ok@example.test","enable":true},{"email":"missing@example.test","enable":true},{"email":"ambiguous@example.test","enable":true}]}`}
+			for _, row := range []xray.ClientTraffic{
+				{Email: "ok@example.test", Enable: true},
+				{Email: "ambiguous@example.test", Enable: true},
+				{Email: "AMBIGUOUS@example.test", Enable: false},
+			} {
+				if err := db.Create(&row).Error; err != nil {
+					t.Fatal(err)
+				}
+			}
+			filtered, err := (&InboundService{}).buildRuntimeInboundForAPI(db, &ib)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var settings struct {
+				Clients []struct {
+					Email string `json:"email"`
+				} `json:"clients"`
+			}
+			if err := json.Unmarshal([]byte(filtered.Settings), &settings); err != nil {
+				t.Fatal(err)
+			}
+			if len(settings.Clients) != 1 || settings.Clients[0].Email != "ok@example.test" {
+				t.Fatalf("unsafe clients survived filter: %+v", settings.Clients)
 			}
 		})
 	}

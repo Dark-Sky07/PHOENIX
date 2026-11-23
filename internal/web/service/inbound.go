@@ -1205,10 +1205,13 @@ func (s *InboundService) addInbound(inbound *model.Inbound, preserveExistingClie
 		}
 		if push {
 			payload := inbound
-			if inbound.NodeID == nil && (inbound.Protocol == model.MTProto || inbound.Protocol == model.TUIC) {
-				if built, bErr := s.buildInboundForLocalRuntime(tx, inbound); bErr == nil {
-					payload = built
+			if inbound.NodeID == nil && (inbound.Protocol == model.MTProto || inbound.Protocol == model.TUIC || inbound.Protocol == model.OpenVPN || inbound.Protocol == model.L2TP || inbound.Protocol == model.SSTP || inbound.Protocol == model.PPTP) {
+				built, bErr := s.buildInboundForLocalRuntime(tx, inbound)
+				if bErr != nil {
+					err = fmt.Errorf("build filtered daemon settings: %w", bErr)
+					return inbound, false, err
 				}
+				payload = built
 			}
 			if err1 := rt.AddInbound(context.Background(), payload); err1 == nil {
 				logger.Debug("New inbound added on", rt.Name(), ":", inbound.Tag)
@@ -1216,7 +1219,7 @@ func (s *InboundService) addInbound(inbound *model.Inbound, preserveExistingClie
 				logger.Debug("Unable to add inbound on", rt.Name(), ":", err1)
 				if inbound.NodeID != nil {
 					markDirty = true
-				} else if inbound.Protocol != model.MTProto && inbound.Protocol != model.TUIC {
+				} else {
 					needRestart = true
 				}
 			}
@@ -1843,11 +1846,14 @@ func (s *InboundService) buildRuntimeInboundForAPI(tx *gorm.DB, inbound *model.I
 
 	enableMap := make(map[string]bool, len(clientStats))
 	trafficIDs := make(map[string]int, len(clientStats))
+	matchCounts := make(map[string]int, len(clientStats))
 	for _, clientTraffic := range clientStats {
 		key := transferEmailKey(clientTraffic.Email)
+		matchCounts[key]++
 		enableMap[key] = clientTraffic.Enable
 		trafficIDs[key] = clientTraffic.Id
 	}
+	strictDaemonIdentity := inbound.Protocol == model.TUIC || inbound.Protocol == model.OpenVPN || inbound.Protocol == model.L2TP || inbound.Protocol == model.SSTP || inbound.Protocol == model.PPTP
 
 	finalClients := make([]any, 0, len(clients))
 	for _, client := range clients {
@@ -1858,6 +1864,11 @@ func (s *InboundService) buildRuntimeInboundForAPI(tx *gorm.DB, inbound *model.I
 
 		email, _ := c["email"].(string)
 		key := transferEmailKey(email)
+		// Missing or ambiguous accounting identities cannot safely authenticate.
+		// Exclude only the affected credential instead of stopping the node.
+		if strictDaemonIdentity && (key == "" || matchCounts[key] != 1) {
+			continue
+		}
 		if enable, exists := enableMap[key]; exists && !enable {
 			continue
 		}

@@ -88,8 +88,10 @@ session marker alone is insufficient. An operator must reconcile it; no
 automatic resume path is provided yet. Inbound edits retain an omitted daemon
 client list before normalization and reject unproven PPP client removal from
 settings or canonical links. Local daemon inbound edits now reject a failed
-traffic-filter query instead of applying raw, unfiltered credentials; runtime
-apply failures request recovery. Updating an existing client traffic row to
+traffic-filter query instead of applying raw, unfiltered credentials; creation
+uses the same rule. TUIC, OpenVPN and PPP daemon filters omit credentials with
+missing or ambiguous normalized traffic identities rather than stopping the
+entire node. Runtime apply failures request recovery. Updating an existing client traffic row to
 an enabled state also checks the proposed quota and expiry against local and
 upstream counters, rejecting exhausted or corrupt values rather than silently
 reactivating it. This check does not establish complete historical usage.
