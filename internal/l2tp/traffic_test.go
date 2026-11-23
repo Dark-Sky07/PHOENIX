@@ -132,6 +132,47 @@ func TestStoppedRuntimeReportsNeverSampledSessions(t *testing.T) {
 	}
 }
 
+func TestStoppedRuntimeReportsSampledAndUnsampledSessionsTogether(t *testing.T) {
+	setupTrafficFilesystem(t)
+	writeSession(t, 12, "ppp0", "alice@example.test", "80", "120", true)
+	writeSession(t, 12, "ppp1", "bob@example.test", "20", "30", true)
+	writeSession(t, 12, "ppp2", "carol@example.test", "0", "0", false)
+	last := map[string]interfaceCounter{"ppp0\x00alice@example.test": {rx: 50, tx: 100}}
+	m := &Manager{id: 12, proc: &managed{last: last}}
+	_, _, err := m.CollectTrafficChecked()
+	var missing *SessionDisappeared
+	if !errors.As(err, &missing) {
+		t.Fatalf("stopped runtime not reported: %v", err)
+	}
+	if missing.Interface != "ppp0" || missing.Email != "alice@example.test" || missing.NoBaseline || missing.PreviousRx != 50 || missing.PreviousTx != 100 {
+		t.Fatalf("prior baseline not preserved: %+v", missing)
+	}
+	if len(missing.Additional) != 2 || missing.Additional[0].Email != "bob@example.test" || !missing.Additional[0].NoBaseline || missing.Additional[1].Email != "carol@example.test" || !missing.Additional[1].NoBaseline {
+		t.Fatalf("unobserved session identities omitted: %+v", missing.Additional)
+	}
+	if last["ppp0\x00alice@example.test"].rx != 50 || len(last) != 1 {
+		t.Fatal("stopped-runtime inspection advanced baseline")
+	}
+}
+
+func TestStoppedRuntimePendingHookDoesNotHideKnownBaseline(t *testing.T) {
+	root, _ := setupTrafficFilesystem(t)
+	dir := filepath.Join(root, "hook-incidents")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pending.test"), []byte("pending"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	last := map[string]interfaceCounter{"ppp0\x00alice": {rx: 50, tx: 100}}
+	m := &Manager{id: 12, proc: &managed{last: last}}
+	_, _, err := m.CollectTrafficChecked()
+	var missing *SessionDisappeared
+	if !errors.As(err, &missing) || missing.NoBaseline || missing.PreviousRx != 50 {
+		t.Fatalf("pending hook masked lost tracked runtime: %v", err)
+	}
+}
+
 func TestStoppedRuntimeDoesNotIgnoreUnreadableUnsampledSession(t *testing.T) {
 	setupTrafficFilesystem(t)
 	writeSession(t, 12, "ppp0", "alice@example.test", "invalid", "100", true)

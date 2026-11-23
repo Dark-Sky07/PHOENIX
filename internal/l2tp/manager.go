@@ -414,21 +414,23 @@ func (m *Manager) CollectTrafficChecked() (inbounds []InboundTraffic, clients []
 	}
 	if m.proc.proc == nil || !m.proc.proc.IsRunning() {
 		// Parent exit is not proof that pppd children stopped or that their
-		// final traffic was recorded. Preserve all known baselines as evidence.
-		if missing := missingL2TPSessions(m.id, m.proc.last, nil, nil, "tracked runtime unavailable"); missing != nil {
-			return nil, nil, missing
-		}
-		// A session can have started before our first sample. Inspect its
-		// marker even when no baseline exists; the parent's exit says nothing
-		// about pppd children or the unobserved traffic on that interface.
+		// final traffic was recorded. Inspect both prior baselines and visible
+		// sessions that began since the last sample, without adopting counts.
 		current, stale, err := readSessions(m.id)
 		if err != nil {
+			var pending *HookPendingError
+			if errors.As(err, &pending) {
+				// A live hook does not make already lost runtime ownership safe.
+				if missing := missingL2TPSessions(m.id, m.proc.last, nil, nil, "tracked runtime unavailable while hook is pending"); missing != nil {
+					return nil, nil, missing
+				}
+			}
 			return nil, nil, l2tpReadFailure(m.id, m.proc.last, err)
 		}
 		for key := range current {
 			stale = append(stale, key)
 		}
-		if missing := missingL2TPSessions(m.id, nil, nil, stale, "tracked runtime unavailable; session has no prior sample"); missing != nil {
+		if missing := missingL2TPSessions(m.id, m.proc.last, nil, stale, "tracked runtime unavailable"); missing != nil {
 			return nil, nil, missing
 		}
 		m.proc.online = map[string]bool{}

@@ -867,10 +867,13 @@ and the remaining snapshot as evidence. A surviving session marker whose
 interface has disappeared is also treated as an incident even if no prior sample
 exists; evidence explicitly says the prior count is unknown, not zero. If the
 tracked runtime becomes unavailable while sampled
-sessions exist, all last baselines are likewise recorded as uncertain. If no
-baseline exists, the collector now also inspects surviving session markers:
-any observed session is reported with an unknown prior count, and unreadable
-markers or counters fail closed rather than being treated as an empty sample.
+sessions exist, all last baselines are likewise recorded as uncertain. The
+collector also inspects surviving session markers, including those without a
+baseline alongside previously sampled sessions: each unobserved session is
+reported with an unknown prior count. Unreadable markers or counters fail closed
+rather than being treated as an empty sample. If a hook is pending while known
+baselines exist, the lost runtime remains a durable incident rather than being
+mistaken for a merely temporary hook wait.
 Parent exit is not treated as proof of child exit or complete usage. A shared incident
 fences sensitive quota operations after the evidence is
 durable; a failed incident write leaves the poll marker in place. This is
