@@ -432,7 +432,7 @@ func (s *ClientService) Delete(inboundSvc *InboundService, id int, keepTraffic b
 	if err != nil {
 		return false, err
 	}
-	if err := ObserveL2TPAccountingIncident(); err != nil {
+	if err := checkL2TPAccountingIncident(database.GetDB()); err != nil {
 		return false, err
 	}
 	if err := rejectClientNodeIncidents(database.GetDB(), []string{existing.Email}); err != nil {
@@ -678,7 +678,7 @@ func (s *ClientService) DeleteByEmail(inboundSvc *InboundService, email string, 
 	if email == "" {
 		return false, common.NewError("client email is required")
 	}
-	if err := ObserveL2TPAccountingIncident(); err != nil {
+	if err := checkL2TPAccountingIncident(database.GetDB()); err != nil {
 		return false, err
 	}
 	if err := rejectClientNodeIncidents(database.GetDB(), []string{email}); err != nil {
@@ -891,7 +891,7 @@ func (s *ClientService) Detach(inboundSvc *InboundService, id int, inboundIds []
 	if err != nil {
 		return false, err
 	}
-	if err := ObserveL2TPAccountingIncident(); err != nil {
+	if err := checkL2TPAccountingIncident(database.GetDB()); err != nil {
 		return false, err
 	}
 	if err := rejectClientNodeIncidents(database.GetDB(), []string{existing.Email}); err != nil {

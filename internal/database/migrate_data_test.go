@@ -211,6 +211,7 @@ func TestCopyAllModelsPreservesTrafficProtocolEvidence(t *testing.T) {
 	src, dst := open("source"), open("destination")
 	rows := []any{
 		&model.ResellerNodeCounterIncident{NodeId: 123, Email: "migration@example.test", PreviousUp: 100, ObservedUp: 10},
+		&model.ResellerNodeCounterIncident{NodeId: -2, Email: "", Direction: "l2tp-orphan"},
 		&model.ClientGlobalTraffic{MasterGuid: "master", Email: "migration@example.test", Up: 77},
 		&model.XrayTrafficReceipt{ID: "batch-committed"},
 		&model.XrayTrafficInFlight{ID: "batch-pending"},
@@ -251,6 +252,10 @@ func TestCopyAllModelsPreservesTrafficProtocolEvidence(t *testing.T) {
 	var incident model.ResellerNodeCounterIncident
 	if err := dst.First(&incident, "node_id = ?", 123).Error; err != nil || incident.PreviousUp != 100 || incident.ObservedUp != 10 {
 		t.Fatalf("incident: %+v %v", incident, err)
+	}
+	var l2tpIncident model.ResellerNodeCounterIncident
+	if err := dst.First(&l2tpIncident, "node_id = ?", -2).Error; err != nil || l2tpIncident.Direction != "l2tp-orphan" {
+		t.Fatalf("L2TP incident: %+v %v", l2tpIncident, err)
 	}
 }
 

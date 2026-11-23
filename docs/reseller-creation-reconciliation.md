@@ -852,11 +852,20 @@ clear the warning. If writing it fails, the process retains an in-memory retry
 barrier. Xray's poll lock is deliberately not blocked by this L2TP-specific
 marker, so unrelated traffic collection can continue.
 
-The file is local to a host and the in-memory retry is lost on process exit if
-storage was unavailable: another panel using the same PostgreSQL database can
-miss it, and a scan can miss an orphan that leaves no runtime directory. This is
-not a durable cross-host fence or proof of accounting completeness. Removing the
-incident file is an operator action only after preserving evidence and actual
-process, session and historical-traffic reconciliation; it must not be treated
-as an automatic recovery procedure. Other unguarded writers and unsampled
-sessions remain outside this protection.
+The L2TP job also retries publication of a shared database incident (reserved
+node ID -2) under the participating allocation recovery lock. After the insert
+commits, other upgraded panels sharing that database reject participating quota,
+renewal and destructive checks, while ordinary Xray traffic collection can
+continue. The database evidence migrates with existing counter incidents. A
+single shared incident does not identify every affected host and is never cleared
+automatically; a remaining local file republishes it on the next job tick.
+
+This is not a complete cross-host fence: another host can act before observation
+or while publication is waiting or has failed, and a scan can miss an orphan
+without a runtime directory. If both the local file and database writes fail,
+the in-memory retry is lost on process exit. Unguarded writers, lost advisory
+sessions and unsampled sessions remain outside the protection. An operator must
+preserve and reconcile evidence across all affected hosts and confirm process,
+session and historical-traffic state before clearing either local or shared
+incident; deleting markers is not proof of completeness or an automatic recovery
+procedure.

@@ -80,7 +80,7 @@ func (j *L2TPJob) Run() {
 	}
 	defer l2tpRunMu.Unlock()
 	mgr := l2tp.GetManager()
-	if err := service.ObserveL2TPAccountingIncident(); err != nil {
+	if err := service.PublishL2TPAccountingIncident(); err != nil {
 		logger.Warning("l2tp job: accounting incident:", err)
 	}
 	// Sample and commit before the periodic reconcile may stop or replace the

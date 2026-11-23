@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/Dark-Sky07/phoenix/internal/database"
+	"github.com/Dark-Sky07/phoenix/internal/database/model"
 )
 
 func TestL2TPOrphanBlocksQuotaAndDeletionButNotTrafficLock(t *testing.T) {
@@ -94,5 +95,90 @@ func TestL2TPIncidentPersistenceFailureStaysLatched(t *testing.T) {
 	}
 	if _, err := os.Stat(l2tpAccountingIncidentPath()); err != nil {
 		t.Fatalf("incident retry did not persist: %v", err)
+	}
+}
+
+func TestPublishedL2TPIncidentBlocksOtherHostAndSurvivesLocalRemoval(t *testing.T) {
+	reseller, client := seedResellerRenewal(t)
+	firstDBFolder := os.Getenv("XUI_DB_FOLDER")
+	bin := t.TempDir()
+	t.Setenv("XUI_BIN_FOLDER", bin)
+	if err := os.MkdirAll(filepath.Join(bin, "l2tp", "714"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := PublishL2TPAccountingIncident(); err == nil {
+		t.Fatal("incident reported success")
+	}
+	if err := PublishL2TPAccountingIncident(); err == nil {
+		t.Fatal("repeated incident reported success")
+	}
+	db := database.GetDB()
+	var count int64
+	if err := db.Model(&model.ResellerNodeCounterIncident{}).Where("node_id = ?", -2).Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("shared incident not idempotent: %d %v", count, err)
+	}
+	// Simulate a second panel with an independent bin and fallback folder but
+	// the same database. It must block sensitive paths without blocking polls.
+	t.Setenv("XUI_BIN_FOLDER", t.TempDir())
+	t.Setenv("XUI_DB_FOLDER", t.TempDir())
+	if err := checkL2TPAccountingIncident(db); err == nil || !strings.Contains(err.Error(), "shared L2TP") {
+		t.Fatalf("shared incident ignored: %v", err)
+	}
+	if err := (&ResellerService{}).CheckTrafficQuota(&reseller, 1); err == nil {
+		t.Fatal("other panel allocated quota")
+	}
+	if _, err := (&ClientService{}).Delete(nil, client.Id, false); err == nil {
+		t.Fatal("other panel deleted client")
+	}
+	if status := readCounterIncidentStatus(db); !status.Available || status.DatabaseCount != 1 {
+		t.Fatalf("shared incident missing from dashboard: %+v", status)
+	}
+	unlock, err := LockResellerAllocation()
+	if err != nil {
+		t.Fatalf("traffic lock blocked: %v", err)
+	}
+	unlock()
+	if err := db.Where("node_id = ?", -2).Delete(&model.ResellerNodeCounterIncident{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := checkL2TPAccountingIncident(db); err != nil {
+		t.Fatalf("barrier retained after simulated shared review: %v", err)
+	}
+	// The origin still retains its independent evidence and can publish again.
+	t.Setenv("XUI_DB_FOLDER", firstDBFolder)
+	if err := PublishL2TPAccountingIncident(); err == nil {
+		t.Fatal("source evidence was lost")
+	}
+	if err := db.Model(&model.ResellerNodeCounterIncident{}).Where("node_id = ?", -2).Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("source did not republish: %d %v", count, err)
+	}
+}
+
+func TestL2TPSharedPublicationFailureKeepsLocalEvidence(t *testing.T) {
+	seedResellerRenewal(t)
+	bin := t.TempDir()
+	t.Setenv("XUI_BIN_FOLDER", bin)
+	if err := os.MkdirAll(filepath.Join(bin, "l2tp", "715"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	db := database.GetDB()
+	if err := db.Exec("CREATE TRIGGER reject_l2tp_incident BEFORE INSERT ON reseller_node_counter_incidents BEGIN SELECT RAISE(ABORT, 'injected failure'); END").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := PublishL2TPAccountingIncident(); err == nil || !strings.Contains(err.Error(), "persist shared") {
+		t.Fatalf("publication failure hidden: %v", err)
+	}
+	if _, err := os.Stat(l2tpAccountingIncidentPath()); err != nil {
+		t.Fatalf("local evidence not retained: %v", err)
+	}
+	if err := db.Exec("DROP TRIGGER reject_l2tp_incident").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := PublishL2TPAccountingIncident(); err == nil {
+		t.Fatal("incident should still require manual review")
+	}
+	var count int64
+	if err := db.Model(&model.ResellerNodeCounterIncident{}).Where("node_id = ?", -2).Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("publication retry failed: %d %v", count, err)
 	}
 }

@@ -8,12 +8,16 @@ import (
 	"sync/atomic"
 
 	"github.com/Dark-Sky07/phoenix/internal/config"
+	"github.com/Dark-Sky07/phoenix/internal/database"
+	"github.com/Dark-Sky07/phoenix/internal/database/model"
 	"github.com/Dark-Sky07/phoenix/internal/l2tp"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // This local marker deliberately stays separate from the Xray journal: a
 // suspected L2TP orphan must not prevent unrelated traffic polls from running.
-// It is not a substitute for a cross-host incident or a quiescence fence.
+// It supplements the shared database incident but is not a quiescence fence.
 var l2tpIncidentPending atomic.Bool
 
 func l2tpAccountingIncidentPath() string {
@@ -88,5 +92,53 @@ func ObserveL2TPAccountingIncident() error {
 		return fmt.Errorf("L2TP accounting incident requires manual reconciliation; persist evidence: %w", err)
 	}
 	l2tpIncidentPending.Store(false)
+	return errors.New("L2TP accounting incident requires manual reconciliation")
+}
+
+// checkL2TPAccountingIncident is used by sensitive operations, including inside
+// writer transactions. It never tries to insert the shared incident in the
+// caller's transaction: rolling that transaction back would erase evidence.
+func checkL2TPAccountingIncident(db *gorm.DB) error {
+	if err := ObserveL2TPAccountingIncident(); err != nil {
+		return err
+	}
+	if db == nil {
+		return errors.New("database unavailable while checking L2TP accounting incidents")
+	}
+	var count int64
+	if err := db.Model(&model.ResellerNodeCounterIncident{}).Where("node_id = ?", -2).Count(&count).Error; err != nil {
+		return fmt.Errorf("check shared L2TP accounting incident: %w", err)
+	}
+	if count > 0 {
+		return errors.New("shared L2TP accounting incident requires manual reconciliation")
+	}
+	return nil
+}
+
+// PublishL2TPAccountingIncident runs outside traffic transactions. A committed
+// shared record fences subsequent participating allocation operations on hosts
+// using the same database; the local file remains if the insert or lock fails.
+// The global lock serializes publication with participating mutations, but is
+// not a lease or evidence that no writer ran before the incident was observed.
+func PublishL2TPAccountingIncident() error {
+	if err := ObserveL2TPAccountingIncident(); err == nil {
+		return nil
+	}
+	unlock, err := LockResellerAllocationForXrayRecovery()
+	if err != nil {
+		return fmt.Errorf("lock L2TP incident publication: %w", err)
+	}
+	defer unlock()
+	if err := ObserveL2TPAccountingIncident(); err == nil {
+		return nil
+	}
+	db := database.GetDB()
+	if db == nil {
+		return errors.New("database unavailable while publishing L2TP incident")
+	}
+	incident := model.ResellerNodeCounterIncident{NodeId: -2, Email: "", Direction: "l2tp-orphan"}
+	if err := db.Clauses(clause.OnConflict{DoNothing: true}).Create(&incident).Error; err != nil {
+		return fmt.Errorf("persist shared L2TP accounting incident: %w", err)
+	}
 	return errors.New("L2TP accounting incident requires manual reconciliation")
 }
