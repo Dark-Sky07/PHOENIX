@@ -1,6 +1,7 @@
 package l2tp
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -81,6 +82,33 @@ func TestOrphanScanFailsClosedAndExemptsOnlyTrackedCanonicalDirectory(t *testing
 	}
 	if err := orphanDataError(0); err == nil {
 		t.Fatal("unreadable runtime root treated as empty")
+	}
+}
+
+func TestCollectTrafficPreservesBaselinesOnUntrackedRuntime(t *testing.T) {
+	for _, tracked := range []bool{false, true} {
+		t.Run(strconv.FormatBool(tracked), func(t *testing.T) {
+			setupTrafficFilesystem(t)
+			writeSession(t, 8, "ppp8", "orphan@example.test", "12", "34", true)
+			m := &Manager{}
+			if tracked {
+				writeSession(t, 7, "ppp7", "tracked@example.test", "100", "200", true)
+				cmd := &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
+				m.id = 7
+				m.proc = &managed{proc: &Process{ipsecCmd: cmd, xl2tpdCmd: cmd}, last: map[string]interfaceCounter{"ppp7\x00tracked@example.test": {rx: 50, tx: 70}}}
+			}
+			_, _, err := m.CollectTrafficChecked()
+			var failure *SessionReadFailure
+			if !errors.As(err, &failure) || !strings.Contains(failure.Cause, "untracked L2TP") {
+				t.Fatalf("untracked runtime ignored: %v", err)
+			}
+			if tracked && (len(failure.Previous) != 1 || m.proc.last["ppp7\x00tracked@example.test"].rx != 50) {
+				t.Fatalf("baseline lost or advanced: %+v", failure.Previous)
+			}
+			if _, err := os.Stat(filepath.Join(sessionDirForID(8), "ppp8")); err != nil {
+				t.Fatalf("orphan evidence changed: %v", err)
+			}
+		})
 	}
 }
 

@@ -900,10 +900,9 @@ it with a different inbound. Other panel services remain running; an existing
 untracked L2TP daemon may also continue running with its prior configuration.
 
 This is a conservative operational barrier, not complete recovery: it does
-not prove process ownership, stop untracked sessions, reconstruct lost usage,
-or create a durable reseller-accounting incident. Missing runtime entries do
-not prove no orphan exists, and the directory check is not a cross-process
-fence. Operators must preserve the evidence and independently reconcile traffic
+not prove process ownership, stop untracked sessions, or reconstruct lost
+usage. Missing runtime entries do not prove no orphan exists, and the directory
+check is not itself a cross-process fence. Operators must preserve the evidence and independently reconcile traffic
 and process/session state before resuming; merely deleting the directory is not
 proof of safety. A controlled evidence-backed recovery workflow is still needed.
 
@@ -915,6 +914,13 @@ configured DB folder, so disappearance of the runtime directory alone does not
 clear the warning. If writing it fails, the process retains an in-memory retry
 barrier. Xray's poll lock is deliberately not blocked by this L2TP-specific
 marker, so unrelated traffic collection can continue.
+
+The L2TP collector also checks for untracked runtime directories before sampling,
+including when it owns no daemon. It retains known baselines and records a read
+failure as evidence rather than interpreting the orphan as an empty sample.
+If incident persistence fails, the existing shared poll marker remains for
+manual recovery. This protects only observed directories; a runtime that appears
+after the scan or leaves no directory remains outside this check.
 
 The L2TP job also retries publication of a shared database incident (reserved
 node ID -2) under the participating allocation recovery lock. After the insert

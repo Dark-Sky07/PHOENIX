@@ -397,6 +397,15 @@ func (m *Manager) CollectTraffic() (inbounds []InboundTraffic, clients []ClientT
 func (m *Manager) CollectTrafficChecked() (inbounds []InboundTraffic, clients []ClientTrafficDelta, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// Do not treat an unowned runtime as an empty sample. Its sessions may
+	// still be consuming traffic even though this manager cannot inspect them.
+	if err := m.orphanDataErrorLocked(); err != nil {
+		var last map[string]interfaceCounter
+		if m.proc != nil {
+			last = m.proc.last
+		}
+		return nil, nil, l2tpReadFailure(m.id, last, err)
+	}
 	if m.proc == nil {
 		if err := CheckHookIncidents(); err != nil {
 			return nil, nil, l2tpReadFailure(m.id, nil, err)

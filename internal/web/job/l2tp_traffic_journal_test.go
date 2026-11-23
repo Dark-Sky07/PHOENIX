@@ -120,6 +120,65 @@ func TestL2TPSampledTrafficJournalReplaysAfterCollectorRestart(t *testing.T) {
 	}
 }
 
+func TestL2TPUntrackedRuntimeCollectorFencesSharedAllocation(t *testing.T) {
+	for _, rejectIncident := range []bool{false, true} {
+		t.Run(map[bool]string{false: "incident-written", true: "incident-write-fails"}[rejectIncident], func(t *testing.T) {
+			setupIntegrationDB(t)
+			bin := t.TempDir()
+			t.Setenv("XUI_BIN_FOLDER", bin)
+			orphan := filepath.Join(bin, "l2tp", "8", "sessions")
+			if err := os.MkdirAll(orphan, 0700); err != nil {
+				t.Fatal(err)
+			}
+			marker := filepath.Join(orphan, "ppp8")
+			if err := os.WriteFile(marker, []byte("alice@example.test\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			db := database.GetDB()
+			if rejectIncident {
+				if err := db.Exec("CREATE TRIGGER reject_orphan_incident BEFORE INSERT ON reseller_node_counter_incidents BEGIN SELECT RAISE(ABORT, 'injected failure'); END").Error; err != nil {
+					t.Fatal(err)
+				}
+				// Reset the process-level failure latch even if an assertion fails.
+				t.Cleanup(func() {
+					_ = db.Exec("DROP TRIGGER IF EXISTS reject_orphan_incident").Error
+					if unlock, err := service.LockResellerAllocationForXrayRecovery(); err == nil {
+						_ = service.RecordL2TPSessionReadFailureUnderAllocationLock(&l2tp.SessionReadFailure{Cause: "test cleanup"})
+						unlock()
+					}
+				})
+			}
+			mgr := &l2tp.Manager{}
+			poll := func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
+				_, _, err := mgr.CollectTrafficChecked()
+				return nil, nil, err
+			}
+			if _, err := persistL2TPPoll(NewXrayTrafficJob(), poll); err == nil {
+				t.Fatal("untracked runtime reported as an empty sample")
+			}
+			var markers, incidents int64
+			if err := db.Model(&model.XrayTrafficInFlight{}).Count(&markers).Error; err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Model(&model.ResellerNodeCounterIncident{}).Where("node_id = ?", -2).Count(&incidents).Error; err != nil {
+				t.Fatal(err)
+			}
+			if rejectIncident && (markers != 1 || incidents != 0) || !rejectIncident && (markers != 0 || incidents != 1) {
+				t.Fatalf("unexpected shared evidence: marker=%d incident=%d", markers, incidents)
+			}
+			if _, err := os.Stat(marker); err != nil {
+				t.Fatalf("untracked runtime evidence lost: %v", err)
+			}
+			if rejectIncident {
+				if unlock, err := service.LockResellerAllocation(); err == nil {
+					unlock()
+					t.Fatal("failed incident persistence released the shared poll fence")
+				}
+			}
+		})
+	}
+}
+
 func TestL2TPPendingHookWithoutTrackedRuntimeRetainsSharedMarker(t *testing.T) {
 	setupIntegrationDB(t)
 	bin := t.TempDir()
