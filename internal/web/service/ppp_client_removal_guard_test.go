@@ -147,6 +147,37 @@ func TestL2TPRemovalAndUnassignmentStayBlockedBeforeMutation(t *testing.T) {
 	}
 }
 
+func TestL2TPRemovalGuardCatchesOrphanSessionMarker(t *testing.T) {
+	ib, client, _ := seedPPPRemovalGuard(t)
+	db := database.GetDB()
+	if err := db.Model(ib).Updates(map[string]any{"protocol": model.L2TP, "settings": `{"clients":[]}`}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Where("client_id = ?", client.Id).Delete(&model.ClientInbound{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(os.Getenv("XUI_BIN_FOLDER"), "l2tp", "7", "sessions")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "ppp0")
+	if err := os.WriteFile(path, []byte("ALICE@example.test\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectUnprovenPPPRemoval(db, []string{client.Email}, nil); err == nil || !strings.Contains(err.Error(), "L2TP") {
+		t.Fatalf("orphan L2TP marker ignored: %v", err)
+	}
+	if err := rejectUnprovenPPPRemoval(db, []string{"other@example.test"}, nil); err != nil {
+		t.Fatalf("unrelated marker blocked: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("incomplete"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectUnprovenPPPRemoval(db, []string{"other@example.test"}, nil); err == nil {
+		t.Fatal("malformed L2TP marker ignored")
+	}
+}
+
 func TestPPPRemovalGuardCatchesSettingsDriftAndSpool(t *testing.T) {
 	ib, client, _ := seedPPPRemovalGuard(t)
 	db := database.GetDB()

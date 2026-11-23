@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
+	"github.com/Dark-Sky07/phoenix/internal/l2tp"
 	"github.com/Dark-Sky07/phoenix/internal/pppvpn"
 	"gorm.io/gorm"
 )
@@ -36,6 +37,9 @@ func rejectUnprovenPPPRemoval(db *gorm.DB, emails []string, scope []int) error {
 	}
 	if err := pppvpn.CheckClientSessionEvidence(keys, scope); err != nil {
 		return fmt.Errorf("PPP client removal requires reconciliation: %w", err)
+	}
+	if err := l2tp.CheckClientSessionEvidence(keys, scope); err != nil {
+		return fmt.Errorf("L2TP client removal requires reconciliation: %w", err)
 	}
 	q := db.Where("node_id IS NULL AND protocol IN ?", []model.Protocol{model.PPTP, model.SSTP, model.L2TP})
 	if scope != nil {

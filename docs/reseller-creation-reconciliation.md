@@ -1040,10 +1040,15 @@ does **not** disconnect the user, and there is not yet an automated verified
 reconciliation/override flow to resume these removals. Do not remove records or
 associations merely to bypass it. An absent spool or association is not proof
 that no session exists; nonparticipating writers, concurrent hook/attachment
-changes and remote nodes remain outside this local check. Unlike SSTP/PPTP,
-L2TP session markers are not checked by this removal guard if both the database
-association and settings credential have already disappeared. Other protocols
-and other removal routes still need their own drain and accounting guarantees.
+changes and remote nodes remain outside this local check. The removal guard now
+also scans local L2TP session markers, including stale-interface markers after
+database and settings drift, and rejects malformed or uninspectable evidence.
+These markers do not contain final counters or a stable session generation;
+hooks can race the scan or fail to create a marker, so an empty scan is not
+proof of disconnection. Panel-side reads are confined to the trusted L2TP root;
+Linux rejects final symlinks and special files. The shell hooks, bind mounts,
+privileged writers and non-Linux races remain outside this protection. Other
+protocols and removal routes still need their own drain and accounting guarantees.
 
 PPP spool directory creation, scans, record reads, claim renames, deletion and
 directory sync now use a root-confined filesystem handle. Paths or symlinks
