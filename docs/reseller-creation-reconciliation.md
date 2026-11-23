@@ -34,6 +34,13 @@ contain an inflated snapshot and require evidence-based reconciliation.
 
 ## Xray poll identity capture
 
+For journaled Xray and L2TP deltas, a nonzero sample with a blank identity or
+an unchanged identity with no unique client-traffic destination now fails
+closed, including for non-reseller clients. The journal and poll marker remain
+for evidence-based review instead of silently dropping or multiplying usage.
+This does not infer ownership or recreate missing rows; the existing verified
+reseller-archive path remains available for changed identities.
+
 The Xray poll now holds the participating reseller-allocation lock from before
 reading runtime counters until their database identity snapshot is captured. A
 capture error retains the batch and lock and retries capture on a later tick;

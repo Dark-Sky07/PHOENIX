@@ -89,6 +89,11 @@ func captureXrayTrafficIdentities(db *gorm.DB, traffic []*xray.ClientTraffic, lo
 // was captured, a unique archived owner can safely receive the late bytes.
 // Ambiguous identities remain in the journal for manual reconciliation.
 func reconcileXrayTrafficIdentities(tx *gorm.DB, traffic []*xray.ClientTraffic, expected []XrayTrafficIdentity) ([]*xray.ClientTraffic, error) {
+	for _, row := range traffic {
+		if row != nil && (row.Up != 0 || row.Down != 0) && transferEmailKey(row.Email) == "" {
+			return nil, fmt.Errorf("Xray traffic has no accounting identity; manual reconciliation required")
+		}
+	}
 	actual, err := captureXrayTrafficIdentities(tx, traffic, true)
 	if err != nil {
 		return nil, err
@@ -122,6 +127,12 @@ func reconcileXrayTrafficIdentities(tx *gorm.DB, traffic []*xray.ClientTraffic, 
 			}
 		}
 		if equalIDs(current.ClientIDs, old.ClientIDs) && equalIDs(current.TrafficIDs, old.TrafficIDs) && equalIDs(current.ResellerIDs, old.ResellerIDs) {
+			// A stable identity with zero or multiple destinations is still
+			// unsafe for non-reseller clients: addClientTraffic would discard
+			// the delta or apply it to every case variant.
+			if len(current.TrafficIDs) != 1 {
+				return nil, fmt.Errorf("ambiguous Xray traffic destination for %q; manual reconciliation required", current.Email)
+			}
 			continue
 		}
 		if len(old.ClientIDs) != 1 || len(old.TrafficIDs) != 1 || len(old.ResellerIDs) != 1 {

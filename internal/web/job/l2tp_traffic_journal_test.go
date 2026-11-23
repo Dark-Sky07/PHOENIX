@@ -239,6 +239,42 @@ func TestL2TPSampledTrafficRetriesWithJournalAndReceipt(t *testing.T) {
 	}
 }
 
+func TestL2TPMissingTrafficDestinationKeepsJournalAndMarker(t *testing.T) {
+	setupIntegrationDB(t)
+	collector := NewXrayTrafficJob()
+	polls := 0
+	poll := func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
+		polls++
+		return nil, []*xray.ClientTraffic{{Email: "missing-l2tp@example.test", Up: 88}}, nil
+	}
+	if _, err := persistL2TPPoll(collector, poll); err == nil || collector.pending == nil || collector.captureUnlock == nil {
+		t.Fatalf("missing destination did not retain batch and lock: %v", err)
+	}
+	id := collector.pending.id
+	if err := service.VerifyXrayPollMarker(id); err != nil {
+		t.Fatalf("marker missing: %v", err)
+	}
+	path := filepath.Join(xrayJournalDir(), id+".json")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("journal missing: %v", err)
+	}
+	if _, err := persistL2TPPoll(collector, poll); err == nil || polls != 1 {
+		t.Fatalf("retry lost sample or polled again: polls=%d err=%v", polls, err)
+	}
+	// Simulate process death: the journal and marker must survive lock release.
+	collector.captureUnlock()
+	collector.captureUnlock = nil
+	if err := NewXrayTrafficJob().replayXrayJournal(); err == nil {
+		t.Fatal("restart discarded missing-destination sample")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("replay removed journal: %v", err)
+	}
+	if err := service.VerifyXrayPollMarker(id); err != nil {
+		t.Fatalf("replay removed marker: %v", err)
+	}
+}
+
 func TestL2TPSampledTrafficJournalReplaysAfterCollectorRestart(t *testing.T) {
 	setupIntegrationDB(t)
 	db := database.GetDB()

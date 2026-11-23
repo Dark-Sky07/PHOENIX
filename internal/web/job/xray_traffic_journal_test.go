@@ -336,6 +336,66 @@ func TestXrayJournalRejectsUnchangedAmbiguousResellerIdentity(t *testing.T) {
 	}
 }
 
+func TestXrayJournalPreservesUnattributedNonResellerTraffic(t *testing.T) {
+	cases := []struct {
+		name, email string
+		counters    []string
+	}{
+		{name: "missing counter", email: "unattributed@example.test"},
+		{name: "ambiguous counters", email: "unattributed@example.test", counters: []string{"unattributed@example.test", "UNATTRIBUTED@example.test"}},
+		{name: "blank email", email: "  "},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("XUI_DB_FOLDER", dir)
+			if err := database.InitDB(filepath.Join(dir, "x-ui.db")); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = database.CloseDB() })
+			db := database.GetDB()
+			for _, email := range tc.counters {
+				if err := db.Create(&xray.ClientTraffic{Email: email, Enable: true}).Error; err != nil {
+					t.Fatal(err)
+				}
+			}
+			batch := &xrayTrafficBatch{id: uuid.NewString(), clients: []*xray.ClientTraffic{{Email: tc.email, Up: 123, Down: 45}}}
+			if err := service.BeginXrayPoll(batch.id); err != nil {
+				t.Fatal(err)
+			}
+			j := NewXrayTrafficJob()
+			if _, _, err := j.applyJournaledXrayBatch(batch); err == nil {
+				t.Fatal("unattributed traffic accepted")
+			}
+			if _, err := os.Stat(filepath.Join(xrayJournalDir(), batch.id+".json")); err != nil {
+				t.Fatalf("journal lost: %v", err)
+			}
+			if err := service.VerifyXrayPollMarker(batch.id); err != nil {
+				t.Fatalf("poll marker lost: %v", err)
+			}
+			var receipts int64
+			if err := db.Model(&model.XrayTrafficReceipt{}).Where("id = ?", batch.id).Count(&receipts).Error; err != nil || receipts != 0 {
+				t.Fatalf("unexpected receipt: %d %v", receipts, err)
+			}
+			var rows []xray.ClientTraffic
+			if err := db.Find(&rows).Error; err != nil {
+				t.Fatal(err)
+			}
+			for _, row := range rows {
+				if row.Up != 0 || row.Down != 0 {
+					t.Fatalf("ambiguous traffic charged: %+v", row)
+				}
+			}
+			if err := NewXrayTrafficJob().replayXrayJournal(); err == nil {
+				t.Fatal("replay accepted unattributed traffic")
+			}
+			if _, err := os.Stat(filepath.Join(xrayJournalDir(), batch.id+".json")); err != nil {
+				t.Fatalf("replay lost journal: %v", err)
+			}
+		})
+	}
+}
+
 func TestInterruptedXrayPollMarkerBlocksQuotaUntilJournalReplay(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XUI_DB_FOLDER", dir)
