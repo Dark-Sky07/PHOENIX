@@ -2,6 +2,7 @@ package l2tp
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -107,6 +108,38 @@ func TestReadCounterRejectsValuesOutsideSignedAccountingRange(t *testing.T) {
 	}
 	if value, ok := readCounter(path); ok || value != 0 {
 		t.Fatalf("negative counter was accepted: (%d, %v)", value, ok)
+	}
+}
+
+func TestStoppedRuntimeReportsNeverSampledSessions(t *testing.T) {
+	for _, interfaceExists := range []bool{false, true} {
+		t.Run(fmt.Sprint(interfaceExists), func(t *testing.T) {
+			setupTrafficFilesystem(t)
+			writeSession(t, 12, "ppp0", "alice@example.test", "50", "100", interfaceExists)
+			m := &Manager{id: 12, proc: &managed{last: map[string]interfaceCounter{}, online: map[string]bool{"alice@example.test": true}}}
+			_, _, err := m.CollectTrafficChecked()
+			var missing *SessionDisappeared
+			if !errors.As(err, &missing) || !missing.NoBaseline || missing.Email != "alice@example.test" || missing.Interface != "ppp0" {
+				t.Fatalf("unobserved session hidden by stopped parent: %v", err)
+			}
+			if len(m.proc.last) != 0 || !m.proc.online["alice@example.test"] {
+				t.Fatal("uncertain session changed baseline or online state")
+			}
+			if _, err := os.Stat(filepath.Join(sessionDirForID(12), "ppp0")); err != nil {
+				t.Fatalf("session evidence removed: %v", err)
+			}
+		})
+	}
+}
+
+func TestStoppedRuntimeDoesNotIgnoreUnreadableUnsampledSession(t *testing.T) {
+	setupTrafficFilesystem(t)
+	writeSession(t, 12, "ppp0", "alice@example.test", "invalid", "100", true)
+	m := &Manager{id: 12, proc: &managed{last: map[string]interfaceCounter{}}}
+	_, _, err := m.CollectTrafficChecked()
+	var failure *SessionReadFailure
+	if !errors.As(err, &failure) {
+		t.Fatalf("unreadable session was treated as empty: %v", err)
 	}
 }
 

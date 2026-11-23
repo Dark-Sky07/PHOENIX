@@ -418,8 +418,18 @@ func (m *Manager) CollectTrafficChecked() (inbounds []InboundTraffic, clients []
 		if missing := missingL2TPSessions(m.id, m.proc.last, nil, nil, "tracked runtime unavailable"); missing != nil {
 			return nil, nil, missing
 		}
-		if err := CheckHookIncidents(); err != nil {
+		// A session can have started before our first sample. Inspect its
+		// marker even when no baseline exists; the parent's exit says nothing
+		// about pppd children or the unobserved traffic on that interface.
+		current, stale, err := readSessions(m.id)
+		if err != nil {
 			return nil, nil, l2tpReadFailure(m.id, m.proc.last, err)
+		}
+		for key := range current {
+			stale = append(stale, key)
+		}
+		if missing := missingL2TPSessions(m.id, nil, nil, stale, "tracked runtime unavailable; session has no prior sample"); missing != nil {
+			return nil, nil, missing
 		}
 		m.proc.online = map[string]bool{}
 		return nil, nil, nil
