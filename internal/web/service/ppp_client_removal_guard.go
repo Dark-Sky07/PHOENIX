@@ -27,7 +27,10 @@ func rejectUnprovenPPPRemoval(db *gorm.DB, emails []string, scope []int) error {
 	seen := make(map[string]bool, len(emails))
 	for _, email := range emails {
 		key := transferEmailKey(email)
-		if key != "" && !seen[key] {
+		if key == "" {
+			return errors.New("client removal has no accounting identity; manual reconciliation required")
+		}
+		if !seen[key] {
 			seen[key] = true
 			keys = append(keys, key)
 		}

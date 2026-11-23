@@ -1,6 +1,7 @@
 package service
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -255,6 +256,38 @@ func TestL2TPRemovalAndUnassignmentStayBlockedBeforeMutation(t *testing.T) {
 	}
 	if err := rejectUnprovenPPPRemoval(db, []string{client.Email}, []int{}); err != nil {
 		t.Fatalf("empty scope blocked: %v", err)
+	}
+}
+
+func TestBlankIdentityCannotBypassClientRemovalGuard(t *testing.T) {
+	for _, email := range []string{"", " \t\n"} {
+		t.Run(fmt.Sprintf("%q", email), func(t *testing.T) {
+			ib, client, _ := seedPPPRemovalGuard(t)
+			db := database.GetDB()
+			if err := db.Model(client).Update("email", email).Error; err != nil {
+				t.Fatal(err)
+			}
+			if _, err := (&ClientService{}).Delete(&InboundService{}, client.Id, true); err == nil || !strings.Contains(err.Error(), "manual reconciliation") {
+				t.Fatalf("client without identity was deleted: %v", err)
+			}
+			var saved model.ClientRecord
+			if err := db.First(&saved, client.Id).Error; err != nil || saved.Email != email {
+				t.Fatalf("client evidence altered: %+v %v", saved, err)
+			}
+			var count int64
+			if err := db.Model(&model.ClientInbound{}).Where("client_id = ? AND inbound_id = ?", client.Id, ib.Id).Count(&count).Error; err != nil || count != 1 {
+				t.Fatalf("link evidence altered: %d %v", count, err)
+			}
+			if err := rejectUnprovenPPPRemoval(db, []string{"valid@example.test", email}, nil); err == nil {
+				t.Fatal("mixed batch silently discarded blank identity")
+			}
+			if err := rejectUnprovenPPPRemoval(db, nil, nil); err != nil {
+				t.Fatalf("empty request unexpectedly blocked: %v", err)
+			}
+			if err := rejectUnprovenPPPRemoval(db, []string{email}, []int{}); err != nil {
+				t.Fatalf("empty scope unexpectedly blocked: %v", err)
+			}
+		})
 	}
 }
 

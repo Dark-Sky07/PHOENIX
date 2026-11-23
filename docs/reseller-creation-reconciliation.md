@@ -93,7 +93,9 @@ automatic resume path is provided yet. Inbound edits retain an omitted daemon
 client list before normalization and reject unproven PPP client removal from
 settings or canonical links. A missing linked client or blank identity in a
 scoped PPP inbound also blocks removal pending manual reconciliation, even when
-the requested email is different; its ownership cannot be inferred. Local daemon
+the requested email is different; its ownership cannot be inferred. A removal
+request with a blank accounting identity also fails closed rather than silently
+skipping the identity check (an empty scope remains a no-op). Local daemon
 inbound edits now reject a failed
 traffic-filter query instead of applying raw, unfiltered credentials; creation
 uses the same rule. TUIC, OpenVPN and PPP daemon filters omit credentials with
