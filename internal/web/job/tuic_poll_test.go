@@ -10,6 +10,7 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/tuic"
 	"github.com/Dark-Sky07/phoenix/internal/web/service"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
+	"github.com/google/uuid"
 )
 
 func TestTuicPeriodicPollRetainsExactBatchAndFenceOnWriteFailure(t *testing.T) {
@@ -98,6 +99,129 @@ func TestTuicPeriodicMarkerDeleteFailureRestoresFenceOnRetry(t *testing.T) {
 	}
 	if err := service.VerifyXrayPollMarker(id); err == nil {
 		t.Fatal("completed marker remains")
+	}
+}
+
+func TestTuicCommittedPeriodicJournalRecoversAfterCrash(t *testing.T) {
+	setupIntegrationDB(t)
+	db := database.GetDB()
+	row := xray.ClientTraffic{Email: "committed-tuic@example.test", Enable: true}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	batch := tuicTrafficBatch{ID: uuid.NewString(), PollMarker: true, Deltas: []tuic.ClientTrafficDelta{{Email: row.Email, TrafficID: row.Id, Up: 33}}}
+	if err := service.BeginXrayPoll(batch.ID); err != nil {
+		t.Fatal(err)
+	}
+	path, err := storeTuicBatch(batch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (&service.InboundService{}).AddTuicTrafficBatch(batch.ID, batch.Deltas); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewTuicJob().replayTuicJournal(); err != nil {
+		t.Fatalf("committed journal recovery: %v", err)
+	}
+	if err := db.First(&row, row.Id).Error; err != nil || row.Up != 33 {
+		t.Fatalf("committed sample charged twice: %+v %v", row, err)
+	}
+	if err := service.VerifyXrayPollMarker(batch.ID); err == nil {
+		t.Fatal("committed marker not cleared")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("committed journal not cleared: %v", err)
+	}
+}
+
+func TestTuicPeriodicRecoveryRetainsLockOnUncertainMarkerDeletion(t *testing.T) {
+	setupIntegrationDB(t)
+	db := database.GetDB()
+	batch := tuicTrafficBatch{ID: uuid.NewString(), PollMarker: true}
+	if err := service.BeginXrayPoll(batch.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := storeTuicBatch(batch); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&service.InboundService{}).AddTuicTrafficBatch(batch.ID, batch.Deltas); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("CREATE TRIGGER reject_recovery_tuic_marker BEFORE DELETE ON xray_traffic_in_flights BEGIN SELECT RAISE(ABORT, 'injected'); END").Error; err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if sharedTuicPoll.unlock != nil {
+			sharedTuicPoll.unlock()
+		}
+		sharedTuicPoll = tuicPollState{}
+	})
+	if err := NewTuicJob().replayTuicJournal(); err == nil || sharedTuicPoll.unlock == nil || !sharedTuicPoll.deleteUncertain {
+		t.Fatalf("recovery released uncertain lock: %+v %v", sharedTuicPoll, err)
+	}
+	if err := db.Exec("DROP TRIGGER reject_recovery_tuic_marker").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := service.FinishXrayPoll(batch.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := collectAndCommitTuic(&sharedTuicPoll, nil, &service.InboundService{}); err != nil || sharedTuicPoll.unlock != nil {
+		t.Fatalf("recovery retry failed: %v", err)
+	}
+}
+
+func TestTuicPeriodicRecoveryRequiresExclusiveMarkerAndMatchingReceipt(t *testing.T) {
+	for _, mode := range []string{"foreign-marker", "missing-marker", "mismatched-receipt", "legacy-receipt"} {
+		t.Run(mode, func(t *testing.T) {
+			setupIntegrationDB(t)
+			db := database.GetDB()
+			row := xray.ClientTraffic{Email: "recovery-tuic@example.test", Enable: true}
+			if err := db.Create(&row).Error; err != nil {
+				t.Fatal(err)
+			}
+			batch := tuicTrafficBatch{ID: uuid.NewString(), PollMarker: true, Deltas: []tuic.ClientTrafficDelta{{Email: row.Email, TrafficID: row.Id, Up: 25}}}
+			if mode != "missing-marker" {
+				if err := service.BeginXrayPoll(batch.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if mode == "foreign-marker" {
+				if err := service.BeginXrayPoll(uuid.NewString()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			path, err := storeTuicBatch(batch)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode == "legacy-receipt" {
+				if err := db.Create(&model.TuicTrafficReceipt{ID: batch.ID}).Error; err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				committed := append([]tuic.ClientTrafficDelta(nil), batch.Deltas...)
+				if mode == "mismatched-receipt" {
+					committed[0].Up = 26
+				}
+				if err := (&service.InboundService{}).AddTuicTrafficBatch(batch.ID, committed); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := NewTuicJob().replayTuicJournal(); err == nil {
+				t.Fatal("unsafe periodic recovery accepted")
+			}
+			if sharedTuicPoll.unlock != nil || sharedTuicPoll.batch != nil {
+				t.Fatalf("invalid recovery kept process lock: %+v", sharedTuicPoll)
+			}
+			if _, err := os.Stat(path); err != nil {
+				t.Fatalf("journal evidence removed: %v", err)
+			}
+			if mode != "missing-marker" {
+				if err := service.VerifyXrayPollMarker(batch.ID); err != nil {
+					t.Fatalf("marker removed: %v", err)
+				}
+			}
+		})
 	}
 }
 

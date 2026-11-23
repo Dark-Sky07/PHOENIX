@@ -53,10 +53,13 @@ lock before draining the manager, journals the exact delta batch, and commits a
 payload-bound receipt before attempting quota enforcement and clearing the
 journal and marker. A failed step retains the batch and allocation lock in the
 same process for retry; an uncertain marker deletion is restored under that lock.
-On restart, periodic journals are deliberately not replayed by the older shutdown
-recovery path: retain the journal and marker for manual reconciliation. A crash
-before journal publication or after journal removal can leave only a marker;
-never infer missing bytes from it.
+After restart, a periodic journal can be cleaned up automatically only under
+the recovery lock with its exclusive marker and a matching payload-bound receipt
+proving the transaction already committed. Uncommitted journals lack a durable
+ownership snapshot and remain for manual reconciliation; they are not applied
+automatically. Cleanup failures retain the lock for retry, including uncertain
+marker deletion. A crash before journal publication or after journal removal can
+leave only a marker; never infer missing bytes from it.
 
 This is not a complete TUIC accounting protocol. Other hosts cannot inspect this
 host's journal. The safeguards do not prove client generation or reseller

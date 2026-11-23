@@ -15,6 +15,7 @@ import (
 
 	"github.com/Dark-Sky07/phoenix/internal/tuic"
 	"github.com/Dark-Sky07/phoenix/internal/web/service"
+	"github.com/Dark-Sky07/phoenix/internal/web/websocket"
 )
 
 var tuicJournalMu sync.Mutex
@@ -146,11 +147,11 @@ func (j *TuicJob) replayTuicJournal() error {
 		if !validTuicBatchID(batch.ID) || batch.ID+".json" != entry.Name() {
 			return fmt.Errorf("TUIC journal batch ID mismatch")
 		}
-		// Periodic batches carry a shared marker. Their crash recovery needs
-		// the allocation recovery lock and explicit reconciliation; the older
-		// shutdown-journal replay must never erase their evidence or fence.
 		if batch.PollMarker {
-			return fmt.Errorf("TUIC periodic journal %s requires manual reconciliation", entry.Name())
+			if err := j.recoverCommittedTuicPoll(batch); err != nil {
+				return fmt.Errorf("recover TUIC periodic journal %s: %w", entry.Name(), err)
+			}
+			continue
 		}
 		for _, delta := range batch.Deltas {
 			if delta.Up < 0 || delta.Down < 0 {
@@ -168,6 +169,35 @@ func (j *TuicJob) replayTuicJournal() error {
 		}
 	}
 	return nil
+}
+
+// recoverCommittedTuicPoll only cleans up a journal if the shared receipt
+// proves that this exact payload already committed. Uncommitted samples lack a
+// durable ownership snapshot and must not be applied automatically on restart.
+// The caller holds tuicJournalMu; on a later cleanup failure the same process
+// retains both the recovery lock and state for retry.
+func (j *TuicJob) recoverCommittedTuicPoll(batch tuicTrafficBatch) error {
+	if sharedTuicPoll.batch != nil {
+		return fmt.Errorf("another TUIC poll is pending")
+	}
+	unlock, err := service.LockResellerAllocationForXrayRecovery()
+	if err != nil {
+		return err
+	}
+	if err := service.VerifyExclusiveXrayPollMarker(batch.ID); err != nil {
+		unlock()
+		return fmt.Errorf("verify TUIC poll marker: %w", err)
+	}
+	if err := service.VerifyCommittedTuicTrafficBatch(batch.ID, batch.Deltas); err != nil {
+		unlock()
+		return err
+	}
+	sharedTuicPoll = tuicPollState{unlock: unlock, batch: &batch, committed: true}
+	_, _, disabled, err := collectAndCommitTuic(&sharedTuicPoll, nil, &j.inboundService)
+	if disabled {
+		websocket.BroadcastInvalidate(websocket.MessageTypeInbounds)
+	}
+	return err
 }
 
 func (j *TuicJob) flushTuicJournal() error {

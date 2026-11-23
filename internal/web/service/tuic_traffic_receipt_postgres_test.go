@@ -41,8 +41,14 @@ func TestTuicReceiptPayloadBindingPostgres(t *testing.T) {
 			t.Fatalf("identical retry %d: %v", i, err)
 		}
 	}
+	if err := VerifyCommittedTuicTrafficBatch(id, batch); err != nil {
+		t.Fatalf("committed receipt verification failed: %v", err)
+	}
 	conflict := append([]tuic.ClientTrafficDelta(nil), batch...)
 	conflict[0].Up++
+	if err := VerifyCommittedTuicTrafficBatch(id, conflict); err == nil {
+		t.Fatal("conflicting TUIC payload verified")
+	}
 	if err := svc.AddTuicTrafficBatch(id, conflict); err == nil {
 		t.Fatal("conflicting TUIC payload accepted")
 	}

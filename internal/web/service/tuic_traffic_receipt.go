@@ -52,20 +52,49 @@ func validateTuicJournalDestinations(tx *gorm.DB, traffic []*xray.ClientTraffic)
 	return nil
 }
 
-// AddTuicTrafficBatch commits a journal batch and its receipt atomically. A
-// retained journal can therefore be replayed after an ambiguous commit result.
-func (s *InboundService) AddTuicTrafficBatch(id string, deltas []tuic.ClientTrafficDelta) error {
+func tuicTrafficPayloadHash(id string, deltas []tuic.ClientTrafficDelta) (string, error) {
 	if id == "" {
-		return errors.New("TUIC traffic batch has no ID")
+		return "", errors.New("TUIC traffic batch has no ID")
 	}
 	payload, err := json.Marshal(struct {
 		ID     string                    `json:"id"`
 		Deltas []tuic.ClientTrafficDelta `json:"deltas"`
 	}{id, deltas})
 	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("v1:%x", sha256.Sum256(payload)), nil
+}
+
+// VerifyCommittedTuicTrafficBatch only verifies an existing receipt; it never
+// creates one or applies uncommitted deltas. Call under the allocation recovery
+// lock, with the original marker still present.
+func VerifyCommittedTuicTrafficBatch(id string, deltas []tuic.ClientTrafficDelta) error {
+	hash, err := tuicTrafficPayloadHash(id, deltas)
+	if err != nil {
 		return err
 	}
-	hash := fmt.Sprintf("v1:%x", sha256.Sum256(payload))
+	db := database.GetDB()
+	if db == nil {
+		return errors.New("database unavailable while checking TUIC receipt")
+	}
+	var receipt model.TuicTrafficReceipt
+	if err := db.Where("id = ?", id).Take(&receipt).Error; err != nil {
+		return fmt.Errorf("TUIC committed receipt unavailable; manual reconciliation required: %w", err)
+	}
+	if receipt.PayloadHash == "" || receipt.PayloadHash != hash {
+		return errors.New("TUIC receipt lacks matching payload evidence; manual reconciliation required")
+	}
+	return nil
+}
+
+// AddTuicTrafficBatch commits a journal batch and its receipt atomically. A
+// retained journal can therefore be replayed after an ambiguous commit result.
+func (s *InboundService) AddTuicTrafficBatch(id string, deltas []tuic.ClientTrafficDelta) error {
+	hash, err := tuicTrafficPayloadHash(id, deltas)
+	if err != nil {
+		return err
+	}
 	traffic := make([]*xray.ClientTraffic, 0, len(deltas))
 	for _, delta := range deltas {
 		traffic = append(traffic, &xray.ClientTraffic{Email: delta.Email, TuicTrafficID: delta.TrafficID, TuicUUID: delta.UUID, TuicInboundId: delta.InboundID, Up: delta.Up, Down: delta.Down})
