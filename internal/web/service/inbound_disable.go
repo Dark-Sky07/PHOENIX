@@ -14,6 +14,12 @@ import (
 	"gorm.io/gorm"
 )
 
+// localTrafficDepleted is for node status displays that have only local
+// counters. Enforcement also considers global snapshots in SQL below.
+func localTrafficDepleted(total, up, down int64) bool {
+	return up < 0 || down < 0 || (total > 0 && (up >= total || down >= total-up))
+}
+
 // Avoid overflowing up+down when deciding whether an inbound is depleted.
 // Negative stored counters are treated as corrupt and fail closed.
 const depletedInboundsCond = `((total > 0 AND (CASE WHEN up < 0 OR down < 0 OR up >= total THEN 1 WHEN down >= total - up THEN 1 ELSE 0 END) = 1) OR (expiry_time > 0 AND expiry_time <= ?))`
@@ -65,7 +71,13 @@ const maxGlobalUp = `COALESCE((SELECT MAX(g.up) FROM client_global_traffics g WH
 const maxGlobalDown = `COALESCE((SELECT MAX(g.down) FROM client_global_traffics g WHERE LOWER(TRIM(g.email)) = LOWER(TRIM(client_traffics.email))), 0)`
 const effectiveUp = `(CASE WHEN client_traffics.up > ` + maxGlobalUp + ` THEN client_traffics.up ELSE ` + maxGlobalUp + ` END)`
 const effectiveDown = `(CASE WHEN client_traffics.down > ` + maxGlobalDown + ` THEN client_traffics.down ELSE ` + maxGlobalDown + ` END)`
-const depletedClientsCond = `((total > 0 AND (` + effectiveUp + ` >= total OR ` + effectiveDown + ` >= total - ` + effectiveUp + `)) OR (expiry_time > 0 AND expiry_time <= ?))`
+
+// A corrupt local or upstream direction is not made safe by MAX hiding it
+// behind another snapshot. Disable the affected client even with an unlimited
+// quota; the original counters remain available for manual reconciliation.
+// CASE avoids evaluating subtraction before rejecting negative values.
+const negativeGlobalTraffic = `EXISTS (SELECT 1 FROM client_global_traffics g WHERE LOWER(TRIM(g.email)) = LOWER(TRIM(client_traffics.email)) AND (g.up < 0 OR g.down < 0))`
+const depletedClientsCond = `((CASE WHEN client_traffics.up < 0 OR client_traffics.down < 0 OR ` + negativeGlobalTraffic + ` THEN 1 WHEN total > 0 AND ` + effectiveUp + ` >= total THEN 1 WHEN total > 0 AND ` + effectiveDown + ` >= total - ` + effectiveUp + ` THEN 1 ELSE 0 END) = 1 OR (expiry_time > 0 AND expiry_time <= ?))`
 
 func (s *InboundService) disableInvalidClients(tx *gorm.DB) (bool, int64, []int, error) {
 	now := time.Now().Unix() * 1000

@@ -12,6 +12,23 @@ import (
 	"gorm.io/gorm"
 )
 
+func TestLocalTrafficDepletedDoesNotOverflow(t *testing.T) {
+	for _, tc := range []struct {
+		total, up, down int64
+		want            bool
+	}{
+		{math.MaxInt64, math.MaxInt64 - 1, 1, true},
+		{math.MaxInt64, math.MaxInt64 - 1, 0, false},
+		{math.MaxInt64, math.MaxInt64, math.MaxInt64, true},
+		{0, -1, 0, true},
+		{0, 10, 10, false},
+	} {
+		if got := localTrafficDepleted(tc.total, tc.up, tc.down); got != tc.want {
+			t.Errorf("localTrafficDepleted(%d,%d,%d)=%v want %v", tc.total, tc.up, tc.down, got, tc.want)
+		}
+	}
+}
+
 // Run the exact predicate used in both selection and update, against SQLite
 // and PostgreSQL. Maxima can come from different masters or local counters.
 func testEffectiveTrafficPredicate(t *testing.T, db *gorm.DB) {
@@ -32,6 +49,10 @@ func testEffectiveTrafficPredicate(t *testing.T, db *gorm.DB) {
 		{"different_masters", 10, 10, 1000, [][2]int64{{600, 100}, {100, 400}}, true},
 		{"below_limit", 10, 10, 1001, [][2]int64{{600, 100}, {100, 400}}, false},
 		{"unlimited", 600, 600, 0, [][2]int64{{900, 900}}, false},
+		{"negative_local_up", -1, 0, math.MaxInt64, nil, true},
+		{"negative_local_down_unlimited", 0, -1, 0, nil, true},
+		{"negative_global_up_hidden_by_valid_master", 1, 2, math.MaxInt64, [][2]int64{{-1, 0}, {200, 300}}, true},
+		{"negative_global_down_unlimited", 1, 2, 0, [][2]int64{{0, -1}}, true},
 		{"maxint_exact", math.MaxInt64 - 1, 1, math.MaxInt64, nil, true},
 		{"maxint_under", math.MaxInt64 - 1, 0, math.MaxInt64, nil, false},
 		{"maxint_over", math.MaxInt64, math.MaxInt64, math.MaxInt64, nil, true},
@@ -74,6 +95,27 @@ func TestEffectiveGlobalTrafficEnforcementSQLite(t *testing.T) {
 	}
 	if readTraffic(t, db, "mixed-global").Enable {
 		t.Fatal("effective global usage did not disable client")
+	}
+}
+
+func TestNegativeTrafficDisablesClientWithoutErasingEvidence(t *testing.T) {
+	db := initTrafficTestDB(t)
+	seedClientRow(t, "negative-local", 1, -1, 0, 0)
+	seedClientRow(t, "negative-global", 1, 5, 6, 0)
+	if err := db.Create(&model.ClientGlobalTraffic{MasterGuid: "old-master", Email: "negative-global", Up: -10, Down: 4}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, count, _, err := (&InboundService{}).disableInvalidClients(db); err != nil || count != 2 {
+		t.Fatalf("negative counters not disabled: count=%d err=%v", count, err)
+	}
+	local := readTraffic(t, db, "negative-local")
+	globalClient := readTraffic(t, db, "negative-global")
+	if local.Enable || local.Up != -1 || globalClient.Enable || globalClient.Up != 5 || globalClient.Down != 6 {
+		t.Fatalf("incorrect client state after disable: local=%+v global=%+v", local, globalClient)
+	}
+	var global model.ClientGlobalTraffic
+	if err := db.Where("email = ?", "negative-global").Take(&global).Error; err != nil || global.Up != -10 || global.Down != 4 {
+		t.Fatalf("global evidence altered: %+v %v", global, err)
 	}
 }
 

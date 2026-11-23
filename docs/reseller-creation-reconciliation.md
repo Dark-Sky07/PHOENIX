@@ -69,6 +69,10 @@ instead of wrapping; excess beyond that limit cannot be represented exactly.
 Retired-user removal is serialized with the last session's departure so
 a relay write after a counter swap cannot be dropped by that removal. These
 measures do not prove immutable historical ownership or generation.
+Quota enforcement also disables a client with a negative local or upstream
+counter, including an unlimited client, without erasing the corrupt evidence;
+review and reconciliation are required before re-enabling it. Node status
+counts use overflow-safe local totals but do not replace global enforcement.
 Ordinary cleanup failures release the lock behind the retained
 marker; an uncertain marker deletion keeps the lock. A crash before journal
 publication or after journal removal can
