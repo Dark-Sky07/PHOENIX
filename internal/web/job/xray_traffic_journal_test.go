@@ -66,6 +66,47 @@ func TestXrayJournalSurvivesDatabaseFailureAndReplaysOnce(t *testing.T) {
 	}
 }
 
+func TestXrayJournalRetainsHiddenNormalizedIdentities(t *testing.T) {
+	for _, table := range []string{"traffic", "client", "owner"} {
+		t.Run(table, func(t *testing.T) {
+			setupIntegrationDB(t)
+			db := database.GetDB()
+			email := "hidden@example.test"
+			row := xray.ClientTraffic{Email: email, Enable: true}
+			if err := db.Create(&row).Error; err != nil {
+				t.Fatal(err)
+			}
+			var extra any
+			switch table {
+			case "traffic":
+				extra = &xray.ClientTraffic{Email: "\tHIDDEN@example.test\n", Enable: true}
+			case "client":
+				extra = &model.ClientRecord{Email: "\tHIDDEN@example.test\n", Enable: true}
+			case "owner":
+				extra = &model.ResellerClient{Email: "\tHIDDEN@example.test\n", ResellerId: 23}
+			}
+			if err := db.Create(extra).Error; err != nil {
+				t.Fatal(err)
+			}
+			j := NewXrayTrafficJob()
+			batch := &xrayTrafficBatch{id: uuid.NewString(), clients: []*xray.ClientTraffic{{Email: email, Up: 42}}}
+			if _, _, err := j.applyJournaledXrayBatch(batch); err == nil {
+				t.Fatal("hidden identity accepted")
+			}
+			if _, err := os.Stat(filepath.Join(xrayJournalDir(), batch.id+".json")); err != nil {
+				t.Fatalf("journal lost: %v", err)
+			}
+			if err := db.First(&row, row.Id).Error; err != nil || row.Up != 0 {
+				t.Fatalf("traffic changed: %+v %v", row, err)
+			}
+			var count int64
+			if err := db.Model(&model.XrayTrafficReceipt{}).Count(&count).Error; err != nil || count != 0 {
+				t.Fatalf("receipt persisted: %d %v", count, err)
+			}
+		})
+	}
+}
+
 func TestXrayJournalConflictingCommittedReceiptPreservesOtherHostCopy(t *testing.T) {
 	setupIntegrationDB(t)
 	db := database.GetDB()

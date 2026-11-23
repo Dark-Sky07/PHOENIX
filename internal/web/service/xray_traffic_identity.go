@@ -59,21 +59,33 @@ func captureXrayTrafficIdentities(db *gorm.DB, traffic []*xray.ClientTraffic, lo
 			return nil, err
 		}
 		for _, c := range clients {
-			byEmail[transferEmailKey(c.Email)].ClientIDs = append(byEmail[transferEmailKey(c.Email)].ClientIDs, c.Id)
+			identity := byEmail[transferEmailKey(c.Email)]
+			if identity == nil {
+				return nil, fmt.Errorf("SQL and Go client identity normalization disagree; manual reconciliation required")
+			}
+			identity.ClientIDs = append(identity.ClientIDs, c.Id)
 		}
 		var counters []xray.ClientTraffic
 		if err := query().Select("id", "email").Where("LOWER(TRIM(email)) IN ?", batch).Order("id").Find(&counters).Error; err != nil {
 			return nil, err
 		}
 		for _, c := range counters {
-			byEmail[transferEmailKey(c.Email)].TrafficIDs = append(byEmail[transferEmailKey(c.Email)].TrafficIDs, c.Id)
+			identity := byEmail[transferEmailKey(c.Email)]
+			if identity == nil {
+				return nil, fmt.Errorf("SQL and Go traffic identity normalization disagree; manual reconciliation required")
+			}
+			identity.TrafficIDs = append(identity.TrafficIDs, c.Id)
 		}
 		var owners []model.ResellerClient
 		if err := query().Select("email", "reseller_id").Where("LOWER(TRIM(email)) IN ?", batch).Order("reseller_id, email").Find(&owners).Error; err != nil {
 			return nil, err
 		}
 		for _, c := range owners {
-			byEmail[transferEmailKey(c.Email)].ResellerIDs = append(byEmail[transferEmailKey(c.Email)].ResellerIDs, c.ResellerId)
+			identity := byEmail[transferEmailKey(c.Email)]
+			if identity == nil {
+				return nil, fmt.Errorf("SQL and Go owner identity normalization disagree; manual reconciliation required")
+			}
+			identity.ResellerIDs = append(identity.ResellerIDs, c.ResellerId)
 		}
 	}
 	for i := range identities {
@@ -82,6 +94,56 @@ func captureXrayTrafficIdentities(db *gorm.DB, traffic []*xray.ClientTraffic, lo
 		sort.Ints(identities[i].ResellerIDs)
 	}
 	return identities, nil
+}
+
+// verifyXrayNormalizedIdentityCoverage refuses to apply a journal if SQL's
+// LOWER/TRIM lookup omitted any Go-normalized matching identity. The scans are
+// point-in-time observations; they do not lock against phantom insertions.
+func verifyXrayNormalizedIdentityCoverage(db *gorm.DB, identities []XrayTrafficIdentity) error {
+	if len(identities) == 0 {
+		return nil
+	}
+	seen := make(map[string]*XrayTrafficIdentity, len(identities))
+	for _, identity := range identities {
+		seen[identity.Email] = &XrayTrafficIdentity{Email: identity.Email}
+	}
+	var clients []model.ClientRecord
+	if err := db.Select("id", "email").Find(&clients).Error; err != nil {
+		return err
+	}
+	for _, row := range clients {
+		if i := seen[transferEmailKey(row.Email)]; i != nil {
+			i.ClientIDs = append(i.ClientIDs, row.Id)
+		}
+	}
+	var traffic []xray.ClientTraffic
+	if err := db.Select("id", "email").Find(&traffic).Error; err != nil {
+		return err
+	}
+	for _, row := range traffic {
+		if i := seen[transferEmailKey(row.Email)]; i != nil {
+			i.TrafficIDs = append(i.TrafficIDs, row.Id)
+		}
+	}
+	var owners []model.ResellerClient
+	if err := db.Select("email", "reseller_id").Find(&owners).Error; err != nil {
+		return err
+	}
+	for _, row := range owners {
+		if i := seen[transferEmailKey(row.Email)]; i != nil {
+			i.ResellerIDs = append(i.ResellerIDs, row.ResellerId)
+		}
+	}
+	for _, identity := range identities {
+		i := seen[identity.Email]
+		sort.Ints(i.ClientIDs)
+		sort.Ints(i.TrafficIDs)
+		sort.Ints(i.ResellerIDs)
+		if !equalIDs(i.ClientIDs, identity.ClientIDs) || !equalIDs(i.TrafficIDs, identity.TrafficIDs) || !equalIDs(i.ResellerIDs, identity.ResellerIDs) {
+			return fmt.Errorf("SQL and Go accounting identity normalization disagree for %q; manual reconciliation required", identity.Email)
+		}
+	}
+	return nil
 }
 
 // reconcileXrayTrafficIdentities keeps ordinary live deltas attached to their
@@ -96,6 +158,9 @@ func reconcileXrayTrafficIdentities(tx *gorm.DB, traffic []*xray.ClientTraffic, 
 	}
 	actual, err := captureXrayTrafficIdentities(tx, traffic, true)
 	if err != nil {
+		return nil, err
+	}
+	if err := verifyXrayNormalizedIdentityCoverage(tx, actual); err != nil {
 		return nil, err
 	}
 	if len(actual) != len(expected) {

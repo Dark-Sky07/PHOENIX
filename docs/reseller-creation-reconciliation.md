@@ -133,6 +133,9 @@ For journaled Xray and L2TP deltas, a nonzero sample with a blank identity or
 an unchanged identity with no unique client-traffic destination now fails
 closed, including for non-reseller clients. The journal and poll marker remain
 for evidence-based review instead of silently dropping or multiplying usage.
+Before applying, point-in-time scans of client, traffic and reseller identities
+also reject Go-normalized matches omitted by SQL LOWER/TRIM. These scans do not
+prevent concurrent phantom inserts or renames and require full table reads.
 This does not infer ownership or recreate missing rows; the existing verified
 reseller-archive path remains available for changed identities. Reusing a local
 journal ID now requires the saved and retry payloads to match; publication does
