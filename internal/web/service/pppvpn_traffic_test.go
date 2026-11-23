@@ -63,8 +63,9 @@ func TestPPPAbsoluteCountersAreTransactionalAndIdempotent(t *testing.T) {
 
 	// Force an error after the absolute checkpoint is staged in the transaction;
 	// neither the checkpoint nor any usage may survive that rollback.
+	retrySample := &xray.ClientTraffic{Email: client.Email, Enable: true, PPPSessionID: "pptp-session-uuid", PPPInboundID: inbound.Id, PPPRxBytes: 100, PPPTxBytes: 200}
 	if _, _, err := service.AddTraffic(nil, []*xray.ClientTraffic{
-		{Email: client.Email, Enable: true, PPPSessionID: "pptp-session-uuid", PPPInboundID: inbound.Id, PPPRxBytes: 100, PPPTxBytes: 200},
+		retrySample,
 		{Email: "invalid@example.test", Up: -1},
 	}); err == nil {
 		t.Fatal("invalid delta should abort the whole traffic transaction")
@@ -73,8 +74,18 @@ func TestPPPAbsoluteCountersAreTransactionalAndIdempotent(t *testing.T) {
 	if err := database.GetDB().Where("session_id = ?", "pptp-session-uuid").Take(&model.PPPClientTrafficCounter{}).Error; err == nil {
 		t.Fatal("checkpoint update survived a rolled-back usage transaction")
 	}
-	apply(100, 200)
-	assertUsage(100, 200)
+	if retrySample.PPPSessionID != "pptp-session-uuid" || retrySample.PPPRxBytes != 100 || retrySample.PPPTxBytes != 200 || retrySample.Up != 0 || retrySample.Down != 0 {
+		t.Fatalf("failed transaction mutated retryable absolute sample: %+v", retrySample)
+	}
+	for i := 0; i < 2; i++ {
+		if _, _, err := service.AddTraffic(nil, []*xray.ClientTraffic{retrySample}); err != nil {
+			t.Fatalf("retry %d: %v", i, err)
+		}
+		assertUsage(100, 200)
+		if retrySample.PPPSessionID != "pptp-session-uuid" || retrySample.PPPRxBytes != 100 || retrySample.PPPTxBytes != 200 {
+			t.Fatalf("successful write mutated retryable absolute sample: %+v", retrySample)
+		}
+	}
 	var depleted xray.ClientTraffic
 	if err := database.GetDB().Where("email = ?", client.Email).Take(&depleted).Error; err != nil {
 		t.Fatal(err)

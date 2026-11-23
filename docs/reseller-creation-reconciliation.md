@@ -996,7 +996,9 @@ the transaction now requires exactly one normalized matching client-traffic row
 for every PPP sample. A missing or ambiguous destination rolls back the entire
 batch and keeps the collector's poll marker and spool evidence for review. The
 row check does not establish the original client's generation; do not recreate
-or merge rows without reconciling their history.
+or merge rows without reconciling their history. The traffic writer converts
+private copies of absolute PPP samples, leaving caller-owned batches unchanged
+on failure or success so reusing a batch does not turn retries into raw deltas.
 
 After each successful SSTP/PPTP poll, periodic daemon reconciliation now checks
 both local PPP evidence and the shared PPP incident before proceeding. Existing

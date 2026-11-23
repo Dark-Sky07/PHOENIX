@@ -410,7 +410,16 @@ func validatePPPAccountingDestinations(tx *gorm.DB, traffics []*xray.ClientTraff
 // accounting. Replaying a batch after a process/database restart therefore
 // yields zero additional usage instead of double-counting the session.
 func resolvePPPClientTraffic(tx *gorm.DB, traffics []*xray.ClientTraffic) ([]*xray.ClientTraffic, error) {
-	for _, traffic := range traffics {
+	// Convert private copies: a rollback or uncertain commit must not turn the
+	// caller's retryable absolute readings into ordinary, non-idempotent deltas.
+	resolved := make([]*xray.ClientTraffic, len(traffics))
+	for i, traffic := range traffics {
+		if traffic != nil {
+			copy := *traffic
+			resolved[i] = &copy
+		}
+	}
+	for _, traffic := range resolved {
 		if traffic == nil || traffic.PPPSessionID == "" {
 			continue
 		}
@@ -456,7 +465,7 @@ func resolvePPPClientTraffic(tx *gorm.DB, traffics []*xray.ClientTraffic) ([]*xr
 		traffic.PPPInboundID = 0
 		traffic.PPPRxBytes, traffic.PPPTxBytes = 0, 0
 	}
-	return traffics, nil
+	return resolved, nil
 }
 
 func canonicalizeClientTraffic(tx *gorm.DB, traffics []*xray.ClientTraffic) ([]*xray.ClientTraffic, error) {
