@@ -1833,13 +1833,19 @@ func (s *InboundService) buildRuntimeInboundForAPI(tx *gorm.DB, inbound *model.I
 		}
 	}
 
+	strictDaemonIdentity := inbound.Protocol == model.TUIC || inbound.Protocol == model.OpenVPN || inbound.Protocol == model.L2TP || inbound.Protocol == model.SSTP || inbound.Protocol == model.PPTP
 	var clientStats []xray.ClientTraffic
 	q := tx.Model(xray.ClientTraffic{}).Select("id", "email", "enable")
-	if len(emails) > 0 {
-		q = q.Where("inbound_id = ? OR LOWER(TRIM(email)) IN ?", inbound.Id, emails)
-	} else {
-		q = q.Where("inbound_id = ?", inbound.Id)
+	if !strictDaemonIdentity {
+		if len(emails) > 0 {
+			q = q.Where("inbound_id = ? OR LOWER(TRIM(email)) IN ?", inbound.Id, emails)
+		} else {
+			q = q.Where("inbound_id = ?", inbound.Id)
+		}
 	}
+	// SQL LOWER/TRIM is not equivalent to Go's Unicode-aware normalization
+	// (notably for tabs and non-ASCII case). Inspect all rows for strict daemon
+	// identities so a matching row on another inbound cannot be missed.
 	if err := q.Find(&clientStats).Error; err != nil {
 		return nil, err
 	}
@@ -1853,8 +1859,6 @@ func (s *InboundService) buildRuntimeInboundForAPI(tx *gorm.DB, inbound *model.I
 		enableMap[key] = clientTraffic.Enable
 		trafficIDs[key] = clientTraffic.Id
 	}
-	strictDaemonIdentity := inbound.Protocol == model.TUIC || inbound.Protocol == model.OpenVPN || inbound.Protocol == model.L2TP || inbound.Protocol == model.SSTP || inbound.Protocol == model.PPTP
-
 	finalClients := make([]any, 0, len(clients))
 	for _, client := range clients {
 		c, ok := client.(map[string]any)

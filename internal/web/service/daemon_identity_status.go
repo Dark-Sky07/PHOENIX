@@ -52,17 +52,11 @@ func countDaemonIdentityProblems(db *gorm.DB) (int64, error) {
 		}
 	}
 	counts := make(map[string]int, len(identities))
-	unique := make(map[string]struct{}, len(identities))
-	keys := make([]string, 0, len(identities))
-	for _, key := range identities {
-		if _, exists := unique[key]; !exists {
-			unique[key] = struct{}{}
-			keys = append(keys, key)
-		}
-	}
-	for _, batch := range chunkStrings(keys, sqliteMaxVars) {
+	if len(identities) > 0 {
+		// Match the runtime filter's Unicode-aware normalization, not SQL's
+		// database-dependent LOWER/TRIM approximation.
 		var rows []xray.ClientTraffic
-		if err := db.Select("email").Where("LOWER(TRIM(email)) IN ?", batch).Find(&rows).Error; err != nil {
+		if err := db.Select("email").Find(&rows).Error; err != nil {
 			return 0, err
 		}
 		for _, row := range rows {
