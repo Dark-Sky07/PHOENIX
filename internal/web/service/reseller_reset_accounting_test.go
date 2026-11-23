@@ -57,6 +57,70 @@ func TestResellerUsageSurvivesSupportedTrafficResets(t *testing.T) {
 	}
 }
 
+func TestNonResellerResetsPreserveNegativeEvidence(t *testing.T) {
+	resetters := map[string]func(string, int) error{
+		"single-no-inbound": func(email string, _ int) error { return (&InboundService{}).ResetClientTrafficByEmail(email) },
+		"single-inbound": func(email string, id int) error {
+			_, err := (&InboundService{}).ResetClientTraffic(id, email)
+			return err
+		},
+		"bulk": func(email string, _ int) error {
+			_, err := (&ClientService{}).BulkResetTraffic(&InboundService{}, []string{email})
+			return err
+		},
+		"inbound-all": func(_ string, id int) error { return (&ClientService{}).ResetAllClientTraffics(&InboundService{}, id) },
+		"global-all":  func(_ string, _ int) error { _, err := (&ClientService{}).ResetAllTraffics(); return err },
+	}
+	for name, reset := range resetters {
+		for _, kind := range []string{"local", "global"} {
+			t.Run(name+"/"+kind, func(t *testing.T) {
+				_, client := seedResellerRenewal(t)
+				db := database.GetDB()
+				if err := db.Where("email = ?", client.Email).Delete(&model.ResellerClient{}).Error; err != nil {
+					t.Fatal(err)
+				}
+				var link model.ClientInbound
+				if err := db.Where("client_id = ?", client.Id).First(&link).Error; err != nil {
+					t.Fatal(err)
+				}
+				if err := db.Model(&model.ClientRecord{}).Where("id = ?", client.Id).Update("enable", false).Error; err != nil {
+					t.Fatal(err)
+				}
+				if err := db.Model(&xray.ClientTraffic{}).Where("email = ?", client.Email).Update("enable", false).Error; err != nil {
+					t.Fatal(err)
+				}
+				if kind == "local" {
+					if err := db.Model(&xray.ClientTraffic{}).Where("email = ?", client.Email).Update("up", -1).Error; err != nil {
+						t.Fatal(err)
+					}
+				} else if err := db.Create(&model.ClientGlobalTraffic{MasterGuid: "bad", Email: client.Email, Down: -1}).Error; err != nil {
+					t.Fatal(err)
+				}
+				if err := reset(client.Email, link.InboundId); err == nil {
+					t.Fatal("reset accepted negative evidence")
+				}
+				var traffic xray.ClientTraffic
+				if err := db.Where("email = ?", client.Email).First(&traffic).Error; err != nil || traffic.Enable || traffic.Down != 180 {
+					t.Fatalf("traffic reset or re-enabled: %+v %v", traffic, err)
+				}
+				var record model.ClientRecord
+				if err := db.First(&record, client.Id).Error; err != nil || record.Enable {
+					t.Fatalf("client re-enabled: %+v %v", record, err)
+				}
+				if kind == "local" && traffic.Up != -1 {
+					t.Fatalf("local evidence erased: %+v", traffic)
+				}
+				if kind == "global" {
+					var global model.ClientGlobalTraffic
+					if err := db.Where("email = ?", client.Email).Take(&global).Error; err != nil || global.Down != -1 {
+						t.Fatalf("global evidence erased: %+v %v", global, err)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestResellerResetArchiveFailureDoesNotClearTraffic(t *testing.T) {
 	_, client := seedResellerRenewal(t)
 	db := database.GetDB()

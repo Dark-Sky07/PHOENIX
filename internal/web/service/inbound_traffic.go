@@ -1040,6 +1040,9 @@ func (s *InboundService) ResetClientTraffic(id int, clientEmail string) (needRes
 func (s *InboundService) resetClientTrafficLocked(id int, clientEmail string) (bool, error) {
 	needRestart := false
 
+	if err := rejectNegativeTrafficEvidence(database.GetDB(), []string{clientEmail}); err != nil {
+		return false, err
+	}
 	traffic, err := s.GetClientTrafficByEmail(clientEmail)
 	if err != nil {
 		return false, err

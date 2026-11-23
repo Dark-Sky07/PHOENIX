@@ -73,7 +73,11 @@ Quota enforcement also disables a client with a negative local or upstream
 counter, including an unlimited client, without erasing the corrupt evidence;
 review and reconciliation are required before re-enabling it. Automatic renewal
 checks both local and upstream counters before resetting any candidate; corrupt
-renewal evidence postpones that renewal batch rather than deleting it. Node status
+renewal evidence postpones that renewal batch rather than deleting it. Supported
+client counter resets also reject negative local or upstream evidence, including
+for non-resellers; preflight checks precede existing runtime re-enable paths,
+but those side effects and the database reset are not a single atomic operation.
+Node status
 counts use overflow-safe local totals but do not replace global enforcement.
 Ordinary cleanup failures release the lock behind the retained
 marker; an uncertain marker deletion keeps the lock. A crash before journal

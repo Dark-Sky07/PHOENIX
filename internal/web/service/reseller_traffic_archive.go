@@ -117,7 +117,34 @@ func archiveResellerClientUsageTx(tx *gorm.DB, client *model.ClientRecord, resel
 // cleared. Call inside the traffic writer's reset transaction. Historical
 // unmapped archives are rolled forward too; only the current owner receives a
 // new snapshot. Repeating after a successful reset records an empty window.
+// rejectNegativeTrafficEvidence protects local and upstream records even for
+// clients without a reseller mapping or canonical record. Call before any
+// runtime enablement and repeat inside the counter-reset transaction.
+func rejectNegativeTrafficEvidence(db *gorm.DB, emails []string) error {
+	keys := make([]string, 0, len(emails))
+	for _, email := range emails {
+		if key := transferEmailKey(email); key != "" {
+			keys = append(keys, key)
+		}
+	}
+	for _, batch := range chunkStrings(keys, sqliteMaxVars) {
+		for _, table := range []any{&xray.ClientTraffic{}, &model.ClientGlobalTraffic{}} {
+			var count int64
+			if err := db.Model(table).Where("LOWER(TRIM(email)) IN ? AND (up < 0 OR down < 0)", batch).Count(&count).Error; err != nil {
+				return err
+			}
+			if count > 0 {
+				return errors.New("negative client traffic requires manual reconciliation before reset")
+			}
+		}
+	}
+	return nil
+}
+
 func closeResellerTrafficWindowTx(tx *gorm.DB, email string) error {
+	if err := rejectNegativeTrafficEvidence(tx, []string{email}); err != nil {
+		return err
+	}
 	key := transferEmailKey(email)
 	var mappings []model.ResellerClient
 	if err := tx.Where("LOWER(TRIM(email)) = ?", key).Find(&mappings).Error; err != nil {

@@ -180,6 +180,11 @@ func (s *ClientService) BulkResetTraffic(inboundSvc *InboundService, emails []st
 	if len(cleanEmails) == 0 {
 		return 0, nil
 	}
+	// This method can re-enable clients before its reset transaction. Reject
+	// corrupt evidence before those side effects as well as inside the reset.
+	if err := rejectNegativeTrafficEvidence(database.GetDB(), cleanEmails); err != nil {
+		return 0, err
+	}
 
 	for _, e := range cleanEmails {
 		rec, err := s.GetRecordByEmail(nil, e)
