@@ -1456,3 +1456,15 @@ must review them. Unit tests exercise generated text and failure paths. CI also
 installs Ubuntu's OpenVPN package and checks server and client parsing, including
 decoding quoted paths, but this is not a client/server session, a test across
 all supported versions, or a session-drain test.
+
+### OpenVPN profile reuse: real-session characterization
+
+CI installs Ubuntu's OpenVPN package and runs a server and client in separate
+isolated Linux network namespaces connected by a veth. The client first obtains
+a valid profile; the panel's local certificate files are then pruned and a
+server is started without that client in its desired list. The previously
+issued profile still completes an OpenVPN connection. This demonstrates the
+lack of revocation for that binary and scenario; it does not prove behavior for
+all OpenVPN versions or deployments, quantify traffic after removal, or test
+termination of an already-active session. Do not interpret removal of local
+files, quota checks or this test as a revocation or final-accounting barrier.
