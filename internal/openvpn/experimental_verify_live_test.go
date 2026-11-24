@@ -22,8 +22,25 @@ func TestRealOpenVPNExperimentalFingerprintAdmission(t *testing.T) {
 		t.Skip("PHOENIX_TEST_OPENVPN_LIVE_BINARY not configured")
 	}
 	serverNS, clientNS := setupOpenVPNLiveNamespaces(t)
+	carolNS := fmt.Sprintf("phoenix-ovpn-c2-%d", os.Getpid())
+	ip := func(args ...string) {
+		t.Helper()
+		out, err := exec.Command("ip", args...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("ip %v: %v\n%s", args, err, out)
+		}
+	}
+	ip("netns", "add", carolNS)
+	t.Cleanup(func() { _ = exec.Command("ip", "netns", "delete", carolNS).Run() })
+	ip("-n", carolNS, "link", "set", "lo", "up")
+	ip("-n", serverNS, "link", "add", "ovpn-s2", "type", "veth", "peer", "name", "ovpn-c2")
+	ip("-n", serverNS, "link", "set", "ovpn-c2", "netns", carolNS)
+	ip("-n", serverNS, "addr", "add", "192.0.2.5/30", "dev", "ovpn-s2")
+	ip("-n", carolNS, "addr", "add", "192.0.2.6/30", "dev", "ovpn-c2")
+	ip("-n", serverNS, "link", "set", "ovpn-s2", "up")
+	ip("-n", carolNS, "link", "set", "ovpn-c2", "up")
 	t.Setenv("XUI_BIN_FOLDER", t.TempDir())
-	inst := Instance{Id: 120, Port: 31294, Listen: "192.0.2.1", Proto: "udp"}
+	inst := Instance{Id: 120, Port: 31294, Proto: "udp"}
 	alice, err := BuildProfile(inst, "alice@example.test", "192.0.2.1")
 	if err != nil {
 		t.Fatal(err)
@@ -32,20 +49,28 @@ func TestRealOpenVPNExperimentalFingerprintAdmission(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bobCert, bobKey := clientFiles(dataDirForID(inst.Id), "bob@example.test")
-	cert, _, err := loadKeyPair(bobCert, bobKey)
+	carol, err := BuildProfile(inst, "carol@example.test", "192.0.2.5")
 	if err != nil {
 		t.Fatal(err)
 	}
-	digest := sha256.Sum256(cert.Raw)
-	hexDigest := hex.EncodeToString(digest[:])
-	parts := make([]string, 0, 32)
-	for i := 0; i < len(hexDigest); i += 2 {
-		parts = append(parts, hexDigest[i:i+2])
+	var fingerprints []string
+	for _, email := range []string{"bob@example.test", "carol@example.test"} {
+		crt, key := clientFiles(dataDirForID(inst.Id), email)
+		cert, _, err := loadKeyPair(crt, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest := sha256.Sum256(cert.Raw)
+		hexDigest := hex.EncodeToString(digest[:])
+		parts := make([]string, 0, 32)
+		for i := 0; i < len(hexDigest); i += 2 {
+			parts = append(parts, hexDigest[i:i+2])
+		}
+		fingerprints = append(fingerprints, strings.Join(parts, ":"))
 	}
 	dir := t.TempDir()
 	allowlist := filepath.Join(dir, "allowlist")
-	if err := os.WriteFile(allowlist, []byte(strings.Join(parts, ":")+"\n"), 0600); err != nil {
+	if err := os.WriteFile(allowlist, []byte(strings.Join(fingerprints, "\n")+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	verifier := filepath.Join(dir, "verify")
@@ -87,20 +112,22 @@ func TestRealOpenVPNExperimentalFingerprintAdmission(t *testing.T) {
 		server, _ := os.ReadFile(logPathForID(inst.Id))
 		t.Fatalf("expected log event missing in %s:\n%s\nserver:\n%s", path, data, server)
 	}
-	client := func(name, text string) string {
+	client := func(ns, name, text string) string {
 		t.Helper()
 		log := filepath.Join(t.TempDir(), name+".log")
 		conf := filepath.Join(t.TempDir(), name+".ovpn")
 		if err := os.WriteFile(conf, []byte(text+"\nlog "+quoteConfigPath(log)+"\n"), 0600); err != nil {
 			t.Fatal(err)
 		}
-		start(clientNS, conf)
+		start(ns, conf)
 		return log
 	}
 	start(serverNS, confPathForID(inst.Id))
 	waitLog(logPathForID(inst.Id), func(s string) bool { return strings.Contains(s, "Initialization Sequence Completed") })
-	bobLog := client("bob", bob)
+	bobLog := client(clientNS, "bob", bob)
 	waitLog(bobLog, func(s string) bool { return strings.Contains(s, "Initialization Sequence Completed") })
+	carolLog := client(carolNS, "carol", carol)
+	waitLog(carolLog, func(s string) bool { return strings.Contains(s, "Initialization Sequence Completed") })
 	pingThroughBob := func() {
 		t.Helper()
 		out, err := exec.Command("ip", "netns", "exec", clientNS, "ping", "-n", "-c", "2", "-W", "3", "10.120.0.1").CombinedOutput()
@@ -109,7 +136,15 @@ func TestRealOpenVPNExperimentalFingerprintAdmission(t *testing.T) {
 		}
 	}
 	pingThroughBob()
-	client("alice", alice)
+	pingThroughCarol := func() {
+		t.Helper()
+		out, err := exec.Command("ip", "netns", "exec", carolNS, "ping", "-n", "-c", "2", "-W", "3", "10.120.0.1").CombinedOutput()
+		if err != nil {
+			t.Fatalf("Carol's tunnel did not carry ICMP: %v\n%s", err, out)
+		}
+	}
+	pingThroughCarol()
+	client(clientNS, "alice", alice)
 	denied := func(identity string) func(string) bool {
 		return func(s string) bool {
 			for _, line := range strings.Split(s, "\n") {
@@ -128,7 +163,7 @@ func TestRealOpenVPNExperimentalFingerprintAdmission(t *testing.T) {
 	// Existing sessions are not reverified on every packet. This deliberately
 	// characterizes continued forwarding, not an active-session revocation.
 	pingThroughBob()
-	client("bob-without-allowlist", bob)
+	client(clientNS, "bob-without-allowlist", bob)
 	waitLog(logPathForID(inst.Id), denied("bob@example.test"))
 	pingThroughBob()
 
@@ -194,6 +229,9 @@ sys.stdout.buffer.write(buf)
 			t.Fatalf("incomplete status after kill: %s", result)
 		}
 		if !strings.Contains(result, "CLIENT_LIST\tbob@example.test\t") {
+			if !strings.Contains(result, "CLIENT_LIST\tcarol@example.test\t") {
+				t.Fatalf("Carol disappeared from status after Bob's kill: %s", result)
+			}
 			break
 		}
 		if time.Now().After(deadline) {
@@ -207,4 +245,5 @@ sys.stdout.buffer.write(buf)
 	if err == nil {
 		t.Fatalf("Bob still received ICMP after management kill: %s", out)
 	}
+	pingThroughCarol()
 }
