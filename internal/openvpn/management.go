@@ -98,7 +98,7 @@ func parseManagementCounter(raw string) (int64, error) {
 		return 0, err
 	}
 	if value > uint64(maxManagementCounter) {
-		return maxManagementCounter, nil
+		return 0, errors.New("openvpn management counter exceeds supported range")
 	}
 	return int64(value), nil
 }
@@ -114,18 +114,18 @@ func saturatingManagementAdd(current, delta int64) int64 {
 }
 
 func parseCounterPair(fields []string, start int) (clientCounters, bool) {
-	// In a status-version-2 row the virtual IPv6 column may be empty. Looking
-	// for the first pair of numeric columns after the address fields handles
-	// both the version-1 and version-2 layouts without mistaking the later
-	// client-id/peer-id fields for traffic counters.
-	for i := start; i+1 < len(fields) && i < start+7; i++ {
-		rx, errRx := parseManagementCounter(fields[i])
-		tx, errTx := parseManagementCounter(fields[i+1])
-		if errRx == nil && errTx == nil && rx >= 0 && tx >= 0 {
-			return clientCounters{Rx: rx, Tx: tx}, true
-		}
+	// Headerless formats are only safe when the expected counter columns are
+	// present at their known offsets. Searching forward can reinterpret a
+	// timestamp or client ID as traffic after a malformed counter.
+	if start < 0 || start+1 >= len(fields) {
+		return clientCounters{}, false
 	}
-	return clientCounters{}, false
+	rx, errRx := parseManagementCounter(fields[start])
+	tx, errTx := parseManagementCounter(fields[start+1])
+	if errRx != nil || errTx != nil {
+		return clientCounters{}, false
+	}
+	return clientCounters{Rx: rx, Tx: tx}, true
 }
 
 func parseCSVClientRow(fields []string, layout *clientListLayout) (string, clientCounters, bool) {

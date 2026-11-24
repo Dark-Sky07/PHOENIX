@@ -26,6 +26,9 @@ func TestManagementStatusFormatsAndUnsafeRows(t *testing.T) {
 		{"truncated", tabHeader + tabClient, 0, true},
 		{"duplicate header column", "HEADER\tCLIENT_LIST\tCommon Name\tBytes Received\tBytes Sent\tBytes Sent\nEND\n", 0, true},
 		{"invalid counter", tabHeader + strings.Replace(tabClient, "1234", "bad", 1) + "END\n", 0, true},
+		{"counter outside signed range", tabHeader + strings.Replace(tabClient, "1234", "9223372036854775808", 1) + "END\n", 0, true},
+		{"legacy bad counter before numeric fields", "CLIENT_LIST alice@example.test 203.0.113.1 10.8.0.2 bad 1234 5678 179\nEND\n", 0, true},
+		{"legacy bad sent counter before numeric fields", "CLIENT_LIST alice@example.test 203.0.113.1 10.8.0.2 1234 bad 5678 179\nEND\n", 0, true},
 		{"short row", tabHeader + "CLIENT_LIST\talice@example.test\nEND\n", 0, true},
 		{"blank identity", tabHeader + strings.Replace(tabClient, "alice@example.test", "", 1) + "END\n", 0, true},
 		{"duplicate identity", tabHeader + tabClient + strings.Replace(tabClient, "alice@example.test", "ALICE@example.test", 1) + "END\n", 0, true},
@@ -93,18 +96,24 @@ func TestStatusThreePollRetainsBaselineOnInvalidResponse(t *testing.T) {
 	if len(ins) != 1 || len(clients) != 1 || clients[0].Up != 1234 || clients[0].Down != 5678 {
 		t.Fatalf("first poll: %v %v", ins, clients)
 	}
-	mu.Lock()
-	response = "OpenVPN CLIENT LIST\nUpdated,now\nEND\n"
-	mu.Unlock()
-	ins, clients = m.CollectTraffic()
-	if len(ins) != 0 || len(clients) != 0 || m.procs[1].lastRx["alice@example.test"] != 1234 {
-		t.Fatalf("invalid poll lost baseline: %v %v %+v", ins, clients, m.procs[1].lastRx)
+	for _, bad := range []string{
+		"OpenVPN CLIENT LIST\nUpdated,now\nEND\n",
+		tabHeader + strings.Replace(tabClient, "1234", "9223372036854775808", 1) + "END\n",
+		"CLIENT_LIST alice@example.test 203.0.113.1 10.8.0.2 bad 1234 5678 179\nEND\n",
+	} {
+		mu.Lock()
+		response = bad
+		mu.Unlock()
+		ins, clients = m.CollectTraffic()
+		if len(ins) != 0 || len(clients) != 0 || m.procs[1].lastRx["alice@example.test"] != 1234 {
+			t.Fatalf("invalid poll lost baseline: %v %v %+v", ins, clients, m.procs[1].lastRx)
+		}
 	}
 	mu.Lock()
 	response = tabHeader + strings.Replace(tabClient, "1234", "1300", 1) + "END\n"
 	count := len(commands)
 	mu.Unlock()
-	if count != 2 {
+	if count != 4 {
 		t.Fatalf("unsafe response retried with another command: %v", commands)
 	}
 	ins, clients = m.CollectTraffic()

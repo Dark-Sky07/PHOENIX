@@ -1391,7 +1391,10 @@ polls preserve the previous in-memory baselines and stop reconciliation for the
 current poll, while observed deltas from other daemons are still committed.
 This does not prove the completeness of a syntactically valid response or
 recover usage between polls, and a transient poll error is not a durable
-per-client accounting incident.
+per-client accounting incident. Headerless legacy rows use fixed counter
+positions rather than searching for a later numeric pair, and counters outside
+the signed 64-bit accounting range are rejected instead of silently clamped.
+Such malformed polls likewise retain their baselines and require investigation.
 
 ### OpenVPN CA and certificate evidence
 
