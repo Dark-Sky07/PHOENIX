@@ -1486,3 +1486,14 @@ does not establish safe shell/path handling for deployment, authenticated or
 atomic allowlist updates, multi-process coordination, denial of already-active
 sessions, accounting drain, crash recovery or any quota-release guarantee.
 The existing production behavior still accepts previously issued profiles.
+
+The same test-only experiment obtains Bob's numeric client ID from a complete
+`status 3` response and sends `client-kill`. One CI run showed that a success
+response can precede disappearance from status, so the test waits for a later
+complete status without Bob. In the bounded follow-up observation, ICMP over
+the formerly established tunnel receives no reply, while the missing allowlist
+rejects fresh authentication. This covers one OpenVPN package, one UDP session
+and one ICMP path; it does not prove all traffic or child processes are drained,
+prove final counters were captured, test isolation from another connected user,
+or fence races between status, kill, reconnect and allowlist changes. This
+management sequence is not wired into production or quota release.
