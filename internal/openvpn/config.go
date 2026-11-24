@@ -76,6 +76,9 @@ func renderServerConf(inst Instance, mgmtPort int) string {
 
 // writeConfig renders the server config into the inbound's data directory.
 func writeConfig(inst Instance, mgmtPort int) error {
+	if !validInboundID(inst.Id) {
+		return fmt.Errorf("openvpn: inbound ID %d cannot be assigned a unique legacy subnet", inst.Id)
+	}
 	dir := dataDirForID(inst.Id)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err

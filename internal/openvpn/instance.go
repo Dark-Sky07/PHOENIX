@@ -100,8 +100,12 @@ func (inst Instance) dns2For() string {
 	return "8.8.8.8"
 }
 
-// serverSubnet returns the deterministic /24 client pool for this inbound so
-// two inbounds on the same host never hand out overlapping addresses.
+// The legacy subnet scheme is injective only below 64000. Higher IDs alias
+// an earlier subnet because the third octet was historically clamped to 255.
+// Reject them instead of silently changing existing deployments' addresses.
+func validInboundID(id int) bool { return id > 0 && id < 64000 }
+
+// serverSubnet returns the legacy /24 for a validated inbound ID.
 func (inst Instance) serverSubnet() (network string, mask string) {
 	n := inst.Id % 250
 	o := inst.Id / 250
@@ -119,7 +123,7 @@ func (inst Instance) serverSubnetCIDR() string {
 // InstanceFromInbound derives a desired Instance from an openvpn inbound.
 // Returns false when the inbound is not a usable openvpn inbound.
 func InstanceFromInbound(ib *model.Inbound, clients []string) (Instance, bool) {
-	if ib == nil || ib.Protocol != model.OpenVPN {
+	if ib == nil || ib.Protocol != model.OpenVPN || !validInboundID(ib.Id) {
 		return Instance{}, false
 	}
 	var parsed struct {

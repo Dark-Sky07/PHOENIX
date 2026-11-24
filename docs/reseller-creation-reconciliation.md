@@ -1431,3 +1431,15 @@ blocks disable or removal rather than reporting success. Start and restart
 responses acknowledge a request, not a confirmed running service. These
 checks do not find or fence an orphan without a PID file or prove a daemon or
 its children have drained. Do not remove evidence merely to bypass a block.
+
+### OpenVPN legacy subnet collisions
+
+The historic OpenVPN pool maps positive inbound IDs to a /24 but clamps one
+address octet, so IDs at or above 64000 can alias earlier pools. New manager,
+network, config and profile operations reject IDs outside 1–63999; they do not
+silently renumber an existing pool. An invalid enabled inbound aborts the
+whole desired-set reconciliation rather than being treated as absent and
+stopping healthy daemons. Existing running colliding configurations are not
+automatically terminated or migrated; operators must investigate and plan a
+migration. Unique IDs within this legacy range do not establish that the
+resulting private subnets are unused by other software or networks.

@@ -135,20 +135,35 @@ func (j *OpenvpnJob) Run() {
 		logger.Warning("openvpn job: get inbounds failed:", err)
 		return
 	}
+	desired, err := buildOpenvpnDesired(inbounds, j.enabledClientsForInbound, j.xrayService.DaemonRelayPort)
+	if err != nil {
+		logger.Warning("openvpn job: delaying reconciliation:", err)
+		return
+	}
+	mgr.Reconcile(desired)
+}
+
+// Build the complete desired set or reject it; a partial list would make
+// reconciliation stop otherwise healthy daemons omitted after an error.
+func buildOpenvpnDesired(inbounds []*model.Inbound, clientsFor func(*model.Inbound) ([]string, bool), relayPort func(string) int) ([]openvpn.Instance, error) {
 	var desired []openvpn.Instance
 	for _, ib := range inbounds {
+		if ib == nil {
+			return nil, fmt.Errorf("nil inbound in snapshot")
+		}
 		if ib.Protocol != model.OpenVPN || !ib.Enable || ib.NodeID != nil {
 			continue
 		}
-		clients, ok := j.enabledClientsForInbound(ib)
+		clients, ok := clientsFor(ib)
 		if !ok {
-			return
+			return nil, fmt.Errorf("inbound %d client lookup failed", ib.Id)
 		}
 		inst, ok := openvpn.InstanceFromInbound(ib, clients)
-		if ok {
-			inst.XrayRelayPort = j.xrayService.DaemonRelayPort(ib.Tag)
-			desired = append(desired, inst)
+		if !ok {
+			return nil, fmt.Errorf("invalid inbound %d", ib.Id)
 		}
+		inst.XrayRelayPort = relayPort(ib.Tag)
+		desired = append(desired, inst)
 	}
-	mgr.Reconcile(desired)
+	return desired, nil
 }

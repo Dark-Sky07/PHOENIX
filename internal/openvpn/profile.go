@@ -35,6 +35,9 @@ func EnsureProfileMaterial(inst Instance, email string) error {
 }
 
 func ensureProfileMaterialLocked(inst Instance, email string) error {
+	if !validInboundID(inst.Id) {
+		return fmt.Errorf("openvpn: inbound ID %d cannot be assigned a unique legacy subnet", inst.Id)
+	}
 	if strings.TrimSpace(email) == "" {
 		return fmt.Errorf("openvpn: client email is empty")
 	}
