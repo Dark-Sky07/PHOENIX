@@ -190,32 +190,35 @@ func (m *Manager) ensureLocked(inst Instance) error {
 // files require manual reconciliation; they do not authorize orphan signalling.
 // stopManagedLocked keeps a failed process and its network rules visible for
 // subsequent retries. A stopped process is not proof of final accounting.
-func (m *Manager) stopManagedLocked(id int) bool {
+func (m *Manager) stopManagedLocked(id int) error {
 	cur, ok := m.procs[id]
 	if !ok {
-		return true
+		return nil
 	}
 	if err := cur.proc.Stop(); err != nil {
 		if m.lastError == "" {
 			m.lastError = fmt.Sprintf("inbound %d: stop failed: %v", id, err)
 		}
 		logger.Warningf("openvpn: inbound %d stop failed; retaining daemon and evidence: %v", id, err)
-		return false
+		return fmt.Errorf("inbound %d stop failed: %w", id, err)
 	}
 	GetNetworkManager().Remove(id)
 	delete(m.procs, id)
-	return true
+	return nil
 }
 
 // stopAllLocked preserves rules for any process whose stop was not confirmed.
-func (m *Manager) stopAllLocked() {
+func (m *Manager) stopAllLocked() error {
 	keep := make(map[int]struct{})
+	var stopErr error
 	for id := range m.procs {
-		if !m.stopManagedLocked(id) {
+		if err := m.stopManagedLocked(id); err != nil {
 			keep[id] = struct{}{}
+			stopErr = errors.Join(stopErr, err)
 		}
 	}
 	GetNetworkManager().RemoveExcept(keep)
+	return stopErr
 }
 
 func (m *Manager) Reconcile(desired []Instance) {
@@ -232,7 +235,7 @@ func (m *Manager) Reconcile(desired []Instance) {
 	}
 	for id := range m.procs {
 		if _, ok := want[id]; !ok {
-			if !m.stopManagedLocked(id) {
+			if err := m.stopManagedLocked(id); err != nil {
 				// Do not remove the rules of a daemon that may still be live.
 				want[id] = struct{}{}
 				continue
@@ -263,12 +266,12 @@ func (m *Manager) Reconcile(desired []Instance) {
 // StopManually stops every OpenVPN daemon and holds reconciliation until the
 // dashboard explicitly resumes it. Preserves the per-inbound PKI directory so
 // existing client .ovpn profiles remain valid when resumed.
-func (m *Manager) StopManually() {
+func (m *Manager) StopManually() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.manualStop = true
 	m.lastError = ""
-	m.stopAllLocked()
+	return m.stopAllLocked()
 }
 
 // Resume clears a dashboard stop request. The next reconcile tick starts the
@@ -283,24 +286,32 @@ func (m *Manager) Resume() {
 // Restart stops the current daemons without setting manualStop, allowing the
 // following reconcile pass to create fresh processes from current settings
 // while preserving the per-inbound PKI CA and client certificates.
-func (m *Manager) Restart() {
+func (m *Manager) Restart() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.manualStop = false
 	m.lastError = ""
-	m.stopAllLocked()
+	return m.stopAllLocked()
 }
 
 // StopInbound stops the daemon and removes firewall rules for an inbound id
 // without deleting its PKI certificates on disk (used when an inbound is
 // disabled rather than deleted).
-func (m *Manager) StopInbound(id int) {
+func (m *Manager) StopInbound(id int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if !m.stopManagedLocked(id) {
-		return
+	if err := m.stopManagedLocked(id); err != nil {
+		return err
+	}
+	if _, err := os.Lstat(pidPathForID(id)); err == nil {
+		err := fmt.Errorf("inbound %d: retained PID evidence requires manual reconciliation", id)
+		m.lastError = err.Error()
+		return err
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect inbound %d PID evidence: %w", id, err)
 	}
 	GetNetworkManager().Remove(id)
+	return nil
 }
 
 // Status returns a secret-free snapshot for the dashboard.
@@ -324,11 +335,11 @@ func (m *Manager) Status() RuntimeStatus {
 
 // Remove stops and forgets the daemon for an inbound id, deleting its data
 // directory. Used when an inbound is deleted.
-func (m *Manager) Remove(id int) {
+func (m *Manager) Remove(id int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if !m.stopManagedLocked(id) {
-		return
+	if err := m.stopManagedLocked(id); err != nil {
+		return err
 	}
 	GetNetworkManager().Remove(id)
 	if err := removeDataDir(id); err != nil {
@@ -336,16 +347,18 @@ func (m *Manager) Remove(id int) {
 			m.lastError = fmt.Sprintf("inbound %d: retained data for manual review: %v", id, err)
 		}
 		logger.Warningf("openvpn: inbound %d retained data for manual review: %v", id, err)
+		return fmt.Errorf("inbound %d retained data for manual review: %w", id, err)
 	}
+	return nil
 }
 
 // StopAll stops every managed daemon. Called on panel shutdown.
-func (m *Manager) StopAll() {
+func (m *Manager) StopAll() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.manualStop = false
 	m.lastError = ""
-	m.stopAllLocked()
+	return m.stopAllLocked()
 }
 
 func removeDataDir(id int) error {

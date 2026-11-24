@@ -135,8 +135,7 @@ func (l *Local) AddInbound(_ context.Context, ib *model.Inbound) error {
 
 func (l *Local) DelInbound(_ context.Context, ib *model.Inbound) error {
 	if ib.Protocol == model.OpenVPN {
-		openvpn.GetManager().Remove(ib.Id)
-		return nil
+		return openvpn.GetManager().Remove(ib.Id)
 	}
 	if ib.Protocol == model.MTProto {
 		mtproto.GetManager().Remove(ib.Id)
@@ -170,7 +169,7 @@ func (l *Local) DelInbound(_ context.Context, ib *model.Inbound) error {
 func (l *Local) UpdateInbound(ctx context.Context, oldIb, newIb *model.Inbound) error {
 	if oldIb.Protocol == model.OpenVPN && newIb.Protocol == model.OpenVPN {
 		if !newIb.Enable {
-			openvpn.GetManager().StopInbound(newIb.Id)
+			return openvpn.GetManager().StopInbound(newIb.Id)
 		}
 		return nil
 	}

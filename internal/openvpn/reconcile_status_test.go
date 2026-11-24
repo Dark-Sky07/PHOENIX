@@ -47,16 +47,17 @@ func TestReconcileKeepsEarlierInboundError(t *testing.T) {
 
 func TestStopFailuresRetainManagedProcessAndRules(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		stop func(*Manager, int)
+		name         string
+		stop         func(*Manager, int) error
+		returnsError bool
 	}{
-		{"reconcile", func(m *Manager, _ int) { m.Reconcile(nil) }},
-		{"manual stop", func(m *Manager, _ int) { m.StopManually() }},
-		{"manual stop reconcile", func(m *Manager, _ int) { m.manualStop = true; m.Reconcile(nil) }},
-		{"restart", func(m *Manager, _ int) { m.Restart() }},
-		{"stop inbound", func(m *Manager, id int) { m.StopInbound(id) }},
-		{"remove", func(m *Manager, id int) { m.Remove(id) }},
-		{"stop all", func(m *Manager, _ int) { m.StopAll() }},
+		{"reconcile", func(m *Manager, _ int) error { m.Reconcile(nil); return nil }, false},
+		{"manual stop", func(m *Manager, _ int) error { return m.StopManually() }, true},
+		{"manual stop reconcile", func(m *Manager, _ int) error { m.manualStop = true; m.Reconcile(nil); return nil }, false},
+		{"restart", func(m *Manager, _ int) error { return m.Restart() }, true},
+		{"stop inbound", func(m *Manager, id int) error { return m.StopInbound(id) }, true},
+		{"remove", func(m *Manager, id int) error { return m.Remove(id) }, true},
+		{"stop all", func(m *Manager, _ int) error { return m.StopAll() }, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tempBinFolder(t)
@@ -85,7 +86,10 @@ func TestStopFailuresRetainManagedProcessAndRules(t *testing.T) {
 			firewall.rules[id] = stateForInstance(inst)
 			// A second attempt must not silently turn the failed cleanup into success.
 			for i := 0; i < 2; i++ {
-				tc.stop(m, id)
+				err := tc.stop(m, id)
+				if tc.returnsError && err == nil {
+					t.Fatal("stop failure not returned")
+				}
 				if m.procs[id] != current || !strings.Contains(m.Status().Error, "inbound 93") {
 					t.Fatalf("stop failure hidden: %+v", m.Status())
 				}

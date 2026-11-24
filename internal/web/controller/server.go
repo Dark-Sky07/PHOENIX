@@ -286,26 +286,32 @@ func (a *ServerController) restartXrayService(c *gin.Context) {
 // controls. The reconcile job is explicitly paused on stop; otherwise its
 // normal ten-second loop would start OpenVPN again immediately.
 func (a *ServerController) stopOpenVPNService(c *gin.Context) {
-	openvpn.GetManager().StopManually()
-	jsonMsg(c, "OpenVPN service stopped", nil)
+	if err := openvpn.GetManager().StopManually(); err != nil {
+		jsonMsg(c, "OpenVPN service stop failed", err)
+		return
+	}
+	jsonMsg(c, "OpenVPN stop requested", nil)
 }
 
 func (a *ServerController) startOpenVPNService(c *gin.Context) {
 	openvpn.GetManager().Resume()
 	job.NewOpenvpnJob().Run()
-	jsonMsg(c, "OpenVPN service started", nil)
+	jsonMsg(c, "OpenVPN start requested", nil)
 }
 
 func (a *ServerController) restartOpenVPNService(c *gin.Context) {
-	openvpn.GetManager().Restart()
+	if err := openvpn.GetManager().Restart(); err != nil {
+		jsonMsg(c, "OpenVPN service restart failed", err)
+		return
+	}
 	job.NewOpenvpnJob().Run()
-	jsonMsg(c, "OpenVPN service restarted", nil)
+	jsonMsg(c, "OpenVPN restart requested", nil)
 }
 
 func (a *ServerController) updateOpenVPNService(c *gin.Context) {
 	openvpn.GetManager().Resume()
 	job.NewOpenvpnJob().Run()
-	jsonMsg(c, "OpenVPN service updated", nil)
+	jsonMsg(c, "OpenVPN update requested", nil)
 }
 
 func (a *ServerController) stopL2TPService(c *gin.Context) {

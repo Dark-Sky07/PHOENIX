@@ -1425,5 +1425,9 @@ filesystem writers. A missing PID file does not prove there is no orphan;
 verified process-tree termination, final traffic accounting and a safe
 reconciliation override remain unimplemented. Manager stop paths now retain
 managed state and firewall rules and report a stop failure, including repeated
-attempts after an owned PID cleanup fails. This does not prove a daemon or its
-children have drained. Do not remove evidence merely to bypass a block.
+attempts after an owned PID cleanup fails. Dashboard stop/restart and local
+inbound disable/removal propagate these errors; an unmanaged retained PID also
+blocks disable or removal rather than reporting success. Start and restart
+responses acknowledge a request, not a confirmed running service. These
+checks do not find or fence an orphan without a PID file or prove a daemon or
+its children have drained. Do not remove evidence merely to bypass a block.
