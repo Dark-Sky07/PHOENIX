@@ -340,6 +340,14 @@ export default function IndexPage() {
                     description={t('pages.index.resellerTrafficWarningDescription')}
                   />
 
+                  <Alert
+                    className="openvpn-credential-warning"
+                    type="warning"
+                    showIcon
+                    message={t('pages.index.openvpnCredentialWarningTitle')}
+                    description={t('pages.index.openvpnCredentialWarningDescription')}
+                  />
+
                   {(!status.counterIncidents?.available || status.counterIncidents.databaseCount > 0 || status.counterIncidents.fallbackPresent || status.counterIncidents.pendingInProcess) && (
                     <Alert
                       className="reseller-traffic-warning"

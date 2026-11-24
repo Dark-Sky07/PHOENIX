@@ -143,6 +143,8 @@
       "nodeSnapshotSafetyTitle": "Remote node traffic requires review",
       "nodeSnapshotSafetyDescription": "All {{count}} registered nodes, including disabled nodes, require accounting review. Experimental verified snapshots do not prove historical or unpolled traffic is complete. Reconcile reseller usage before relying on totals.",
       "nodeSnapshotSafetyUnavailable": "Node traffic safety status is unavailable. Do not assume remote accounting is complete; investigate the database and node status.",
+      "openvpnCredentialWarningTitle": "OpenVPN credentials are not revoked on disable",
+      "openvpnCredentialWarningDescription": "If you use OpenVPN, a previously downloaded profile may reconnect after a client is disabled or removed; deleting local certificate files does not revoke it. Existing sessions and final usage are not verified. Restrict affected listener access and investigate before relying on quota or removal. Stopped status does not rule out an unmanaged daemon.",
       "daemonIdentityTitle": "Daemon client accounting identities need review",
       "daemonIdentityDescription": "{{count}} enabled local daemon credential(s) have missing, ambiguous, or database-unresolvable traffic identities and are omitted from filtered configuration. Review the records before restoring access. This check does not prove that existing sessions have stopped or that historical usage is complete.",
       "daemonIdentityUnavailable": "This panel version cannot report daemon accounting identity issues. Upgrade and review its records before assuming they are safe.",
