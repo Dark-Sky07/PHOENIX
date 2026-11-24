@@ -1490,9 +1490,11 @@ The existing production behavior still accepts previously issued profiles.
 The same test-only experiment obtains Bob's numeric client ID from a complete
 `status 3` response and sends `client-kill`. One CI run showed that a success
 response can precede disappearance from status, so the test waits for a later
-complete status without Bob. In the bounded follow-up observation, ICMP over
-the formerly established tunnel receives no reply, while the missing allowlist
-rejects fresh authentication. A second user in a separate network namespace
+complete status without Bob. In the bounded follow-up observation, a ping to
+the VPN server address reports one packet transmitted and no reply, while the
+missing allowlist rejects fresh authentication. The test rejects process errors
+and timeouts without packet-loss statistics, but does not trace the packet's
+route or prove it reached the tunnel. A second user in a separate network namespace
 remains in status and continues to receive ICMP replies after Bob's kill. This
 covers one OpenVPN package, two UDP sessions and one ICMP path; it does not
 prove all traffic or child processes are drained, prove final counters were
