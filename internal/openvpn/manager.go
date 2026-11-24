@@ -103,8 +103,13 @@ func (m *Manager) ensure(inst Instance) error {
 }
 
 func (m *Manager) ensureLocked(inst Instance) error {
+	certMu.Lock()
+	defer certMu.Unlock()
 	fp := inst.fingerprint()
 	dir := dataDirForID(inst.Id)
+	if err := validateClientCertSetLocked(dir, inst.Clients); err != nil {
+		return err
+	}
 	if cur, ok := m.procs[inst.Id]; ok && cur.fingerprint == fp && cur.proc.IsRunning() {
 		if err := GetNetworkManager().Apply(inst); err != nil {
 			return err
@@ -112,11 +117,11 @@ func (m *Manager) ensureLocked(inst Instance) error {
 		cur.tag = inst.Tag
 		cur.clients = inst.Clients
 		// Certs may have been lost on a flaky disk; top them up cheaply.
-		if err := ensureServerCert(dir); err != nil {
+		if err := ensureServerCertLocked(dir); err != nil {
 			logger.Warningf("openvpn: inbound %d: heal server cert failed: %v", inst.Id, err)
 		}
 		for _, email := range inst.Clients {
-			if err := ensureClientCert(dir, email); err != nil {
+			if err := ensureClientCertLocked(dir, email); err != nil {
 				logger.Warningf("openvpn: inbound %d: heal client cert for %s failed: %v", inst.Id, email, err)
 			}
 		}
@@ -131,15 +136,15 @@ func (m *Manager) ensureLocked(inst Instance) error {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err
 	}
-	if err := ensureServerCert(dir); err != nil {
+	if err := ensureServerCertLocked(dir); err != nil {
 		return err
 	}
 	for _, email := range inst.Clients {
-		if err := ensureClientCert(dir, email); err != nil {
+		if err := ensureClientCertLocked(dir, email); err != nil {
 			return err
 		}
 	}
-	if err := pruneClientCerts(dir, inst.Clients); err != nil {
+	if err := pruneClientCertsLocked(dir, inst.Clients); err != nil {
 		logger.Warningf("openvpn: inbound %d: prune client certs failed: %v", inst.Id, err)
 	}
 
@@ -330,6 +335,8 @@ func (m *Manager) StopAll() {
 }
 
 func removeDataDir(id int) error {
+	certMu.Lock()
+	defer certMu.Unlock()
 	return os.RemoveAll(dataDirForID(id))
 }
 

@@ -32,6 +32,26 @@ state. Do not simply delete or merge counters without determining their origin
 and preserving consumed bytes. Archives produced before this guard may already
 contain an inflated snapshot and require evidence-based reconciliation.
 
+## OpenVPN credential safety
+
+Legacy certificate filenames sanitize client emails and may collide. A profile
+request now refuses a stored certificate with a different CN, mismatched key,
+or partial material, and daemon reconciliation checks requested filenames
+before stopping the existing daemon. Provisioning, profile reads and pruning are
+serialized within one panel process. Existing profiles potentially exposed by a
+past collision require investigation; this check does not revoke them. It also
+does not coordinate another panel process or a privileged filesystem writer.
+
+**Removing a local client certificate file is not revocation.** A previously
+issued profile still contains its certificate and private key, and the current
+OpenVPN server configuration accepts certificates signed by the inbound CA;
+it does not check the current enabled-client list at authentication. Disabling
+or removing a client is therefore not proof that a copied profile cannot
+reconnect, nor that an existing session was disconnected. Administrators should
+restrict access to affected OpenVPN listeners while investigating and retain
+accounting evidence. A migration-safe revocation/allowlist and verified drain
+remain necessary before relying on quota enforcement or removal.
+
 ## OpenVPN management polling
 
 OpenVPN status version 3 is tab-separated, including empty columns; its client

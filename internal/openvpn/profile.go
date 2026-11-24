@@ -28,6 +28,12 @@ import (
 // attaching a client, before the next ten-second reconcile tick. Provisioning
 // on demand closes that race and also heals a partially-created inbound.
 func EnsureProfileMaterial(inst Instance, email string) error {
+	certMu.Lock()
+	defer certMu.Unlock()
+	return ensureProfileMaterialLocked(inst, email)
+}
+
+func ensureProfileMaterialLocked(inst Instance, email string) error {
 	if strings.TrimSpace(email) == "" {
 		return fmt.Errorf("openvpn: client email is empty")
 	}
@@ -35,14 +41,16 @@ func EnsureProfileMaterial(inst Instance, email string) error {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err
 	}
-	if err := ensureServerCert(dir); err != nil {
+	if err := ensureServerCertLocked(dir); err != nil {
 		return err
 	}
-	return ensureClientCert(dir, email)
+	return ensureClientCertLocked(dir, email)
 }
 
 func BuildProfile(inst Instance, email, host string) (string, error) {
-	if err := EnsureProfileMaterial(inst, email); err != nil {
+	certMu.Lock()
+	defer certMu.Unlock()
+	if err := ensureProfileMaterialLocked(inst, email); err != nil {
 		return "", fmt.Errorf("openvpn: provision certificate for client %s: %w", email, err)
 	}
 	dir := dataDirForID(inst.Id)

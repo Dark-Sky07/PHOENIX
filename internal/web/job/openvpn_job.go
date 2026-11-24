@@ -30,8 +30,8 @@ func NewOpenvpnJob() *OpenvpnJob {
 // inbound that are actually allowed to connect — mirroring the exact
 // enable-logic of the Xray config renderer (client record Enable plus the
 // shared client-traffic row, where the auto-disable job records quota and
-// expiry violations). A disabled client's certificate is removed, so it
-// cannot connect even if it still holds an old profile.
+// expiry violations). Pruning local certificate files does not revoke an
+// already-issued profile; reconnect and active sessions remain unproven.
 func (j *OpenvpnJob) enabledClientsForInbound(ib *model.Inbound) ([]string, bool) {
 	dbClients, err := j.clientService.ListForInbound(nil, ib.Id)
 	if err != nil {
