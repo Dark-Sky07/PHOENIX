@@ -1475,7 +1475,11 @@ An isolated real-server CI experiment adds a test-only `tls-verify` shell
 script and SHA-256 certificate fingerprint allowlist. On the Ubuntu OpenVPN
 package tested, an allowlisted Bob completes a connection, Alice's different
 certificate is rejected during TLS verification, and a new Bob authentication
-is rejected when the allowlist file is missing. This is an experiment only:
+is rejected when the allowlist file is missing. The same real-server test
+also sends ICMP over Bob's already-established tunnel before and after removing
+the allowlist, including after a new Bob authentication is rejected; in this
+bounded test the existing tunnel continues forwarding. Admission checks alone
+therefore do not terminate established sessions. This is an experiment only:
 PHOENIX does not install, generate or enable that verifier in production.
 The test uses a trusted temporary filesystem and one OpenVPN distribution; it
 does not establish safe shell/path handling for deployment, authenticated or
