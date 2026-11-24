@@ -2,6 +2,7 @@ package service
 
 import (
 	"errors"
+	"time"
 
 	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
@@ -28,27 +29,55 @@ func (s *InboundService) FilterDaemonAccountingClients(clients []model.Client) (
 		}
 	}
 	var rows []xray.ClientTraffic
-	if err := db.Select("id", "email", "enable").Find(&rows).Error; err != nil {
+	if err := db.Select("id", "email", "enable", "up", "down", "total", "expiry_time").Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	counts := make(map[string]int, len(rows))
-	ids := make(map[string]int, len(rows))
-	enabled := make(map[string]bool, len(rows))
+	counters := make(map[string]xray.ClientTraffic, len(rows))
 	for _, row := range rows {
 		key := transferEmailKey(row.Email)
 		counts[key]++
-		ids[key] = row.Id
-		enabled[key] = row.Enable
+		counters[key] = row
+	}
+	// SQL LOWER/TRIM does not implement Go's Unicode/whitespace identity
+	// normalization. Inspect all global snapshots in Go so a hidden variant
+	// cannot make a consumed or corrupt quota appear unused.
+	var globals []model.ClientGlobalTraffic
+	if err := db.Select("email", "up", "down").Find(&globals).Error; err != nil {
+		return nil, err
+	}
+	type usage struct {
+		up, down int64
+		invalid  bool
+	}
+	effective := make(map[string]usage, len(globals))
+	for _, row := range globals {
+		key := transferEmailKey(row.Email)
+		v := effective[key]
+		v.invalid = v.invalid || row.Up < 0 || row.Down < 0
+		v.up = max(v.up, row.Up)
+		v.down = max(v.down, row.Down)
+		effective[key] = v
 	}
 	sqlIDs, err := daemonSQLTrafficIDs(db, keys)
 	if err != nil {
 		return nil, err
 	}
+	now := time.Now().UnixMilli()
 	for _, client := range clients {
 		key := transferEmailKey(client.Email)
-		if client.Enable && key != "" && counts[key] == 1 && ids[key] != 0 && sqlIDs[key] == ids[key] && enabled[key] {
-			out = append(out, client)
+		row := counters[key]
+		if !client.Enable || key == "" || counts[key] != 1 || row.Id == 0 || sqlIDs[key] != row.Id || !row.Enable {
+			continue
 		}
+		global := effective[key]
+		up, down := max(row.Up, global.up), max(row.Down, global.down)
+		if row.Up < 0 || row.Down < 0 || global.invalid ||
+			localTrafficDepleted(row.Total, up, down) || localTrafficDepleted(client.TotalGB, up, down) ||
+			(row.ExpiryTime > 0 && row.ExpiryTime <= now) || (client.ExpiryTime > 0 && client.ExpiryTime <= now) {
+			continue
+		}
+		out = append(out, client)
 	}
 	return out, nil
 }

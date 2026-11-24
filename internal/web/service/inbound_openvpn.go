@@ -58,6 +58,13 @@ func (s *InboundService) getOpenvpnProfile(fallbackHost, email string, allowedIn
 	if email == "" {
 		return "", nil, common.NewError("openvpn: client email is required")
 	}
+	// Coordinate with participating quota and ownership mutations until the
+	// profile has been produced. This does not revoke previously issued keys.
+	unlock, err := LockResellerAllocation()
+	if err != nil {
+		return "", nil, err
+	}
+	defer unlock()
 	rec, err := s.clientService.GetRecordByEmail(nil, email)
 	if err != nil {
 		return "", nil, err
@@ -89,6 +96,16 @@ func (s *InboundService) getOpenvpnProfile(fallbackHost, email string, allowedIn
 	if chosen == nil {
 		return "", nil, common.NewError("openvpn: client is not attached to an enabled local openvpn inbound")
 	}
+	allowed, err := s.FilterDaemonAccountingClients([]model.Client{*rec.ToClient()})
+	if err != nil {
+		return "", nil, err
+	}
+	if len(allowed) != 1 {
+		return "", nil, common.NewError("openvpn: client identity, quota or expiry requires review")
+	}
+	// Use the canonical record email for the certificate CN and filename;
+	// request case variants must not create a different certificate identity.
+	email = rec.Email
 	inst, ok := openvpn.InstanceFromInbound(chosen, []string{email})
 	if !ok {
 		return "", nil, common.NewError("openvpn: inbound settings are invalid")

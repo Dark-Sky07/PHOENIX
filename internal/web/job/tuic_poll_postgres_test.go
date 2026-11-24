@@ -62,9 +62,20 @@ func TestTuicCommittedPollRecoveryPostgres(t *testing.T) {
 	}
 	// PostgreSQL's trim does not remove tabs; this colliding row must still
 	// block a fresh batch and leave neither a receipt nor changed counters.
-	canonical := []model.Client{{Email: row.Email, Enable: true}}
+	canonical := []model.Client{{Email: row.Email, Enable: true, TotalGB: 100}}
 	if filtered, err := (&service.InboundService{}).FilterDaemonAccountingClients(canonical); err != nil || len(filtered) != 1 {
 		t.Fatalf("valid daemon identity rejected: %+v %v", filtered, err)
+	}
+	global := model.ClientGlobalTraffic{MasterGuid: id, Email: "\t" + row.Email + "\n", Up: 100}
+	if err := db.Create(&global).Error; err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Delete(&global).Error })
+	if filtered, err := (&service.InboundService{}).FilterDaemonAccountingClients(canonical); err != nil || len(filtered) != 0 {
+		t.Fatalf("Go-normalized exhausted global quota accepted: %+v %v", filtered, err)
+	}
+	if err := db.Delete(&global).Error; err != nil {
+		t.Fatal(err)
 	}
 	other := xray.ClientTraffic{Email: "\t" + row.Email + "\n", Enable: true}
 	if err := db.Create(&other).Error; err != nil {

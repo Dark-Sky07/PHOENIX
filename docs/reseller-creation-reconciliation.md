@@ -34,6 +34,16 @@ contain an inflated snapshot and require evidence-based reconciliation.
 
 ## OpenVPN credential safety
 
+OpenVPN profile issuance now checks the canonical client and unique enabled
+traffic identity against local and Go-normalized upstream usage, expiry and
+quota while holding the participating allocation lock. A disabled, exhausted,
+ambiguous or corrupt identity is rejected; a failed evidence query or pending
+journal also blocks issuance. Periodic OpenVPN/L2TP/SSTP/PPTP client filtering
+uses the same quota checks even before the next disable job updates its flag.
+These are point-in-time checks and do not capture unpolled traffic or fence
+nonparticipating writers. Other direct runtime paths still need equivalent
+quota coverage.
+
 Legacy certificate filenames sanitize client emails and may collide. A profile
 request now refuses a stored certificate with a different CN, mismatched key,
 or partial material, and daemon reconciliation checks requested filenames
