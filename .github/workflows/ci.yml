@@ -114,6 +114,35 @@ jobs:
           PHOENIX_TEST_OPENVPN_BINARY: /usr/sbin/openvpn
         run: go test ./internal/openvpn -run '^TestRealOpenVPNConfigParser$' -count=1 -v
 
+  openvpn-live-characterization:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install OpenVPN and prepare isolated tunnel tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openvpn iproute2
+          sudo modprobe tun || true
+          sudo mkdir -p /dev/net
+          test -c /dev/net/tun || sudo mknod /dev/net/tun c 10 200
+      - name: Characterize previously issued profiles
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -c -o /tmp/phoenix-openvpn-live.test ./internal/openvpn
+          if sudo env PATH="$PATH" PHOENIX_TEST_OPENVPN_LIVE_BINARY=/usr/sbin/openvpn /tmp/phoenix-openvpn-live.test -test.run '^TestRealOpenVPNPreviouslyIssuedProfileStillConnects$' -test.v 2>&1 | tee /tmp/openvpn-live.log; then exit 0; fi
+          python3 - <<'PYLOG'
+          from pathlib import Path
+          output = Path('/tmp/openvpn-live.log').read_text(errors='replace')[-4000:]
+          output = output.replace('%', '%25').replace(chr(13), '%0D').replace(chr(10), '%0A')
+          print(f'::error title=openvpn-live-test-output::{output}')
+          PYLOG
+          exit 1
+
   xray-quiescence-characterization:
     runs-on: ubuntu-latest
     steps:
