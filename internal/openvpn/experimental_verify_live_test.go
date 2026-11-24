@@ -291,11 +291,33 @@ sys.stdout.buffer.write(buf)
 	if !found {
 		t.Fatalf("missing Bob disconnect record: %s", data)
 	}
+	// Capture the actual probe on Bob's tunnel device. A routing error or a
+	// ping sent through another interface must not masquerade as evidence.
+	captureFile, err := os.Create(filepath.Join(t.TempDir(), "capture.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer captureFile.Close()
+	captureCtx, cancelCapture := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelCapture()
+	capture := exec.CommandContext(captureCtx, "ip", "netns", "exec", clientNS, "tcpdump", "-n", "-l", "-i", "tun0", "-c", "1", "icmp and dst host 10.120.0.1")
+	capture.Stdout, capture.Stderr = captureFile, captureFile
+	if err := capture.Start(); err != nil {
+		t.Fatalf("start tunnel capture: %v", err)
+	}
+	defer func() { _ = capture.Process.Kill(); _ = capture.Wait() }()
+	waitLog(captureFile.Name(), func(s string) bool { return strings.Contains(s, "listening on tun0") })
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "ip", "netns", "exec", clientNS, "ping", "-n", "-c", "1", "-W", "2", "10.120.0.1").CombinedOutput()
+	out, err := exec.CommandContext(ctx, "ip", "netns", "exec", clientNS, "ping", "-I", "tun0", "-n", "-c", "1", "-W", "2", "10.120.0.1").CombinedOutput()
 	if !isObservedPingLoss(ctx.Err(), err, string(out)) {
 		t.Fatalf("no valid ICMP loss observation after kill: context=%v error=%v output=%s", ctx.Err(), err, out)
+	}
+	waitLog(captureFile.Name(), func(s string) bool {
+		return strings.Contains(s, "ICMP echo request") && strings.Contains(s, "10.120.0.1")
+	})
+	if err := capture.Wait(); err != nil {
+		t.Fatalf("tunnel capture failed: %v", err)
 	}
 	pingThroughCarol()
 }
