@@ -100,6 +100,14 @@ func TestRealOpenVPNExperimentalFingerprintAdmission(t *testing.T) {
 	waitLog(logPathForID(inst.Id), func(s string) bool { return strings.Contains(s, "Initialization Sequence Completed") })
 	bobLog := client("bob", bob)
 	waitLog(bobLog, func(s string) bool { return strings.Contains(s, "Initialization Sequence Completed") })
+	pingThroughBob := func() {
+		t.Helper()
+		out, err := exec.Command("ip", "netns", "exec", clientNS, "ping", "-n", "-c", "2", "-W", "3", "10.120.0.1").CombinedOutput()
+		if err != nil {
+			t.Fatalf("Bob's established tunnel did not carry ICMP: %v\n%s", err, out)
+		}
+	}
+	pingThroughBob()
 	client("alice", alice)
 	denied := func(identity string) func(string) bool {
 		return func(s string) bool {
@@ -116,6 +124,10 @@ func TestRealOpenVPNExperimentalFingerprintAdmission(t *testing.T) {
 	if err := os.Remove(allowlist); err != nil {
 		t.Fatal(err)
 	}
+	// Existing sessions are not reverified on every packet. This deliberately
+	// characterizes continued forwarding, not an active-session revocation.
+	pingThroughBob()
 	client("bob-without-allowlist", bob)
 	waitLog(logPathForID(inst.Id), denied("bob@example.test"))
+	pingThroughBob()
 }

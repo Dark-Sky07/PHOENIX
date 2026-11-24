@@ -125,7 +125,7 @@ jobs:
       - name: Install OpenVPN and prepare isolated tunnel tests
         run: |
           sudo apt-get update
-          sudo apt-get install -y openvpn iproute2
+          sudo apt-get install -y openvpn iproute2 iputils-ping
           sudo modprobe tun || true
           sudo mkdir -p /dev/net
           test -c /dev/net/tun || sudo mknod /dev/net/tun c 10 200
