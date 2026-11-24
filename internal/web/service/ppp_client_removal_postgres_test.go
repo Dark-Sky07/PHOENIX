@@ -19,7 +19,9 @@ func TestPPPRemovalGuardPostgres(t *testing.T) {
 		t.Skip("PHOENIX_TEST_POSTGRES_DSN not set")
 	}
 	t.Setenv("XUI_BIN_FOLDER", t.TempDir())
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	// Match the application migration policy. Creating a new inbound foreign
+	// key here would change the shared CI database for subsequent tests.
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{DisableForeignKeyConstraintWhenMigrating: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +108,7 @@ func TestPPPRemovalGuardPostgres(t *testing.T) {
 	// This uncommitted global snapshot must be read on the caller's transaction
 	// and normalized by Go rather than PostgreSQL's narrower TRIM/LOWER.
 	quotaEmail := id + "@direct-quota.test"
-	traffic := xray.ClientTraffic{Email: quotaEmail, Enable: true, Total: 100}
+	traffic := xray.ClientTraffic{InboundId: ib.Id, Email: quotaEmail, Enable: true, Total: 100}
 	global := model.ClientGlobalTraffic{MasterGuid: id, Email: "\t" + quotaEmail + "\n", Up: 100}
 	for _, evidence := range []any{&traffic, &global} {
 		if err := tx.Create(evidence).Error; err != nil {
