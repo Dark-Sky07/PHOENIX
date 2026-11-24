@@ -275,7 +275,17 @@ jobs:
       - name: Test PostgreSQL accounting locks
         env:
           PHOENIX_TEST_POSTGRES_DSN: postgres://phoenix:phoenix@localhost:5432/phoenix_test?sslmode=disable
-        run: go test ./internal/web/service -run '^(TestXrayTrafficIdentityLocksExistingRowsPostgres|TestResellerAllocationAdvisoryLockPostgres|TestConcurrentVoucherRedemptionPostgres|TestConcurrentResellerPaymentPostgres|TestEffectiveGlobalTrafficEnforcementPostgres|TestInboundTrafficOverflowPostgres|TestResellerNodeBaselinePostgres|TestResellerRemoteGuardOrphanedEvidencePostgres|TestCounterIncidentAcrossPostgresProcesses|TestL2TPIncidentAcrossPostgresProcesses|TestPPPCheckpointConcurrentWritersPostgres|TestPPPAccountingDestinationsPostgres|TestXrayReceiptPayloadBindingPostgres|TestTuicReceiptPayloadBindingPostgres|TestPPPRemovalGuardPostgres|TestPPPIncidentAcrossPostgresProcesses|TestXrayPollMarkerAcrossPostgresProcesses)$' -count=1
+        shell: bash
+        run: |
+          set -o pipefail
+          if go test ./internal/web/service -run '^(TestXrayTrafficIdentityLocksExistingRowsPostgres|TestResellerAllocationAdvisoryLockPostgres|TestConcurrentVoucherRedemptionPostgres|TestConcurrentResellerPaymentPostgres|TestEffectiveGlobalTrafficEnforcementPostgres|TestInboundTrafficOverflowPostgres|TestResellerNodeBaselinePostgres|TestResellerRemoteGuardOrphanedEvidencePostgres|TestCounterIncidentAcrossPostgresProcesses|TestL2TPIncidentAcrossPostgresProcesses|TestPPPCheckpointConcurrentWritersPostgres|TestPPPAccountingDestinationsPostgres|TestXrayReceiptPayloadBindingPostgres|TestTuicReceiptPayloadBindingPostgres|TestPPPRemovalGuardPostgres|TestPPPIncidentAcrossPostgresProcesses|TestXrayPollMarkerAcrossPostgresProcesses)$' -count=1 2>&1 | tee /tmp/postgres-test.log; then exit 0; fi
+          python3 - <<'PYLOG'
+          from pathlib import Path
+          output = Path('/tmp/postgres-test.log').read_text(errors='replace')[-4000:]
+          output = output.replace('%', '%25').replace(chr(13), '%0D').replace(chr(10), '%0A')
+          print(f'::error title=postgres-test-output::{output}')
+          PYLOG
+          exit 1
       - name: Test TUIC committed poll recovery on PostgreSQL
         env:
           PHOENIX_TEST_POSTGRES_DSN: postgres://phoenix:phoenix@localhost:5432/phoenix_test?sslmode=disable
