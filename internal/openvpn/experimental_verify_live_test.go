@@ -94,7 +94,7 @@ func TestRealOpenVPNExperimentalFingerprintAdmission(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = fmt.Fprintf(file, "script-security 2\ntls-verify %s\nclient-disconnect %s\n", verifier, disconnectHook)
+	_, err = fmt.Fprintf(file, "disable-dco\nscript-security 2\ntls-verify %s\nclient-disconnect %s\n", verifier, disconnectHook)
 	closeErr := file.Close()
 	if err != nil || closeErr != nil {
 		t.Fatalf("write verifier config: %v %v", err, closeErr)
@@ -125,7 +125,7 @@ func TestRealOpenVPNExperimentalFingerprintAdmission(t *testing.T) {
 		t.Helper()
 		log := filepath.Join(t.TempDir(), name+".log")
 		conf := filepath.Join(t.TempDir(), name+".ovpn")
-		if err := os.WriteFile(conf, []byte(text+"\nlog "+quoteConfigPath(log)+"\n"), 0600); err != nil {
+		if err := os.WriteFile(conf, []byte(text+"\ndisable-dco\nlog "+quoteConfigPath(log)+"\n"), 0600); err != nil {
 			t.Fatal(err)
 		}
 		start(ns, conf)
