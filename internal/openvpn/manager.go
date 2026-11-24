@@ -212,9 +212,14 @@ func (m *Manager) Reconcile(desired []Instance) {
 		}
 	}
 	GetNetworkManager().RemoveExcept(want)
+	// A later successful inbound must not hide an earlier failure in this
+	// reconciliation pass. Clear stale errors only when a new pass begins.
+	m.lastError = ""
 	for _, inst := range desired {
 		if err := m.ensureLocked(inst); err != nil {
-			m.lastError = err.Error()
+			if m.lastError == "" {
+				m.lastError = fmt.Sprintf("inbound %d: %v", inst.Id, err)
+			}
 			// Throttled: a persistent failure (no binary, busy port) logs
 			// at most once a minute instead of every 10 s tick.
 			if cur, ok := m.procs[inst.Id]; ok && time.Since(cur.lastErrAt) < time.Minute {
@@ -224,8 +229,6 @@ func (m *Manager) Reconcile(desired []Instance) {
 				cur.lastErrAt = time.Now()
 			}
 			logger.Warningf("openvpn: reconcile failed for inbound %d: %v", inst.Id, err)
-		} else {
-			m.lastError = ""
 		}
 	}
 }

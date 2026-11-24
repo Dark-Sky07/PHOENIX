@@ -1391,7 +1391,9 @@ material remains. Existing server keypairs must match and be signed by the CA;
 existing client certificates must also be signed by it and currently valid.
 Partial server material is retained for manual review. Reconciliation validates
 material before its no-op path or stopping an existing managed daemon, and
-reports errors rather than silently ignoring them. This is deliberately
+reports errors rather than silently ignoring them. A successful later inbound
+in the same reconciliation pass does not clear an earlier inbound error from
+the dashboard; the error is cleared on a subsequent successful pass. This is deliberately
 fail-closed and may require operator recovery or a planned CA migration; it is
 not automatic rotation or revocation. The locks are process-local, and these
 checks do not prove daemon termination, final accounting, or protect against
