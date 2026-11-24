@@ -306,7 +306,19 @@ sys.stdout.buffer.write(buf)
 		t.Fatalf("start tunnel capture: %v", err)
 	}
 	defer func() { _ = capture.Process.Kill(); _ = capture.Wait() }()
-	waitLog(captureFile.Name(), func(s string) bool { return strings.Contains(s, "listening on tun0") })
+	readyDeadline := time.Now().Add(4 * time.Second)
+	for {
+		data, _ := os.ReadFile(captureFile.Name())
+		if strings.Contains(string(data), "listening on tun0") {
+			break
+		}
+		if time.Now().After(readyDeadline) {
+			links, _ := exec.Command("ip", "-n", clientNS, "addr").CombinedOutput()
+			route, _ := exec.Command("ip", "-n", clientNS, "route", "get", "10.120.0.1").CombinedOutput()
+			t.Fatalf("capture not ready: %s\nclient links: %s\nroute: %s", data, links, route)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "ip", "netns", "exec", clientNS, "ping", "-I", "tun0", "-n", "-c", "1", "-W", "2", "10.120.0.1").CombinedOutput()
