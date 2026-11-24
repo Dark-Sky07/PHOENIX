@@ -1468,3 +1468,17 @@ lack of revocation for that binary and scenario; it does not prove behavior for
 all OpenVPN versions or deployments, quantify traffic after removal, or test
 termination of an already-active session. Do not interpret removal of local
 files, quota checks or this test as a revocation or final-accounting barrier.
+
+### Experimental OpenVPN fingerprint admission (test only)
+
+An isolated real-server CI experiment adds a test-only `tls-verify` shell
+script and SHA-256 certificate fingerprint allowlist. On the Ubuntu OpenVPN
+package tested, an allowlisted Bob completes a connection, Alice's different
+certificate is rejected during TLS verification, and a new Bob authentication
+is rejected when the allowlist file is missing. This is an experiment only:
+PHOENIX does not install, generate or enable that verifier in production.
+The test uses a trusted temporary filesystem and one OpenVPN distribution; it
+does not establish safe shell/path handling for deployment, authenticated or
+atomic allowlist updates, multi-process coordination, denial of already-active
+sessions, accounting drain, crash recovery or any quota-release guarantee.
+The existing production behavior still accepts previously issued profiles.
