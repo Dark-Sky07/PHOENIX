@@ -73,7 +73,22 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          go list ./... | grep -v '/frontend/node_modules/' > /tmp/go-packages.txt
+          # A transient module proxy stream error can interrupt go list before
+          # any tests run. Retry dependency/package discovery, never test failures.
+          listed=false
+          for attempt in 1 2 3; do
+            if go list ./... > /tmp/all-go-packages.txt; then
+              listed=true
+              break
+            fi
+            echo "go list failed (attempt $attempt); retrying" >&2
+            sleep $((attempt * 5))
+          done
+          if [ "$listed" != true ]; then
+            echo "go list failed after retries" >&2
+            exit 1
+          fi
+          grep -v '/frontend/node_modules/' /tmp/all-go-packages.txt > /tmp/go-packages.txt
           if go test $(cat /tmp/go-packages.txt) 2>&1 | tee /tmp/go-test.log; then
             exit 0
           fi
