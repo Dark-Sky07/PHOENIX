@@ -157,7 +157,7 @@ sys.stdout.buffer.write(buf)
 		if err != nil {
 			t.Fatalf("management %q: %v\n%s", command, err, out)
 		}
-		return string(out)
+		return strings.ReplaceAll(string(out), "\r\n", "\n")
 	}
 	status := management("status 3")
 	clientIDIndex := -1
