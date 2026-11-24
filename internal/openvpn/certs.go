@@ -139,9 +139,29 @@ func loadKeyPair(crtPath, keyPath string) (*x509.Certificate, *ecdsa.PrivateKey,
 func ensureCA(dir string) (*x509.Certificate, *ecdsa.PrivateKey, error) {
 	crtPath, keyPath := caFiles(dir)
 	if crt, key, err := loadKeyPair(crtPath, keyPath); err == nil {
-		if time.Now().Before(crt.NotAfter.Add(-24 * time.Hour)) {
-			return crt, key, nil
+		pub, ok := crt.PublicKey.(*ecdsa.PublicKey)
+		if !ok || !pub.Equal(&key.PublicKey) || !crt.IsCA || crt.CheckSignatureFrom(crt) != nil ||
+			time.Now().Before(crt.NotBefore) || !time.Now().Before(crt.NotAfter.Add(-24*time.Hour)) {
+			return nil, nil, fmt.Errorf("openvpn: invalid, mismatched or expiring CA; manual review required")
 		}
+		return crt, key, nil
+	}
+	// Never replace partial, corrupt, or lost CA material while credentials
+	// still exist. Rotation requires explicit operator reconciliation.
+	serverCrt, serverKey := serverFiles(dir)
+	for _, path := range []string{crtPath, keyPath, serverCrt, serverKey} {
+		if _, err := os.Lstat(path); err == nil {
+			return nil, nil, fmt.Errorf("openvpn: missing or invalid CA material with existing evidence; manual review required")
+		} else if !os.IsNotExist(err) {
+			return nil, nil, err
+		}
+	}
+	entries, err := os.ReadDir(filepath.Join(dir, "clients"))
+	if err != nil && !os.IsNotExist(err) {
+		return nil, nil, err
+	}
+	if len(entries) != 0 {
+		return nil, nil, fmt.Errorf("openvpn: missing CA with existing client material; manual review required")
 	}
 	key, err := newKey()
 	if err != nil {
@@ -179,12 +199,24 @@ func ensureServerCert(dir string) error {
 
 func ensureServerCertLocked(dir string) error {
 	crtPath, keyPath := serverFiles(dir)
-	if _, _, err := loadKeyPair(crtPath, keyPath); err == nil {
-		return nil
-	}
 	caCrt, caKey, err := ensureCA(dir)
 	if err != nil {
 		return err
+	}
+	if crt, key, err := loadKeyPair(crtPath, keyPath); err == nil {
+		pub, ok := crt.PublicKey.(*ecdsa.PublicKey)
+		if !ok || !pub.Equal(&key.PublicKey) || crt.CheckSignatureFrom(caCrt) != nil ||
+			time.Now().Before(crt.NotBefore) || !time.Now().Before(crt.NotAfter) {
+			return fmt.Errorf("openvpn: invalid or mismatched server certificate; manual review required")
+		}
+		return nil
+	}
+	for _, path := range []string{crtPath, keyPath} {
+		if _, err := os.Lstat(path); err == nil {
+			return fmt.Errorf("openvpn: incomplete or invalid server certificate material; manual review required")
+		} else if !os.IsNotExist(err) {
+			return err
+		}
 	}
 	key, err := newKey()
 	if err != nil {
@@ -272,12 +304,17 @@ func ensureClientCertLocked(dir, email string) error {
 	if err != nil {
 		return err
 	}
-	if exists {
-		return nil
-	}
 	caCrt, caKey, err := ensureCA(dir)
 	if err != nil {
 		return err
+	}
+	if exists {
+		crt, _, err := loadKeyPair(crtPath, keyPath)
+		if err != nil || crt.CheckSignatureFrom(caCrt) != nil ||
+			time.Now().Before(crt.NotBefore) || !time.Now().Before(crt.NotAfter) {
+			return fmt.Errorf("openvpn: invalid or untrusted client certificate; manual review required")
+		}
+		return nil
 	}
 	key, err := newKey()
 	if err != nil {

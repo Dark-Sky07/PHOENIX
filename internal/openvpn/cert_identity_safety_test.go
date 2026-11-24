@@ -122,3 +122,120 @@ func TestCertificateMismatchedKeyRejected(t *testing.T) {
 		t.Fatal("fixture mismatch")
 	}
 }
+
+func TestCAEvidenceIsNotSilentlyReplaced(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		alter func(t *testing.T, dir string)
+	}{
+		{"partial CA", func(t *testing.T, dir string) {
+			_, key := caFiles(dir)
+			if err := os.Remove(key); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"missing CA with server", func(t *testing.T, dir string) {
+			crt, key := caFiles(dir)
+			for _, p := range []string{crt, key} {
+				if err := os.Remove(p); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}},
+		{"mismatched CA key", func(t *testing.T, dir string) {
+			_, key := caFiles(dir)
+			other, err := newKey()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := writeKeyPEM(key, other); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := ensureServerCert(dir); err != nil {
+				t.Fatal(err)
+			}
+			tc.alter(t, dir)
+			crt, key := caFiles(dir)
+			beforeCrt, _ := os.ReadFile(crt)
+			beforeKey, _ := os.ReadFile(key)
+			if err := ensureServerCert(dir); err == nil {
+				t.Fatal("invalid CA accepted")
+			}
+			afterCrt, _ := os.ReadFile(crt)
+			afterKey, _ := os.ReadFile(key)
+			if string(beforeCrt) != string(afterCrt) || string(beforeKey) != string(afterKey) {
+				t.Fatal("CA evidence changed")
+			}
+		})
+	}
+}
+
+func TestServerAndClientCertificateTrustIsChecked(t *testing.T) {
+	dir := t.TempDir()
+	if err := ensureServerCert(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureClientCert(dir, "alice@test"); err != nil {
+		t.Fatal(err)
+	}
+	_, serverKey := serverFiles(dir)
+	other, err := newKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeKeyPEM(serverKey, other); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(serverKey)
+	if err := ensureServerCert(dir); err == nil {
+		t.Fatal("mismatched server key accepted")
+	}
+	after, _ := os.ReadFile(serverKey)
+	if string(before) != string(after) {
+		t.Fatal("server key overwritten")
+	}
+
+	otherDir := t.TempDir()
+	if err := ensureClientCert(otherDir, "alice@test"); err != nil {
+		t.Fatal(err)
+	}
+	otherCrt, otherKey := clientFiles(otherDir, "alice@test")
+	crt, key := clientFiles(dir, "alice@test")
+	for source, dest := range map[string]string{otherCrt: crt, otherKey: key} {
+		data, err := os.ReadFile(source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(dest, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := ensureClientCert(dir, "alice@test"); err == nil {
+		t.Fatal("client signed by another CA accepted")
+	}
+}
+
+func TestMissingCAWithClientEvidenceIsNotRecreated(t *testing.T) {
+	dir := t.TempDir()
+	if err := ensureClientCert(dir, "alice@test"); err != nil {
+		t.Fatal(err)
+	}
+	caCrt, caKey := caFiles(dir)
+	for _, p := range []string{caCrt, caKey} {
+		if err := os.Remove(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := ensureClientCert(dir, "bob@test"); err == nil {
+		t.Fatal("missing CA replaced despite client evidence")
+	}
+	for _, p := range []string{caCrt, caKey} {
+		if _, err := os.Lstat(p); !os.IsNotExist(err) {
+			t.Fatalf("CA unexpectedly recreated: %s: %v", p, err)
+		}
+	}
+}

@@ -26,7 +26,8 @@ import (
 // EnsureProfileMaterial is intentionally idempotent. The reconcile job normally
 // creates these files, but a user can request a profile immediately after
 // attaching a client, before the next ten-second reconcile tick. Provisioning
-// on demand closes that race and also heals a partially-created inbound.
+// on demand closes that race. Partial or inconsistent existing key material is
+// retained for manual review rather than silently overwritten.
 func EnsureProfileMaterial(inst Instance, email string) error {
 	certMu.Lock()
 	defer certMu.Unlock()

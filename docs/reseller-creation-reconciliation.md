@@ -1382,3 +1382,15 @@ not prevent races with concurrent replacement. This does not constrain shell hoo
 against a privileged external actor replacing directories after startup, bind
 mounts, or other nonparticipating filesystem writers; the runtime root remains
 a trusted, privately controlled directory.
+
+### OpenVPN CA and certificate evidence
+
+OpenVPN provisioning refuses to silently replace incomplete, mismatched, invalid
+or nearly expired CA material, or to invent a new CA when server or client
+material remains. Existing server keypairs must match and be signed by the CA;
+existing client certificates must also be signed by it and currently valid.
+Partial server material is retained for manual review. This is deliberately
+fail-closed and may require operator recovery or a planned CA migration; it is
+not automatic rotation or revocation. The locks are process-local, and these
+checks do not prove daemon termination, final accounting, or protect against
+external writers. A running daemon may continue using loaded material.
