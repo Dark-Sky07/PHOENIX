@@ -279,7 +279,7 @@ jobs:
       - name: Test TUIC committed poll recovery on PostgreSQL
         env:
           PHOENIX_TEST_POSTGRES_DSN: postgres://phoenix:phoenix@localhost:5432/phoenix_test?sslmode=disable
-        run: go test ./internal/web/job -run '^TestTuicCommittedPollRecoveryPostgres$' -count=1
+        run: go test ./internal/web/job -run '^(TestTuicCommittedPollRecoveryPostgres|TestOpenvpnPollReceiptPostgres)$' -count=1
       - name: Test ordered snapshot sequence concurrency on PostgreSQL
         env:
           PHOENIX_TEST_POSTGRES_DSN: postgres://phoenix:phoenix@localhost:5432/phoenix_test?sslmode=disable

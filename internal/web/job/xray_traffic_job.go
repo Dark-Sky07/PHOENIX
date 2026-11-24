@@ -22,6 +22,9 @@ type XrayTrafficJob struct {
 	runMu         sync.Mutex
 	pending       *xrayTrafficBatch
 	captureUnlock func()
+	// OpenVPN has no durable daemon generation/baseline, so a journal left
+	// across restart must never be automatically replayed as an Xray batch.
+	manualPoll bool
 	// L2TP hooks can be live or interrupted. Keep their poll marker across
 	// retries so other panels cannot allocate against an unexamined interval.
 	l2tpHookPollID  string
@@ -116,6 +119,7 @@ type xrayTrafficBatch struct {
 	traffic    []*xray.Traffic
 	clients    []*xray.ClientTraffic
 	identities []service.XrayTrafficIdentity
+	manual     bool
 }
 
 // applyPending keeps the same identity and counters on error, including an
@@ -253,7 +257,7 @@ func (j *XrayTrafficJob) prepareXrayBatch(
 			}
 			return err
 		}
-		j.pending = &xrayTrafficBatch{id: id, traffic: traffic, clients: clients}
+		j.pending = &xrayTrafficBatch{id: id, traffic: traffic, clients: clients, manual: j.manualPoll}
 		j.l2tpHookPollID = ""
 		j.captureUnlock = unlock
 	}

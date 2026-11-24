@@ -59,11 +59,22 @@ rows are parsed according to the header rather than whitespace tokenization.
 Malformed client rows, incomplete client headers and duplicate normalized
 client names reject the whole poll, retain the in-memory baseline and do not
 fall back to a later snapshot. This prevents silently treating a damaged response
-as an empty or partial client list. Such errors are logged; they are not yet a
-durable accounting incident or a quota fence. Polling still misses traffic after
-client disappearance, advances its baseline before the database commit, and has
-no crash-durable journal or reliable session generation. These changes do not
-establish complete accounting or safe final drain.
+as an empty or partial client list. Successful observations from other daemons
+are journaled and committed before a partial poll delays daemon reconciliation.
+A shared in-flight marker fences participating quota operations before polling;
+the resulting batch has an identity snapshot, a durable journal and a
+payload-bound receipt. A failed write is retried in-process without polling or
+restarting the daemon again. On crash, the OpenVPN journal uses a `.manual`
+extension, so neither current nor older Xray recovery replays it automatically
+without generation evidence. Orphan markers and manual journals need review.
+
+Poll errors themselves are logged but are not durable incidents. A marker or
+journal does not prove an interval was complete: the management baseline still
+advances before journal publication, the daemon can outlive the panel, and
+traffic after the last observation or client disappearance can be missed.
+Reconciliation and shutdown are not a verified drain. The accounting lock only
+coordinates participating mutation paths; direct runtime changes remain outside
+this fence. Do not treat this as complete accounting or automatic recovery.
 
 ## Local OpenVPN removal fence
 

@@ -1,6 +1,8 @@
 package openvpn
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"strconv"
 	"sync"
@@ -345,6 +347,14 @@ func removeDataDir(id int) error {
 // Daemons whose management interface is unreachable contribute nothing (and
 // drop their clients from the online set).
 func (m *Manager) CollectTraffic() (inbounds []InboundTraffic, clients []ClientTrafficDelta) {
+	inbounds, clients, _ = m.CollectTrafficWithErrors()
+	return
+}
+
+// CollectTrafficWithErrors returns usable deltas even when another daemon's
+// poll failed. Callers must commit those deltas before acting on the error;
+// discarding them would discard already-advanced in-memory baselines.
+func (m *Manager) CollectTrafficWithErrors() (inbounds []InboundTraffic, clients []ClientTrafficDelta, pollErr error) {
 	// Do not let two scheduler/dashboard callers consume the same cumulative
 	// counters concurrently. More importantly, this keeps the snapshot/query/
 	// commit sequence ordered while still allowing status and reconcile to run
@@ -387,6 +397,7 @@ func (m *Manager) CollectTraffic() (inbounds []InboundTraffic, clients []ClientT
 			continue
 		}
 		if err != nil {
+			pollErr = errors.Join(pollErr, fmt.Errorf("inbound %d: %w", p.id, err))
 			logger.Warningf("openvpn: inbound %d management traffic poll failed; counters retained: %v", p.id, err)
 			clearOnline(man)
 			m.mu.Unlock()
@@ -447,7 +458,7 @@ func (m *Manager) CollectTraffic() (inbounds []InboundTraffic, clients []ClientT
 		}
 		m.mu.Unlock()
 	}
-	return inbounds, clients
+	return inbounds, clients, pollErr
 }
 
 func clearOnline(man *managed) {

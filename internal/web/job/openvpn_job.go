@@ -1,6 +1,8 @@
 package job
 
 import (
+	"fmt"
+
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
 	"github.com/Dark-Sky07/phoenix/internal/logger"
 	"github.com/Dark-Sky07/phoenix/internal/openvpn"
@@ -52,64 +54,101 @@ func (j *OpenvpnJob) enabledClientsForInbound(ib *model.Inbound) ([]string, bool
 	return emails, true
 }
 
-// Run reconciles desired openvpn inbounds with running daemons and records
-// traffic deltas.
+// The OpenVPN manager and its counters are process-wide. Retain one pending
+// accounting batch across scheduler replacements and serialize poll/reconcile.
+var sharedOpenvpnAccounting = newOpenvpnAccounting()
+
+func newOpenvpnAccounting() *XrayTrafficJob {
+	accounting := NewXrayTrafficJob()
+	accounting.manualPoll = true
+	return accounting
+}
+
+// commitOpenvpnPoll reuses the Xray journal, shared allocation fence and
+// payload-bound receipt. A crash leaves a non-replayable manual journal.
+// The caller holds accounting.runMu. Once a poll has
+// advanced in-memory baselines, a failed write retries exactly that batch and
+// must not poll or reconcile again. An uncommitted crash marker is not proof
+// of a complete poll and continues to require manual reconciliation.
+func commitOpenvpnPoll(accounting *XrayTrafficJob, poll func() ([]*xray.Traffic, []*xray.ClientTraffic, error)) error {
+	if accounting.pending == nil {
+		if err := accounting.replayXrayJournal(); err != nil {
+			return fmt.Errorf("recover traffic journal: %w", err)
+		}
+	}
+	if err := accounting.prepareXrayBatch(poll, accounting.inboundService.CaptureXrayTrafficIdentities); err != nil {
+		return fmt.Errorf("prepare OpenVPN traffic: %w", err)
+	}
+	restart, _, err := accounting.applyPending(accounting.applyJournaledXrayBatch)
+	if restart {
+		accounting.xrayService.SetToNeedRestart()
+	}
+	if err != nil {
+		return fmt.Errorf("commit OpenVPN traffic: %w", err)
+	}
+	return nil
+}
+
+func collectOpenvpnTraffic(mgr *openvpn.Manager) ([]*xray.Traffic, []*xray.ClientTraffic, error) {
+	inboundDeltas, clientDeltas, err := mgr.CollectTrafficWithErrors()
+	traffics := make([]*xray.Traffic, 0, len(inboundDeltas))
+	for _, d := range inboundDeltas {
+		traffics = append(traffics, &xray.Traffic{IsInbound: true, Tag: d.Tag, Up: d.Up, Down: d.Down})
+	}
+	clients := make([]*xray.ClientTraffic, 0, len(clientDeltas))
+	for _, d := range clientDeltas {
+		clients = append(clients, &xray.ClientTraffic{InboundId: d.InboundId, Email: d.Email, Enable: true, Up: d.Up, Down: d.Down})
+	}
+	return traffics, clients, err
+}
+
+// Run records the observed counters before potentially restarting daemons.
+// The poll is not a drain: traffic may still arrive before or during restart.
 func (j *OpenvpnJob) Run() {
+	accounting := sharedOpenvpnAccounting
+	if !accounting.runMu.TryLock() {
+		return
+	}
+	defer accounting.runMu.Unlock()
+	mgr := openvpn.GetManager()
+	hadPending := accounting.pending != nil
+	var pollErr error
+	if err := commitOpenvpnPoll(accounting, func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
+		traffic, clients, err := collectOpenvpnTraffic(mgr)
+		pollErr = err
+		// Some other daemons may have advanced their baselines even when one
+		// failed. Commit those samples before reporting the partial failure.
+		return traffic, clients, nil
+	}); err != nil {
+		logger.Warning("openvpn job: traffic not committed; retaining pending evidence:", err)
+		return
+	}
+	if hadPending || pollErr != nil {
+		if pollErr != nil {
+			logger.Warning("openvpn job: partial poll; delaying daemon reconciliation:", pollErr)
+		}
+		return
+	}
+
 	inbounds, err := j.inboundService.GetAllInbounds()
 	if err != nil {
 		logger.Warning("openvpn job: get inbounds failed:", err)
 		return
 	}
-
 	var desired []openvpn.Instance
 	for _, ib := range inbounds {
 		if ib.Protocol != model.OpenVPN || !ib.Enable || ib.NodeID != nil {
 			continue
 		}
-		clients, clientsOK := j.enabledClientsForInbound(ib)
-		if !clientsOK {
+		clients, ok := j.enabledClientsForInbound(ib)
+		if !ok {
 			return
 		}
 		inst, ok := openvpn.InstanceFromInbound(ib, clients)
 		if ok {
-			// The relay port is read from the running core every round, so
-			// the network manager follows Xray's actual state: rules go in
-			// once the relay listener exists and come out (falling back to
-			// the direct path) whenever it does not. Never part of the
-			// daemon fingerprint, so this can't restart a daemon.
 			inst.XrayRelayPort = j.xrayService.DaemonRelayPort(ib.Tag)
 			desired = append(desired, inst)
 		}
 	}
-
-	mgr := openvpn.GetManager()
 	mgr.Reconcile(desired)
-
-	inboundDeltas, clientDeltas := mgr.CollectTraffic()
-	if len(inboundDeltas) == 0 && len(clientDeltas) == 0 {
-		return
-	}
-	traffics := make([]*xray.Traffic, 0, len(inboundDeltas))
-	for _, d := range inboundDeltas {
-		traffics = append(traffics, &xray.Traffic{
-			IsInbound: true,
-			Tag:       d.Tag,
-			Up:        d.Up,
-			Down:      d.Down,
-		})
-	}
-	clientTraffics := make([]*xray.ClientTraffic, 0, len(clientDeltas))
-	for _, d := range clientDeltas {
-		clientTraffics = append(clientTraffics, &xray.ClientTraffic{
-			InboundId: d.InboundId,
-			Email:     d.Email,
-			Enable:    true,
-			Up:        d.Up,
-			Down:      d.Down,
-		})
-	}
-	_, _, err = j.inboundService.AddTraffic(traffics, clientTraffics)
-	if err != nil {
-		logger.Warning("openvpn job: add traffic failed:", err)
-	}
 }

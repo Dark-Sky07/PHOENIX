@@ -73,6 +73,16 @@ func verifyStoredXrayBatch(dir, name string, wanted xrayTrafficJournalEntry) err
 	return nil
 }
 
+// Unknown extensions already stop all Xray journal recovery, including on
+// older binaries. OpenVPN batches remain retryable in this process, but a
+// crash leaves their ownership/generation to manual reconciliation.
+func xrayBatchJournalName(batch *xrayTrafficBatch) string {
+	if batch.manual {
+		return batch.id + ".manual"
+	}
+	return batch.id + ".json"
+}
+
 func storeXrayBatch(batch *xrayTrafficBatch) error {
 	if batch == nil || !validXrayBatchID(batch.id) {
 		return fmt.Errorf("invalid Xray batch ID")
@@ -87,7 +97,7 @@ func storeXrayBatch(batch *xrayTrafficBatch) error {
 	// Compare the serialized representation, including legacy null/empty slice
 	// distinctions, before using an existing ID for a retry. Never silently
 	// apply different in-memory data and delete the original journal.
-	name := batch.id + ".json"
+	name := xrayBatchJournalName(batch)
 	path := filepath.Join(dir, name)
 	data, err := json.Marshal(xrayTrafficJournalEntry{ID: batch.id, Traffic: batch.traffic, Clients: batch.clients, Identities: batch.identities})
 	if err != nil {
@@ -161,7 +171,7 @@ func (j *XrayTrafficJob) applyJournaledXrayBatch(batch *xrayTrafficBatch) (bool,
 	if err != nil {
 		return restart, disabled, err
 	}
-	if err := os.Remove(filepath.Join(xrayJournalDir(), batch.id+".json")); err != nil {
+	if err := os.Remove(filepath.Join(xrayJournalDir(), xrayBatchJournalName(batch))); err != nil {
 		return restart, disabled, err
 	}
 	if err := syncJournalDir(xrayJournalDir()); err != nil {

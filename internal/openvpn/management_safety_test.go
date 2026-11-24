@@ -108,3 +108,24 @@ func TestStatusThreePollRetainsBaselineOnInvalidResponse(t *testing.T) {
 		t.Fatalf("retry did not retain baseline: %v %v", ins, clients)
 	}
 }
+
+func TestPartialManagementPollReturnsObservedDeltasAndError(t *testing.T) {
+	good := &fakeMgmtServer{clients: map[string]clientCounters{"good@example.test": {Rx: 44, Tx: 19}}}
+	good.start(t)
+	defer good.close()
+	bad := &fakeMgmtServer{}
+	bad.start(t)
+	port := bad.port
+	bad.close()
+	m := &Manager{procs: map[int]*managed{
+		1: {tag: "good", mgmtPort: good.port},
+		2: {tag: "bad", mgmtPort: port, lastRx: map[string]int64{"bad@example.test": 72}, lastTx: map[string]int64{"bad@example.test": 5}, haveLast: true},
+	}}
+	ins, clients, err := m.CollectTrafficWithErrors()
+	if err == nil || len(ins) != 1 || len(clients) != 1 || clients[0].Email != "good@example.test" || clients[0].Up != 44 || clients[0].Down != 19 {
+		t.Fatalf("partial result lost: %v %v %v", ins, clients, err)
+	}
+	if m.procs[2].lastRx["bad@example.test"] != 72 {
+		t.Fatal("failed daemon baseline lost")
+	}
+}
