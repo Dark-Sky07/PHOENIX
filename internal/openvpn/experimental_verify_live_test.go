@@ -335,6 +335,31 @@ sys.stdout.buffer.write(buf)
 		t.Fatalf("post-kill packet not captured: %v; capture=%s; ping=%s; route=%s", captureErr, captureOutput, out, route)
 	}
 	pingThroughCarol()
+
+	// Start a distinct Bob authentication only after the old session has
+	// disappeared. Pin its isolated source port so retries from the old
+	// process cannot be mistaken for this attempt in the server log.
+	const source = "192.0.2.6:41412"
+	reconnect := strings.Replace(bob, "remote 192.0.2.1 ", "remote 192.0.2.5 ", 1)
+	reconnect = strings.Replace(reconnect, "nobind\n", "lport 41412\n", 1)
+	if reconnect == bob || strings.Contains(reconnect, "nobind\n") {
+		t.Fatal("could not construct identifiable Bob reconnect fixture")
+	}
+	client(carolNS, "bob-after-kill", reconnect)
+	waitLog(logPathForID(inst.Id), func(log string) bool {
+		for _, line := range strings.Split(log, "\n") {
+			if strings.Contains(line, source) && strings.Contains(line, "VERIFY SCRIPT ERROR: depth=0") && strings.Contains(line, "bob@example.test") {
+				return true
+			}
+		}
+		return false
+	})
+	status = management("status 3")
+	if !strings.Contains(status, "HEADER\tCLIENT_LIST\t") || !strings.Contains(status, "\nEND\n") ||
+		strings.Contains(status, "CLIENT_LIST\tbob@example.test\t") || !strings.Contains(status, "CLIENT_LIST\tcarol@example.test\t") {
+		t.Fatalf("unexpected status after Bob reconnect attempt: %s", status)
+	}
+	pingThroughCarol()
 }
 
 // A failed process, a timeout, or an invalid invocation is not evidence that
