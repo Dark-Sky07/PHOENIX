@@ -226,7 +226,7 @@ func parseClientListResponse(reader io.Reader) (map[string]clientCounters, error
 	out := make(map[string]clientCounters)
 	seen := make(map[string]bool)
 	var layout *clientListLayout
-	terminated, recognized, legacyRows := false, false, false
+	terminated, recognized, legacyRows, clientEvidence := false, false, false, false
 	add := func(cn string, counters clientCounters) error {
 		key := strings.ToLower(strings.TrimSpace(cn))
 		if key == "" || seen[key] {
@@ -248,8 +248,16 @@ func parseClientListResponse(reader io.Reader) (map[string]clientCounters, error
 		if strings.HasPrefix(line, "ERROR:") {
 			return nil, errors.New(strings.TrimSpace(line))
 		}
-		if strings.HasPrefix(line, "<CLIENT_LIST VERSION ") || strings.HasPrefix(line, "<CLIENT_LIST HEADER ") {
+		if strings.HasPrefix(line, "<CLIENT_LIST VERSION ") {
 			recognized = true
+			continue
+		}
+		if strings.HasPrefix(line, "<CLIENT_LIST HEADER ") {
+			recognized = true
+			if !strings.Contains(line, "Common Name") || !strings.Contains(line, "Bytes Received") || !strings.Contains(line, "Bytes Sent") {
+				return nil, fmt.Errorf("%w: incomplete legacy client header", errUnsafeManagementResponse)
+			}
+			clientEvidence = true
 			continue
 		}
 		if strings.HasPrefix(line, "OpenVPN CLIENT LIST") {
@@ -289,6 +297,7 @@ func parseClientListResponse(reader io.Reader) (map[string]clientCounters, error
 				}
 				layout = &parsed
 				recognized = true
+				clientEvidence = true
 				legacyRows = isLegacyHeader
 				continue
 			}
@@ -315,6 +324,7 @@ func parseClientListResponse(reader io.Reader) (map[string]clientCounters, error
 				return nil, fmt.Errorf("%w: invalid legacy client row", errUnsafeManagementResponse)
 			}
 			recognized = true
+			clientEvidence = true
 			if err := add(cn, counters); err != nil {
 				return nil, err
 			}
@@ -334,6 +344,9 @@ func parseClientListResponse(reader io.Reader) (map[string]clientCounters, error
 	}
 	if !recognized {
 		return nil, errors.New("unrecognized openvpn management response")
+	}
+	if !clientEvidence {
+		return nil, fmt.Errorf("%w: response lacks client header or rows", errUnsafeManagementResponse)
 	}
 	return out, nil
 }

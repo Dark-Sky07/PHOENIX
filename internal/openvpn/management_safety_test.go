@@ -30,6 +30,10 @@ func TestManagementStatusFormatsAndUnsafeRows(t *testing.T) {
 		{"blank identity", tabHeader + strings.Replace(tabClient, "alice@example.test", "", 1) + "END\n", 0, true},
 		{"duplicate identity", tabHeader + tabClient + strings.Replace(tabClient, "alice@example.test", "ALICE@example.test", 1) + "END\n", 0, true},
 		{"missing header", tabClient + "END\n", 0, true},
+		{"legacy status without header", "OpenVPN CLIENT LIST\nUpdated,now\nEND\n", 0, true},
+		{"legacy version without header", "<CLIENT_LIST VERSION 1\n<END\n", 0, true},
+		{"legacy incomplete header", "<CLIENT_LIST HEADER ID Common Name\n<END\n", 0, true},
+		{"legacy empty with header", "<CLIENT_LIST VERSION 1\n<CLIENT_LIST HEADER ID Common Name Real Address Virtual Address Bytes Received Bytes Sent Connected Since\n<END\n", 0, false},
 		{"incomplete header", "HEADER\tCLIENT_LIST\tCommon Name\tBytes Received\nEND\n", 0, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -90,7 +94,7 @@ func TestStatusThreePollRetainsBaselineOnInvalidResponse(t *testing.T) {
 		t.Fatalf("first poll: %v %v", ins, clients)
 	}
 	mu.Lock()
-	response = tabHeader + strings.Replace(tabClient, "1234", "bad", 1) + "END\n"
+	response = "OpenVPN CLIENT LIST\nUpdated,now\nEND\n"
 	mu.Unlock()
 	ins, clients = m.CollectTraffic()
 	if len(ins) != 0 || len(clients) != 0 || m.procs[1].lastRx["alice@example.test"] != 1234 {

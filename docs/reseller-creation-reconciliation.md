@@ -1383,6 +1383,16 @@ against a privileged external actor replacing directories after startup, bind
 mounts, or other nonparticipating filesystem writers; the runtime root remains
 a trusted, privately controlled directory.
 
+### OpenVPN incomplete management responses
+
+A management reply with a legacy title or version but no client header or
+client rows is treated as unsafe, not as proof of an empty client list. Such
+polls preserve the previous in-memory baselines and stop reconciliation for the
+current poll, while observed deltas from other daemons are still committed.
+This does not prove the completeness of a syntactically valid response or
+recover usage between polls, and a transient poll error is not a durable
+per-client accounting incident.
+
 ### OpenVPN CA and certificate evidence
 
 OpenVPN provisioning refuses to silently replace incomplete, mismatched, invalid
