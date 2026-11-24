@@ -325,11 +325,14 @@ sys.stdout.buffer.write(buf)
 	if !isObservedPingLoss(ctx.Err(), err, string(out)) {
 		t.Fatalf("no valid ICMP loss observation after kill: context=%v error=%v output=%s", ctx.Err(), err, out)
 	}
-	waitLog(captureFile.Name(), func(s string) bool {
-		return strings.Contains(s, "ICMP echo request") && strings.Contains(s, "10.120.0.1")
-	})
-	if err := capture.Wait(); err != nil {
-		t.Fatalf("tunnel capture failed: %v", err)
+	captureErr := capture.Wait()
+	captureOutput, readErr := os.ReadFile(captureFile.Name())
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if captureErr != nil || !strings.Contains(string(captureOutput), "ICMP echo request") {
+		route, _ := exec.Command("ip", "-n", clientNS, "route", "get", "10.120.0.1").CombinedOutput()
+		t.Fatalf("post-kill packet not captured: %v; capture=%s; ping=%s; route=%s", captureErr, captureOutput, out, route)
 	}
 	pingThroughCarol()
 }
