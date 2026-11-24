@@ -105,8 +105,8 @@ func (m *Manager) ensure(inst Instance) error {
 }
 
 func (m *Manager) ensureLocked(inst Instance) error {
-	if !validInboundID(inst.Id) {
-		return fmt.Errorf("openvpn: inbound ID %d cannot be assigned a unique legacy subnet", inst.Id)
+	if err := inst.validateRuntimeConfig(); err != nil {
+		return err
 	}
 	certMu.Lock()
 	defer certMu.Unlock()

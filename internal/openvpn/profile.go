@@ -52,6 +52,12 @@ func ensureProfileMaterialLocked(inst Instance, email string) error {
 }
 
 func BuildProfile(inst Instance, email, host string) (string, error) {
+	if err := inst.validateRuntimeConfig(); err != nil {
+		return "", err
+	}
+	if !safeConfigHost(host) {
+		return "", fmt.Errorf("openvpn: invalid profile host")
+	}
 	certMu.Lock()
 	defer certMu.Unlock()
 	if err := ensureProfileMaterialLocked(inst, email); err != nil {

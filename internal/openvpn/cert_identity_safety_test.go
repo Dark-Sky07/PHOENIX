@@ -77,7 +77,7 @@ func TestCertificatePreflightKeepsExistingEvidence(t *testing.T) {
 	}
 	current := &managed{fingerprint: "old"}
 	mgr := &Manager{procs: map[int]*managed{83: current}}
-	if err := mgr.Ensure(Instance{Id: 83, Clients: []string{"alice@example.test", "alice_example.test"}}); err == nil {
+	if err := mgr.Ensure(Instance{Id: 83, Port: 1194, Clients: []string{"alice@example.test", "alice_example.test"}}); err == nil {
 		t.Fatal("manager accepted colliding certificates")
 	}
 	if mgr.procs[83] != current {
@@ -115,7 +115,7 @@ func TestCertificateMismatchedKeyRejected(t *testing.T) {
 	if err := os.WriteFile(key1, b, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := BuildProfile(Instance{Id: 84}, "one@example.test", "host"); err == nil || !strings.Contains(err.Error(), "mismatch") {
+	if _, err := BuildProfile(Instance{Id: 84, Port: 1194}, "one@example.test", "host"); err == nil || !strings.Contains(err.Error(), "mismatch") {
 		t.Fatalf("mismatched key accepted: %v", err)
 	}
 	if filepath.Dir(key1) != filepath.Dir(key2) {
@@ -254,7 +254,7 @@ func TestCertificateTrustFailureDoesNotStopManagedDaemon(t *testing.T) {
 	if err := os.Remove(caKey); err != nil {
 		t.Fatal(err)
 	}
-	inst := Instance{Id: id}
+	inst := Instance{Id: id, Port: 1194}
 	for _, fingerprint := range []string{"different configuration", inst.fingerprint()} {
 		current := &managed{fingerprint: fingerprint}
 		mgr := &Manager{procs: map[int]*managed{id: current}}

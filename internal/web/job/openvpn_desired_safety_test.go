@@ -7,12 +7,12 @@ import (
 )
 
 func TestOpenvpnDesiredRejectsPartialSnapshot(t *testing.T) {
-	good := &model.Inbound{Id: 7, Protocol: model.OpenVPN, Enable: true, Settings: `{}`}
+	good := &model.Inbound{Id: 7, Protocol: model.OpenVPN, Enable: true, Port: 1194, Settings: `{}`}
 	clients := func(*model.Inbound) ([]string, bool) { return []string{"alice@test"}, true }
 	relay := func(string) int { return 0 }
 	for _, bad := range []*model.Inbound{
-		{Id: 64000, Protocol: model.OpenVPN, Enable: true, Settings: `{}`},
-		{Id: 8, Protocol: model.OpenVPN, Enable: true, Settings: `{`},
+		{Id: 64000, Protocol: model.OpenVPN, Enable: true, Port: 1194, Settings: `{}`},
+		{Id: 8, Protocol: model.OpenVPN, Enable: true, Port: 1194, Settings: `{`},
 		nil,
 	} {
 		got, err := buildOpenvpnDesired([]*model.Inbound{good, bad}, clients, relay)

@@ -1443,3 +1443,14 @@ stopping healthy daemons. Existing running colliding configurations are not
 automatically terminated or migrated; operators must investigate and plan a
 migration. Unique IDs within this legacy range do not establish that the
 resulting private subnets are unused by other software or networks.
+
+### OpenVPN configuration operands
+
+Listener and profile hosts must be IP literals or single ASCII DNS-like
+operands; pushed DNS values must be IP literals. Invalid ports, host operands,
+and control characters in the daemon data directory are rejected before
+replacing an existing daemon or writing a profile. Generated config paths are
+quoted and escaped. This is a stricter compatibility boundary: operators using
+unusual hostname spellings, scoped IPv6 literals or malformed legacy settings
+must review them. Unit tests exercise the generated text and failure paths;
+they are not a real OpenVPN interoperability or session-drain test.

@@ -31,7 +31,7 @@ func TestInvalidSubnetIDsRefusedBeforeSideEffects(t *testing.T) {
 	network := newTestNetworkManager(firewall)
 	for _, id := range []int{-1, 0, 64000, 64249, 100000} {
 		inst := Instance{Id: id, Port: 1194}
-		if _, ok := InstanceFromInbound(&model.Inbound{Id: id, Protocol: model.OpenVPN}, nil); ok {
+		if _, ok := InstanceFromInbound(&model.Inbound{Id: id, Protocol: model.OpenVPN, Port: 1194}, nil); ok {
 			t.Fatalf("accepted ID %d", id)
 		}
 		if err := (&Manager{procs: map[int]*managed{}}).Ensure(inst); err == nil {
@@ -54,7 +54,7 @@ func TestInvalidSubnetIDsRefusedBeforeSideEffects(t *testing.T) {
 		t.Fatalf("invalid ID changed firewall: %v", firewall.calls)
 	}
 	for _, id := range []int{1, 63750, 63999} {
-		if _, ok := InstanceFromInbound(&model.Inbound{Id: id, Protocol: model.OpenVPN}, nil); !ok {
+		if _, ok := InstanceFromInbound(&model.Inbound{Id: id, Protocol: model.OpenVPN, Port: 1194}, nil); !ok {
 			t.Fatalf("valid ID %d rejected", id)
 		}
 	}
