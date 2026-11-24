@@ -162,11 +162,9 @@ func (p *Process) GetResult() string {
 	return ""
 }
 
-// Start launches the daemon against its generated config file. Before
-// starting, any daemon a previous x-ui run left behind for this inbound is
-// terminated — identified via the pid file we ask openvpn to write — so the
-// port is guaranteed to be free. Unrelated openvpn processes are never
-// touched (unlike mtg, openvpn is a system package other software may use).
+// Start launches the daemon against its generated config file. A retained PID
+// file is not proof of ownership or final accounting: refuse to start rather
+// than signal an unverified process or overwrite the evidence.
 func (p *Process) Start() error {
 	if p.IsRunning() {
 		return errors.New("openvpn is already running")
@@ -175,7 +173,12 @@ func (p *Process) Start() error {
 	if binary == "" {
 		return errors.New("openvpn binary not found (install openvpn or drop an 'openvpn' binary next to the x-ui binary)")
 	}
-	killStaleDaemon(filepath.Dir(p.configPath))
+	pidPath := filepath.Join(filepath.Dir(p.configPath), "openvpn.pid")
+	if _, err := os.Lstat(pidPath); err == nil {
+		return fmt.Errorf("openvpn: retained PID evidence at %s requires manual reconciliation", pidPath)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("openvpn: inspect PID evidence: %w", err)
+	}
 	cmd := exec.Command(binary, "--config", p.configPath)
 	cmd.Stdout = p.logWriter
 	cmd.Stderr = p.logWriter
@@ -190,54 +193,6 @@ func (p *Process) Start() error {
 	}
 	go p.wait(cmd)
 	return nil
-}
-
-// killStaleDaemon terminates a daemon recorded in the pid file (left behind
-// by a previous x-ui run). It verifies the process still looks like openvpn
-// before killing, so a recycled PID belonging to other software is spared.
-func killStaleDaemon(dataDir string) {
-	pidPath := filepath.Join(dataDir, "openvpn.pid")
-	data, err := os.ReadFile(pidPath)
-	if err != nil {
-		return
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || pid <= 0 {
-		return
-	}
-	if !processLooksLikeOpenVPN(pid) {
-		_ = os.Remove(pidPath)
-		return
-	}
-	if err := signalProcess(pid, syscall.SIGTERM); err == nil {
-		for i := 0; i < 20; i++ {
-			if !isProcessAlive(pid) {
-				break
-			}
-			time.Sleep(250 * time.Millisecond)
-		}
-		if isProcessAlive(pid) {
-			_ = signalProcess(pid, syscall.SIGKILL)
-		}
-		logger.Infof("openvpn: terminated stale daemon (pid %d) from a previous run", pid)
-	}
-	_ = os.Remove(pidPath)
-}
-
-// isProcessAlive is platform-specific (signal_unix.go / signal_windows.go).
-
-func processLooksLikeOpenVPN(pid int) bool {
-	if runtime.GOOS == "windows" {
-		// We cannot cheaply inspect the command line on Windows, so never
-		// kill from a stale pid file there — the daemon start will fail
-		// visibly and the log shows why.
-		return false
-	}
-	cmdline, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
-	if err != nil {
-		return false
-	}
-	return strings.Contains(string(cmdline), "openvpn")
 }
 
 func (p *Process) wait(cmd *exec.Cmd) {
@@ -263,7 +218,7 @@ func (p *Process) Stop() error {
 			return err
 		}
 		<-p.done
-		return nil
+		return p.removeOwnedPIDFile()
 	}
 	if err := p.cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		return err
@@ -279,7 +234,37 @@ func (p *Process) Stop() error {
 		case <-time.After(forceStopTimeout):
 		}
 	}
-	return nil
+	select {
+	case <-p.done:
+		return p.removeOwnedPIDFile()
+	default:
+		return errors.New("openvpn: daemon termination not confirmed; PID evidence retained")
+	}
+}
+
+// removeOwnedPIDFile removes only the PID file of the process this Process
+// started, after its exit has been observed. External writers and other panel
+// processes are not fenced by this process-local check.
+func (p *Process) removeOwnedPIDFile() error {
+	path := filepath.Join(filepath.Dir(p.configPath), "openvpn.pid")
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("openvpn: unexpected PID file type; manual reconciliation required")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(string(data)) != strconv.Itoa(p.cmd.Process.Pid) {
+		return errors.New("openvpn: PID file does not match stopped daemon; manual reconciliation required")
+	}
+	return os.Remove(path)
 }
 
 // FreeLocalPort allocates an ephemeral loopback TCP port for the daemon's

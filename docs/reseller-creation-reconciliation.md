@@ -1411,3 +1411,17 @@ fail-closed and may require operator recovery or a planned CA migration; it is
 not automatic rotation or revocation. The locks are process-local, and these
 checks do not prove daemon termination, final accounting, or protect against
 external writers. A running daemon may continue using loaded material.
+
+### OpenVPN stale process evidence
+
+A retained OpenVPN PID file blocks starting a replacement and is preserved for
+manual investigation, rather than signalling a PID based on a command-line
+substring. A confirmed stop of a process started by this manager removes only
+a matching regular PID file; unexpected or mismatched evidence is retained.
+Deletion also refuses to remove an inbound data directory containing a PID
+file. Recovery after a crash may therefore require operator intervention.
+These checks are process-local and do not fence other panels or privileged
+filesystem writers. A missing PID file does not prove there is no orphan;
+verified process-tree termination, final traffic accounting and a safe
+reconciliation override remain unimplemented. Other stop paths can still
+ignore process-stop failures. Do not remove evidence merely to bypass a block.

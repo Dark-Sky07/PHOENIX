@@ -135,7 +135,9 @@ func (m *Manager) ensureLocked(inst Instance) error {
 		return nil
 	}
 	if cur, ok := m.procs[inst.Id]; ok {
-		_ = cur.proc.Stop()
+		if err := cur.proc.Stop(); err != nil {
+			return fmt.Errorf("stop existing OpenVPN daemon: %w", err)
+		}
 		GetNetworkManager().Remove(inst.Id)
 		delete(m.procs, inst.Id)
 	}
@@ -184,9 +186,8 @@ func (m *Manager) ensureLocked(inst Instance) error {
 
 // Reconcile drives the running set toward the desired instances: it stops
 // daemons that are no longer wanted (and removes their data directory) and
-// (re)starts the rest. Called periodically by the openvpn job; also the
-// only place orphaned daemons from a previous x-ui run get reclaimed, via
-// the per-inbound pid files.
+// (re)starts the rest. Called periodically by the openvpn job. Retained PID
+// files require manual reconciliation; they do not authorize orphan signalling.
 func (m *Manager) Reconcile(desired []Instance) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -312,11 +313,16 @@ func (m *Manager) Remove(id int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if cur, ok := m.procs[id]; ok {
-		_ = cur.proc.Stop()
+		if err := cur.proc.Stop(); err != nil {
+			logger.Warningf("openvpn: inbound %d stop failed; retaining daemon and evidence: %v", id, err)
+			return
+		}
 		delete(m.procs, id)
 	}
 	GetNetworkManager().Remove(id)
-	_ = removeDataDir(id)
+	if err := removeDataDir(id); err != nil {
+		logger.Warningf("openvpn: inbound %d retained data for manual review: %v", id, err)
+	}
 }
 
 // StopAll stops every managed daemon. Called on panel shutdown.
@@ -336,6 +342,11 @@ func (m *Manager) StopAll() {
 func removeDataDir(id int) error {
 	certMu.Lock()
 	defer certMu.Unlock()
+	if _, err := os.Lstat(pidPathForID(id)); err == nil {
+		return fmt.Errorf("retained PID evidence requires manual reconciliation")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect PID evidence: %w", err)
+	}
 	return os.RemoveAll(dataDirForID(id))
 }
 
