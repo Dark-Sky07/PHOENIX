@@ -129,12 +129,12 @@ jobs:
           sudo modprobe tun || true
           sudo mkdir -p /dev/net
           test -c /dev/net/tun || sudo mknod /dev/net/tun c 10 200
-      - name: Characterize previously issued profiles
+      - name: Characterize profile reuse and experimental fingerprint admission
         shell: bash
         run: |
           set -o pipefail
           go test -c -o /tmp/phoenix-openvpn-live.test ./internal/openvpn
-          if sudo env PATH="$PATH" PHOENIX_TEST_OPENVPN_LIVE_BINARY=/usr/sbin/openvpn /tmp/phoenix-openvpn-live.test -test.run '^TestRealOpenVPNPreviouslyIssuedProfileStillConnects$' -test.v 2>&1 | tee /tmp/openvpn-live.log; then exit 0; fi
+          if sudo env PATH="$PATH" PHOENIX_TEST_OPENVPN_LIVE_BINARY=/usr/sbin/openvpn /tmp/phoenix-openvpn-live.test -test.run '^TestRealOpenVPN(PreviouslyIssuedProfileStillConnects|ExperimentalFingerprintAdmission)$' -test.v 2>&1 | tee /tmp/openvpn-live.log; then exit 0; fi
           python3 - <<'PYLOG'
           from pathlib import Path
           output = Path('/tmp/openvpn-live.log').read_text(errors='replace')[-4000:]

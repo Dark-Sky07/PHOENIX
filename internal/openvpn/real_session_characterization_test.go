@@ -17,35 +17,7 @@ func TestRealOpenVPNPreviouslyIssuedProfileStillConnects(t *testing.T) {
 	if binary == "" {
 		t.Skip("PHOENIX_TEST_OPENVPN_LIVE_BINARY not configured")
 	}
-	if os.Geteuid() != 0 {
-		t.Fatal("live OpenVPN characterization requires root")
-	}
-	if _, err := exec.LookPath("ip"); err != nil {
-		t.Fatalf("ip tool required: %v", err)
-	}
-	serverNS := fmt.Sprintf("phoenix-ovpn-s-%d", os.Getpid())
-	clientNS := fmt.Sprintf("phoenix-ovpn-c-%d", os.Getpid())
-	ip := func(args ...string) {
-		t.Helper()
-		out, err := exec.Command("ip", args...).CombinedOutput()
-		if err != nil {
-			t.Fatalf("ip %v: %v\n%s", args, err, out)
-		}
-	}
-	for _, ns := range []string{serverNS, clientNS} {
-		ip("netns", "add", ns)
-		name := ns
-		t.Cleanup(func() { _ = exec.Command("ip", "netns", "delete", name).Run() })
-		ip("-n", ns, "link", "set", "lo", "up")
-	}
-	// Create the veth in the server namespace; neither endpoint is ever
-	// attached to the host network stack.
-	ip("-n", serverNS, "link", "add", "ovpn-s", "type", "veth", "peer", "name", "ovpn-c")
-	ip("-n", serverNS, "link", "set", "ovpn-c", "netns", clientNS)
-	ip("-n", serverNS, "addr", "add", "192.0.2.1/30", "dev", "ovpn-s")
-	ip("-n", clientNS, "addr", "add", "192.0.2.2/30", "dev", "ovpn-c")
-	ip("-n", serverNS, "link", "set", "ovpn-s", "up")
-	ip("-n", clientNS, "link", "set", "ovpn-c", "up")
+	serverNS, clientNS := setupOpenVPNLiveNamespaces(t)
 	t.Setenv("XUI_BIN_FOLDER", t.TempDir())
 	inst := Instance{Id: 119, Port: 31194, Listen: "192.0.2.1", Proto: "udp"}
 	profile, err := BuildProfile(inst, "alice@example.test", "192.0.2.1")
@@ -94,6 +66,41 @@ func TestRealOpenVPNPreviouslyIssuedProfileStillConnects(t *testing.T) {
 	}
 	start(clientNS, clientConf)
 	waitFor(clientLog, "Initialization Sequence Completed")
+}
+
+// The two OpenVPN peers communicate only through an isolated veth pair.
+func setupOpenVPNLiveNamespaces(t *testing.T) (string, string) {
+	t.Helper()
+	if os.Geteuid() != 0 {
+		t.Fatal("live OpenVPN characterization requires root")
+	}
+	if _, err := exec.LookPath("ip"); err != nil {
+		t.Fatalf("ip tool required: %v", err)
+	}
+	serverNS := fmt.Sprintf("phoenix-ovpn-s-%d", os.Getpid())
+	clientNS := fmt.Sprintf("phoenix-ovpn-c-%d", os.Getpid())
+	ip := func(args ...string) {
+		t.Helper()
+		out, err := exec.Command("ip", args...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("ip %v: %v\n%s", args, err, out)
+		}
+	}
+	for _, ns := range []string{serverNS, clientNS} {
+		ip("netns", "add", ns)
+		name := ns
+		t.Cleanup(func() { _ = exec.Command("ip", "netns", "delete", name).Run() })
+		ip("-n", ns, "link", "set", "lo", "up")
+	}
+	// Create the veth in the server namespace; neither endpoint is ever
+	// attached to the host network stack.
+	ip("-n", serverNS, "link", "add", "ovpn-s", "type", "veth", "peer", "name", "ovpn-c")
+	ip("-n", serverNS, "link", "set", "ovpn-c", "netns", clientNS)
+	ip("-n", serverNS, "addr", "add", "192.0.2.1/30", "dev", "ovpn-s")
+	ip("-n", clientNS, "addr", "add", "192.0.2.2/30", "dev", "ovpn-c")
+	ip("-n", serverNS, "link", "set", "ovpn-s", "up")
+	ip("-n", clientNS, "link", "set", "ovpn-c", "up")
+	return serverNS, clientNS
 }
 
 func fileExists(path string) bool {
