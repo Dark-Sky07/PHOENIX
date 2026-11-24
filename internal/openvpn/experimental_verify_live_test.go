@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -293,8 +294,43 @@ sys.stdout.buffer.write(buf)
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "ip", "netns", "exec", clientNS, "ping", "-n", "-c", "1", "-W", "2", "10.120.0.1").CombinedOutput()
-	if err == nil {
-		t.Fatalf("Bob still received ICMP after management kill: %s", out)
+	if !isObservedPingLoss(ctx.Err(), err, string(out)) {
+		t.Fatalf("no valid ICMP loss observation after kill: context=%v error=%v output=%s", ctx.Err(), err, out)
 	}
 	pingThroughCarol()
+}
+
+// A failed process, a timeout, or an invalid invocation is not evidence that
+// a probe was sent and went unanswered. This matches the iputils output used
+// by the live CI job; it does not prove where a lost packet went.
+func isObservedPingLoss(ctxErr, err error, output string) bool {
+	var exit *exec.ExitError
+	return ctxErr == nil && errors.As(err, &exit) && exit.ExitCode() == 1 &&
+		strings.Contains(output, "1 packets transmitted, 0 received, 100% packet loss")
+}
+
+func TestObservedPingLossRejectsCommandFailures(t *testing.T) {
+	failure := func(code int) error {
+		return exec.Command("sh", "-c", fmt.Sprintf("exit %d", code)).Run()
+	}
+	loss := "1 packets transmitted, 0 received, 100% packet loss"
+	for _, tc := range []struct {
+		name        string
+		ctxErr, err error
+		output      string
+		want        bool
+	}{
+		{"loss", nil, failure(1), loss, true},
+		{"no executable", nil, exec.ErrNotFound, loss, false},
+		{"timeout", context.DeadlineExceeded, failure(1), loss, false},
+		{"ping error", nil, failure(2), loss, false},
+		{"no statistics", nil, failure(1), "Network is unreachable", false},
+		{"reply", nil, nil, "1 packets transmitted, 1 received, 0% packet loss", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isObservedPingLoss(tc.ctxErr, tc.err, tc.output); got != tc.want {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
 }
