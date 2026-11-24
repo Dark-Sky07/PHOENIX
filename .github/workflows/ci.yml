@@ -99,6 +99,21 @@ jobs:
           print(f'::error title=go-test-output::{output}')
           PYLOG
           exit 1
+  openvpn-config-parser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install OpenVPN
+        run: sudo apt-get update && sudo apt-get install -y openvpn
+      - name: Verify generated configuration with OpenVPN parser
+        env:
+          PHOENIX_TEST_OPENVPN_BINARY: /usr/sbin/openvpn
+        run: go test ./internal/openvpn -run '^TestRealOpenVPNConfigParser$' -count=1 -v
+
   xray-quiescence-characterization:
     runs-on: ubuntu-latest
     steps:
