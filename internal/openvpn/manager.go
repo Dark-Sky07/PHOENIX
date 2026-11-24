@@ -112,29 +112,9 @@ func (m *Manager) ensureLocked(inst Instance) error {
 	if err := validateClientCertSetLocked(dir, inst.Clients); err != nil {
 		return err
 	}
-	if cur, ok := m.procs[inst.Id]; ok && cur.fingerprint == fp && cur.proc.IsRunning() {
-		if err := GetNetworkManager().Apply(inst); err != nil {
-			return err
-		}
-		cur.tag = inst.Tag
-		cur.clients = inst.Clients
-		// Certs may have been lost on a flaky disk; top them up cheaply.
-		if err := ensureServerCertLocked(dir); err != nil {
-			logger.Warningf("openvpn: inbound %d: heal server cert failed: %v", inst.Id, err)
-		}
-		for _, email := range inst.Clients {
-			if err := ensureClientCertLocked(dir, email); err != nil {
-				logger.Warningf("openvpn: inbound %d: heal client cert for %s failed: %v", inst.Id, email, err)
-			}
-		}
-		return nil
-	}
-	if cur, ok := m.procs[inst.Id]; ok {
-		_ = cur.proc.Stop()
-		GetNetworkManager().Remove(inst.Id)
-		delete(m.procs, inst.Id)
-	}
-
+	// Verify and provision all key material before stopping an existing daemon
+	// or reporting a successful no-op. In particular, missing or corrupt CA
+	// evidence must not be hidden by the already-running fast path.
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err
 	}
@@ -146,6 +126,20 @@ func (m *Manager) ensureLocked(inst Instance) error {
 			return err
 		}
 	}
+	if cur, ok := m.procs[inst.Id]; ok && cur.fingerprint == fp && cur.proc.IsRunning() {
+		if err := GetNetworkManager().Apply(inst); err != nil {
+			return err
+		}
+		cur.tag = inst.Tag
+		cur.clients = inst.Clients
+		return nil
+	}
+	if cur, ok := m.procs[inst.Id]; ok {
+		_ = cur.proc.Stop()
+		GetNetworkManager().Remove(inst.Id)
+		delete(m.procs, inst.Id)
+	}
+
 	if err := pruneClientCertsLocked(dir, inst.Clients); err != nil {
 		logger.Warningf("openvpn: inbound %d: prune client certs failed: %v", inst.Id, err)
 	}

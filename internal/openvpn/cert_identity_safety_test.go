@@ -239,3 +239,30 @@ func TestMissingCAWithClientEvidenceIsNotRecreated(t *testing.T) {
 		}
 	}
 }
+
+func TestCertificateTrustFailureDoesNotStopManagedDaemon(t *testing.T) {
+	tempBinFolder(t)
+	const id = 85
+	dir := dataDirForID(id)
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureServerCert(dir); err != nil {
+		t.Fatal(err)
+	}
+	_, caKey := caFiles(dir)
+	if err := os.Remove(caKey); err != nil {
+		t.Fatal(err)
+	}
+	inst := Instance{Id: id}
+	for _, fingerprint := range []string{"different configuration", inst.fingerprint()} {
+		current := &managed{fingerprint: fingerprint}
+		mgr := &Manager{procs: map[int]*managed{id: current}}
+		if err := mgr.Ensure(inst); err == nil {
+			t.Fatal("invalid CA was not reported")
+		}
+		if mgr.procs[id] != current {
+			t.Fatal("invalid CA caused the managed daemon to be removed")
+		}
+	}
+}

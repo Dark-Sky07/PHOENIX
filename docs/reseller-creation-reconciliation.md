@@ -1389,7 +1389,9 @@ OpenVPN provisioning refuses to silently replace incomplete, mismatched, invalid
 or nearly expired CA material, or to invent a new CA when server or client
 material remains. Existing server keypairs must match and be signed by the CA;
 existing client certificates must also be signed by it and currently valid.
-Partial server material is retained for manual review. This is deliberately
+Partial server material is retained for manual review. Reconciliation validates
+material before its no-op path or stopping an existing managed daemon, and
+reports errors rather than silently ignoring them. This is deliberately
 fail-closed and may require operator recovery or a planned CA migration; it is
 not automatic rotation or revocation. The locks are process-local, and these
 checks do not prove daemon termination, final accounting, or protect against
