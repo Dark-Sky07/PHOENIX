@@ -184,8 +184,22 @@ sys.stdout.buffer.write(buf)
 	if result := management("client-kill " + clientID); !strings.Contains(result, "SUCCESS: client-kill command succeeded") {
 		t.Fatalf("management did not acknowledge kill: %s", result)
 	}
-	if result := management("status 3"); !strings.Contains(result, "HEADER\tCLIENT_LIST\t") || !strings.Contains(result, "\nEND\n") || strings.Contains(result, "CLIENT_LIST\tbob@example.test\t") {
-		t.Fatalf("Bob not conclusively absent after kill: %s", result)
+	// A successful response is only an acknowledgement: the daemon can
+	// still report the session briefly. Require a later complete status that
+	// no longer contains it before testing the data path.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		result := management("status 3")
+		if !strings.Contains(result, "HEADER\tCLIENT_LIST\t") || !strings.Contains(result, "\nEND\n") {
+			t.Fatalf("incomplete status after kill: %s", result)
+		}
+		if !strings.Contains(result, "CLIENT_LIST\tbob@example.test\t") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Bob not absent within observation window: %s", result)
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
