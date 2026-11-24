@@ -1,6 +1,7 @@
 package openvpn
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -130,4 +131,66 @@ func TestRealOpenVPNExperimentalFingerprintAdmission(t *testing.T) {
 	client("bob-without-allowlist", bob)
 	waitLog(logPathForID(inst.Id), denied("bob@example.test"))
 	pingThroughBob()
+
+	// In the isolated experiment only, ask the real management socket for
+	// the current session ID and kill that session. Never use a CN as a raw
+	// management command; this test uses a parsed numeric CID.
+	management := func(command string) string {
+		t.Helper()
+		const code = `import socket, sys
+s = socket.create_connection(('127.0.0.1', 31295), timeout=4)
+s.settimeout(4)
+s.sendall((sys.argv[1] + '\n').encode())
+buf = b''
+while True:
+    part = s.recv(65536)
+    if not part:
+        break
+    buf += part
+    if any(x.rstrip(b'\r') == b'END' or x.startswith((b'SUCCESS:', b'ERROR:')) for x in buf.split(b'\n')[:-1]):
+        break
+sys.stdout.buffer.write(buf)
+`
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, "ip", "netns", "exec", serverNS, "python3", "-c", code, command).CombinedOutput()
+		if err != nil {
+			t.Fatalf("management %q: %v\n%s", command, err, out)
+		}
+		return string(out)
+	}
+	status := management("status 3")
+	clientIDIndex := -1
+	clientID := ""
+	for _, line := range strings.Split(status, "\n") {
+		fields := strings.Split(strings.TrimRight(line, "\r"), "\t")
+		if len(fields) > 2 && fields[0] == "HEADER" && fields[1] == "CLIENT_LIST" {
+			for i, field := range fields {
+				if field == "Client ID" {
+					clientIDIndex = i - 1
+				}
+			}
+		}
+		if len(fields) > 1 && fields[0] == "CLIENT_LIST" && fields[1] == "bob@example.test" {
+			if clientID != "" || clientIDIndex < 0 || clientIDIndex >= len(fields) {
+				t.Fatalf("ambiguous Bob session: %s", status)
+			}
+			clientID = fields[clientIDIndex]
+		}
+	}
+	if _, err := strconv.ParseUint(clientID, 10, 64); err != nil {
+		t.Fatalf("missing or invalid Bob client ID: %q\n%s", clientID, status)
+	}
+	if result := management("client-kill " + clientID); !strings.Contains(result, "SUCCESS: client-kill command succeeded") {
+		t.Fatalf("management did not acknowledge kill: %s", result)
+	}
+	if result := management("status 3"); !strings.Contains(result, "HEADER\tCLIENT_LIST\t") || !strings.Contains(result, "\nEND\n") || strings.Contains(result, "CLIENT_LIST\tbob@example.test\t") {
+		t.Fatalf("Bob not conclusively absent after kill: %s", result)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "ip", "netns", "exec", clientNS, "ping", "-n", "-c", "1", "-W", "2", "10.120.0.1").CombinedOutput()
+	if err == nil {
+		t.Fatalf("Bob still received ICMP after management kill: %s", out)
+	}
 }
