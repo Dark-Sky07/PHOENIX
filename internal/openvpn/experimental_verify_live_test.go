@@ -81,11 +81,19 @@ func TestRealOpenVPNExperimentalFingerprintAdmission(t *testing.T) {
 	if err := writeConfig(inst, 31295); err != nil {
 		t.Fatal(err)
 	}
+	// Test-only hook: record exactly what OpenVPN provides when this session
+	// disconnects. This plain file is not durable production accounting.
+	disconnectLog := filepath.Join(dir, "disconnect-record")
+	disconnectHook := filepath.Join(dir, "disconnect")
+	hook := "#!/bin/sh\nprintf '%s\\t%s\\t%s\\n' \"${common_name:-}\" \"${bytes_received:-}\" \"${bytes_sent:-}\" >> " + strconv.Quote(disconnectLog) + "\n"
+	if err := os.WriteFile(disconnectHook, []byte(hook), 0700); err != nil {
+		t.Fatal(err)
+	}
 	file, err := os.OpenFile(confPathForID(inst.Id), os.O_APPEND|os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = fmt.Fprintf(file, "script-security 2\ntls-verify %s\n", verifier)
+	_, err = fmt.Fprintf(file, "script-security 2\ntls-verify %s\nclient-disconnect %s\n", verifier, disconnectHook)
 	closeErr := file.Close()
 	if err != nil || closeErr != nil {
 		t.Fatalf("write verifier config: %v %v", err, closeErr)
@@ -195,27 +203,44 @@ sys.stdout.buffer.write(buf)
 		return strings.ReplaceAll(string(out), "\r\n", "\n")
 	}
 	status := management("status 3")
-	clientIDIndex := -1
+	clientIDIndex, rxIndex, txIndex := -1, -1, -1
 	clientID := ""
+	var observedRx, observedTx uint64
 	for _, line := range strings.Split(status, "\n") {
 		fields := strings.Split(strings.TrimRight(line, "\r"), "\t")
 		if len(fields) > 2 && fields[0] == "HEADER" && fields[1] == "CLIENT_LIST" {
 			for i, field := range fields {
-				if field == "Client ID" {
+				switch field {
+				case "Client ID":
 					clientIDIndex = i - 1
+				case "Bytes Received":
+					rxIndex = i - 1
+				case "Bytes Sent":
+					txIndex = i - 1
 				}
 			}
 		}
 		if len(fields) > 1 && fields[0] == "CLIENT_LIST" && fields[1] == "bob@example.test" {
-			if clientID != "" || clientIDIndex < 0 || clientIDIndex >= len(fields) {
+			if clientID != "" || clientIDIndex < 0 || clientIDIndex >= len(fields) || rxIndex < 0 || rxIndex >= len(fields) || txIndex < 0 || txIndex >= len(fields) {
 				t.Fatalf("ambiguous Bob session: %s", status)
 			}
 			clientID = fields[clientIDIndex]
+			var err error
+			observedRx, err = strconv.ParseUint(fields[rxIndex], 10, 64)
+			if err != nil {
+				t.Fatalf("invalid received counter: %s", status)
+			}
+			observedTx, err = strconv.ParseUint(fields[txIndex], 10, 64)
+			if err != nil {
+				t.Fatalf("invalid sent counter: %s", status)
+			}
 		}
 	}
 	if _, err := strconv.ParseUint(clientID, 10, 64); err != nil {
 		t.Fatalf("missing or invalid Bob client ID: %q\n%s", clientID, status)
 	}
+	// Produce known traffic after the last management snapshot.
+	pingThroughBob()
 	if result := management("client-kill " + clientID); !strings.Contains(result, "SUCCESS: client-kill command succeeded") {
 		t.Fatalf("management did not acknowledge kill: %s", result)
 	}
@@ -238,6 +263,32 @@ sys.stdout.buffer.write(buf)
 			t.Fatalf("Bob not absent within observation window: %s", result)
 		}
 		time.Sleep(100 * time.Millisecond)
+	}
+	// The disconnect hook should see the extra traffic in this one live
+	// run. It cannot recover a hook that never executes or data after a crash.
+	waitLog(disconnectLog, func(text string) bool { return strings.Contains(text, "bob@example.test\t") })
+	data, err := os.ReadFile(disconnectLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		fields := strings.Split(line, "\t")
+		if len(fields) != 3 || fields[0] != "bob@example.test" {
+			continue
+		}
+		if found {
+			t.Fatalf("duplicate Bob disconnect record: %s", data)
+		}
+		found = true
+		rx, errRx := strconv.ParseUint(fields[1], 10, 64)
+		tx, errTx := strconv.ParseUint(fields[2], 10, 64)
+		if errRx != nil || errTx != nil || rx <= observedRx || tx <= observedTx {
+			t.Fatalf("disconnect counters did not include post-snapshot traffic: %q (snapshot %d/%d)", line, observedRx, observedTx)
+		}
+	}
+	if !found {
+		t.Fatalf("missing Bob disconnect record: %s", data)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
