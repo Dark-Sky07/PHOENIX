@@ -121,35 +121,32 @@ func TestAttachOpenvpnInbound_NoClientsArray(t *testing.T) {
 		t.Errorf("openvpn settings must reflect the client update, got %#v", clientsAfterUpdate)
 	}
 
-	// Detach must cleanly remove the client from the openvpn inbound.
-	if _, err := svc.Detach(inboundSvc, rec.Id, []int{open.Id}); err != nil {
-		t.Fatalf("Detach(openvpn): %v", err)
+	// Without a final accounting and disconnect proof, retain the attachment.
+	if _, err := svc.Detach(inboundSvc, rec.Id, []int{open.Id}); err == nil {
+		t.Fatal("Detach(openvpn) accepted without verified final accounting")
 	}
 	freshAfterDetach, err := inboundSvc.GetInbound(open.Id)
 	if err != nil {
-		t.Fatalf("GetInbound(openvpn) after detach: %v", err)
+		t.Fatal(err)
 	}
 	clientsAfterDetach, err := inboundSvc.GetClients(freshAfterDetach)
-	if err != nil {
-		t.Fatalf("GetClients(openvpn) after detach: %v", err)
-	}
-	if len(clientsAfterDetach) != 0 {
-		t.Errorf("openvpn settings must be empty after detach, got %#v", clientsAfterDetach)
+	if err != nil || len(clientsAfterDetach) != 1 || clientsAfterDetach[0].Email != email {
+		t.Fatalf("client settings were lost: %#v %v", clientsAfterDetach, err)
 	}
 	linksAfterDetach, err := svc.GetInboundIdsForRecord(rec.Id)
 	if err != nil {
-		t.Fatalf("GetInboundIdsForRecord after detach: %v", err)
+		t.Fatal(err)
 	}
+	foundOpen = false
 	for _, id := range linksAfterDetach {
 		if id == open.Id {
-			t.Errorf("client_inbounds link must be removed after detach")
+			foundOpen = true
 		}
 	}
-
-	// Detaching again (nothing attached) must be a tolerated no-op.
-	if _, err := svc.Detach(inboundSvc, rec.Id, []int{open.Id}); err != nil {
-		t.Fatalf("Detach(openvpn) again: %v", err)
+	if !foundOpen {
+		t.Fatal("client link was lost")
 	}
+
 }
 
 // TestCreateClientDirectlyOnOpenvpn covers creating a brand-new client whose

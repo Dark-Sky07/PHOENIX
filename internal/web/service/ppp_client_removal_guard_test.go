@@ -35,7 +35,7 @@ func seedPPPRemovalGuard(t *testing.T) (*model.Inbound, *model.ClientRecord, *mo
 }
 
 func TestPPPInboundEditRejectsUnprovenClientRemoval(t *testing.T) {
-	for _, protocol := range []model.Protocol{model.PPTP, model.SSTP, model.L2TP} {
+	for _, protocol := range []model.Protocol{model.PPTP, model.SSTP, model.L2TP, model.OpenVPN} {
 		t.Run(string(protocol), func(t *testing.T) {
 			ib, client, _ := seedPPPRemovalGuard(t)
 			db := database.GetDB()
@@ -48,8 +48,8 @@ func TestPPPInboundEditRejectsUnprovenClientRemoval(t *testing.T) {
 			err := db.Transaction(func(tx *gorm.DB) error {
 				return (&InboundService{}).updateClientTraffics(tx, ib, &updated)
 			})
-			if err == nil || !strings.Contains(err.Error(), "PPP") {
-				t.Fatalf("unproven PPP client removal accepted: %v", err)
+			if err == nil || !strings.Contains(err.Error(), "verified disconnect") {
+				t.Fatalf("unproven daemon client removal accepted: %v", err)
 			}
 			var count int64
 			if err := db.Model(&xray.ClientTraffic{}).Where("email = ?", client.Email).Count(&count).Error; err != nil || count != 1 {
@@ -93,7 +93,7 @@ func TestPPPInboundEditOmittingClientsPreservesAttachments(t *testing.T) {
 }
 
 func TestLocalPPPInboundDeletionRetainsIdentityAndLinks(t *testing.T) {
-	for _, protocol := range []model.Protocol{model.PPTP, model.SSTP, model.L2TP} {
+	for _, protocol := range []model.Protocol{model.PPTP, model.SSTP, model.L2TP, model.OpenVPN} {
 		t.Run(string(protocol), func(t *testing.T) {
 			ib, client, _ := seedPPPRemovalGuard(t)
 			db := database.GetDB()
@@ -116,7 +116,7 @@ func TestLocalPPPInboundDeletionRetainsIdentityAndLinks(t *testing.T) {
 }
 
 func TestLocalPPPProtocolConversionDoesNotBypassRemovalGuard(t *testing.T) {
-	for _, protocol := range []model.Protocol{model.PPTP, model.SSTP, model.L2TP} {
+	for _, protocol := range []model.Protocol{model.PPTP, model.SSTP, model.L2TP, model.OpenVPN} {
 		t.Run(string(protocol), func(t *testing.T) {
 			ib, client, _ := seedPPPRemovalGuard(t)
 			db := database.GetDB()
@@ -248,13 +248,13 @@ func TestL2TPRemovalAndUnassignmentStayBlockedBeforeMutation(t *testing.T) {
 	if err := db.Model(ib).Update("enable", false).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := rejectUnprovenPPPRemoval(db, []string{client.Email}, nil); err == nil {
+	if err := rejectUnprovenDaemonRemoval(db, []string{client.Email}, nil); err == nil {
 		t.Fatal("disabled L2TP settings-only attachment accepted")
 	}
-	if err := rejectUnprovenPPPRemoval(db, []string{"other@example.test"}, nil); err != nil {
+	if err := rejectUnprovenDaemonRemoval(db, []string{"other@example.test"}, nil); err != nil {
 		t.Fatalf("unrelated client blocked: %v", err)
 	}
-	if err := rejectUnprovenPPPRemoval(db, []string{client.Email}, []int{}); err != nil {
+	if err := rejectUnprovenDaemonRemoval(db, []string{client.Email}, []int{}); err != nil {
 		t.Fatalf("empty scope blocked: %v", err)
 	}
 }
@@ -278,13 +278,13 @@ func TestBlankIdentityCannotBypassClientRemovalGuard(t *testing.T) {
 			if err := db.Model(&model.ClientInbound{}).Where("client_id = ? AND inbound_id = ?", client.Id, ib.Id).Count(&count).Error; err != nil || count != 1 {
 				t.Fatalf("link evidence altered: %d %v", count, err)
 			}
-			if err := rejectUnprovenPPPRemoval(db, []string{"valid@example.test", email}, nil); err == nil {
+			if err := rejectUnprovenDaemonRemoval(db, []string{"valid@example.test", email}, nil); err == nil {
 				t.Fatal("mixed batch silently discarded blank identity")
 			}
-			if err := rejectUnprovenPPPRemoval(db, nil, nil); err != nil {
+			if err := rejectUnprovenDaemonRemoval(db, nil, nil); err != nil {
 				t.Fatalf("empty request unexpectedly blocked: %v", err)
 			}
-			if err := rejectUnprovenPPPRemoval(db, []string{email}, []int{}); err != nil {
+			if err := rejectUnprovenDaemonRemoval(db, []string{email}, []int{}); err != nil {
 				t.Fatalf("empty scope unexpectedly blocked: %v", err)
 			}
 		})
@@ -321,10 +321,10 @@ func TestPPPRemovalGuardRejectsUnresolvedAttachments(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				if err := rejectUnprovenPPPRemoval(db, []string{"unrelated@example.test"}, []int{ib.Id}); err == nil || !strings.Contains(err.Error(), "manual reconciliation") {
+				if err := rejectUnprovenDaemonRemoval(db, []string{"unrelated@example.test"}, []int{ib.Id}); err == nil || !strings.Contains(err.Error(), "manual reconciliation") {
 					t.Fatalf("unresolved attachment accepted: %v", err)
 				}
-				if err := rejectUnprovenPPPRemoval(db, []string{"unrelated@example.test"}, []int{}); err != nil {
+				if err := rejectUnprovenDaemonRemoval(db, []string{"unrelated@example.test"}, []int{}); err != nil {
 					t.Fatalf("empty scope blocked: %v", err)
 				}
 			})
@@ -344,10 +344,10 @@ func TestPPPRemovalGuardFindsGoNormalizedLinkedIdentity(t *testing.T) {
 				if err := db.Model(client).Update("email", pair[0]).Error; err != nil {
 					t.Fatal(err)
 				}
-				if err := rejectUnprovenPPPRemoval(db, []string{pair[1]}, []int{ib.Id}); err == nil {
+				if err := rejectUnprovenDaemonRemoval(db, []string{pair[1]}, []int{ib.Id}); err == nil {
 					t.Fatal("linked Go-normalized identity allowed unsafe removal")
 				}
-				if err := rejectUnprovenPPPRemoval(db, []string{"unrelated@example.test"}, []int{ib.Id}); err != nil {
+				if err := rejectUnprovenDaemonRemoval(db, []string{"unrelated@example.test"}, []int{ib.Id}); err != nil {
 					t.Fatalf("unrelated identity blocked: %v", err)
 				}
 			})
@@ -372,16 +372,16 @@ func TestL2TPRemovalGuardCatchesOrphanSessionMarker(t *testing.T) {
 	if err := os.WriteFile(path, []byte("ALICE@example.test\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := rejectUnprovenPPPRemoval(db, []string{client.Email}, nil); err == nil || !strings.Contains(err.Error(), "L2TP") {
+	if err := rejectUnprovenDaemonRemoval(db, []string{client.Email}, nil); err == nil || !strings.Contains(err.Error(), "L2TP") {
 		t.Fatalf("orphan L2TP marker ignored: %v", err)
 	}
-	if err := rejectUnprovenPPPRemoval(db, []string{"other@example.test"}, nil); err != nil {
+	if err := rejectUnprovenDaemonRemoval(db, []string{"other@example.test"}, nil); err != nil {
 		t.Fatalf("unrelated marker blocked: %v", err)
 	}
 	if err := os.WriteFile(path, []byte("incomplete"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := rejectUnprovenPPPRemoval(db, []string{"other@example.test"}, nil); err == nil {
+	if err := rejectUnprovenDaemonRemoval(db, []string{"other@example.test"}, nil); err == nil {
 		t.Fatal("malformed L2TP marker ignored")
 	}
 }
@@ -392,7 +392,7 @@ func TestPPPRemovalGuardCatchesSettingsDriftAndSpool(t *testing.T) {
 	if err := db.Where("client_id = ?", client.Id).Delete(&model.ClientInbound{}).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := rejectUnprovenPPPRemoval(db, []string{client.Email}, nil); err == nil {
+	if err := rejectUnprovenDaemonRemoval(db, []string{client.Email}, nil); err == nil {
 		t.Fatal("settings-only identity ignored")
 	}
 	if err := db.Model(ib).Update("settings", `{"clients":[]}`).Error; err != nil {
@@ -406,16 +406,16 @@ func TestPPPRemovalGuardCatchesSettingsDriftAndSpool(t *testing.T) {
 	if err := os.WriteFile(path, []byte("closed\tppp0\tALICE@example.test\t12\t34\tsession\t7\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := rejectUnprovenPPPRemoval(db, []string{client.Email}, nil); err == nil {
+	if err := rejectUnprovenDaemonRemoval(db, []string{client.Email}, nil); err == nil {
 		t.Fatal("orphan spool ignored")
 	}
-	if err := rejectUnprovenPPPRemoval(db, []string{"other@example.test"}, nil); err != nil {
+	if err := rejectUnprovenDaemonRemoval(db, []string{"other@example.test"}, nil); err != nil {
 		t.Fatalf("unrelated client blocked by valid spool: %v", err)
 	}
 	if err := os.WriteFile(path, []byte("malformed"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := rejectUnprovenPPPRemoval(db, []string{"other@example.test"}, nil); err == nil {
+	if err := rejectUnprovenDaemonRemoval(db, []string{"other@example.test"}, nil); err == nil {
 		t.Fatal("unknown spool silently ignored")
 	}
 }
@@ -426,13 +426,13 @@ func TestPPPRemovalScopeIsBoundedAndDisabledStillBlocked(t *testing.T) {
 	if err := db.Model(ib).Update("enable", false).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := rejectUnprovenPPPRemoval(db, []string{client.Email}, nil); err == nil {
+	if err := rejectUnprovenDaemonRemoval(db, []string{client.Email}, nil); err == nil {
 		t.Fatal("disabled daemon assumed drained")
 	}
-	if err := rejectUnprovenPPPRemoval(db, []string{client.Email}, []int{ib.Id + 100}); err != nil {
+	if err := rejectUnprovenDaemonRemoval(db, []string{client.Email}, []int{ib.Id + 100}); err != nil {
 		t.Fatalf("unrelated scope blocked: %v", err)
 	}
-	if err := rejectUnprovenPPPRemoval(db, []string{client.Email}, []int{}); err != nil {
+	if err := rejectUnprovenDaemonRemoval(db, []string{client.Email}, []int{}); err != nil {
 		t.Fatalf("empty scope blocked: %v", err)
 	}
 }

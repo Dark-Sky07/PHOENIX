@@ -421,7 +421,7 @@ func (s *ResellerService) Delete(id int) error {
 		if err := tx.Model(&model.ResellerClient{}).Where("reseller_id = ?", id).Pluck("email", &emails).Error; err != nil {
 			return err
 		}
-		if err := rejectUnprovenPPPRemoval(tx, emails, nil); err != nil {
+		if err := rejectUnprovenDaemonRemoval(tx, emails, nil); err != nil {
 			return err
 		}
 		for _, mdl := range []any{&model.Reseller{}, &model.ResellerInbound{}, &model.ResellerClient{}, &model.ResellerTransaction{}, &model.ResellerSale{}, &model.ResellerHistoricalSale{}, &model.ResellerTrafficArchive{}} {

@@ -697,7 +697,7 @@ func (s *ClientService) BulkDelete(inboundSvc *InboundService, emails []string, 
 		return result, false, err
 	}
 
-	if err := rejectUnprovenPPPRemoval(db, cleanEmails, nil); err != nil {
+	if err := rejectUnprovenDaemonRemoval(db, cleanEmails, nil); err != nil {
 		return result, false, err
 	}
 
@@ -993,7 +993,7 @@ func (s *ClientService) bulkDelInboundClients(
 		}
 	}
 
-	if err := rejectUnprovenPPPRemoval(database.GetDB(), emails, []int{inboundId}); err != nil {
+	if err := rejectUnprovenDaemonRemoval(database.GetDB(), emails, []int{inboundId}); err != nil {
 		for email := range foundEmails {
 			res.perEmailSkipped[email] = err.Error()
 		}

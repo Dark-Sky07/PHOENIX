@@ -135,7 +135,7 @@ func (s *ClientService) delInboundClients(inboundSvc *InboundService, inboundId 
 	for _, r := range removed {
 		removedEmailsForGuard = append(removedEmailsForGuard, r.email)
 	}
-	if err := rejectUnprovenPPPRemoval(database.GetDB(), removedEmailsForGuard, []int{inboundId}); err != nil {
+	if err := rejectUnprovenDaemonRemoval(database.GetDB(), removedEmailsForGuard, []int{inboundId}); err != nil {
 		return false, err
 	}
 
@@ -1061,7 +1061,7 @@ func (s *ClientService) DelInboundClientByEmail(inboundSvc *InboundService, inbo
 	if !found {
 		return false, fmt.Errorf("%w for email: %s", ErrClientNotInInbound, email)
 	}
-	if err := rejectUnprovenPPPRemoval(database.GetDB(), []string{email}, []int{inboundId}); err != nil {
+	if err := rejectUnprovenDaemonRemoval(database.GetDB(), []string{email}, []int{inboundId}); err != nil {
 		return false, err
 	}
 	db := database.GetDB()

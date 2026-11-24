@@ -51,14 +51,20 @@ func TestPPPRemovalGuardPostgres(t *testing.T) {
 	if err := tx.Create(&link).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := rejectUnprovenPPPRemoval(tx, []string{email}, nil); err == nil {
+	if err := rejectUnprovenDaemonRemoval(tx, []string{email}, nil); err == nil {
 		t.Fatal("linked PPP removal accepted")
 	}
 	if err := tx.Model(&ib).Update("protocol", model.L2TP).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := rejectUnprovenPPPRemoval(tx, []string{email}, nil); err == nil {
+	if err := rejectUnprovenDaemonRemoval(tx, []string{email}, nil); err == nil {
 		t.Fatal("linked L2TP removal accepted")
+	}
+	if err := tx.Model(&ib).Update("protocol", model.OpenVPN).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectUnprovenDaemonRemoval(tx, []string{email}, nil); err == nil {
+		t.Fatal("linked OpenVPN removal accepted")
 	}
 	// The only evidence is now the link, whose email has whitespace SQL
 	// TRIM does not remove. The guard must still match the Go-normalized key.
@@ -68,7 +74,7 @@ func TestPPPRemovalGuardPostgres(t *testing.T) {
 	if err := tx.Model(&client).Update("email", "\t"+email+"\n").Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := rejectUnprovenPPPRemoval(tx, []string{email}, nil); err == nil {
+	if err := rejectUnprovenDaemonRemoval(tx, []string{email}, nil); err == nil {
 		t.Fatal("Go-normalized link accepted by PostgreSQL guard")
 	}
 	if err := tx.Model(&ib).Update("settings", string(payload)).Error; err != nil {
@@ -77,10 +83,10 @@ func TestPPPRemovalGuardPostgres(t *testing.T) {
 	if err := tx.Where("client_id = ?", client.Id).Delete(&model.ClientInbound{}).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := rejectUnprovenPPPRemoval(tx, []string{email}, nil); err == nil {
+	if err := rejectUnprovenDaemonRemoval(tx, []string{email}, nil); err == nil {
 		t.Fatal("settings drift accepted")
 	}
-	if err := rejectUnprovenPPPRemoval(tx, []string{id + "-unrelated@test"}, nil); err != nil {
+	if err := rejectUnprovenDaemonRemoval(tx, []string{id + "-unrelated@test"}, nil); err != nil {
 		t.Fatalf("unrelated identity blocked: %v", err)
 	}
 	if err := tx.Model(&ib).Update("settings", `{"clients":[]}`).Error; err != nil {
@@ -92,7 +98,7 @@ func TestPPPRemovalGuardPostgres(t *testing.T) {
 	if err := tx.Create(&model.ClientInbound{ClientId: client.Id, InboundId: ib.Id}).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := rejectUnprovenPPPRemoval(tx, []string{id + "-unrelated@test"}, []int{ib.Id}); err == nil {
+	if err := rejectUnprovenDaemonRemoval(tx, []string{id + "-unrelated@test"}, []int{ib.Id}); err == nil {
 		t.Fatal("orphan link allowed removal with unknown identity")
 	}
 }

@@ -443,7 +443,7 @@ func (s *ClientService) Delete(inboundSvc *InboundService, id int, keepTraffic b
 	if err := rejectClientNodeIncidents(database.GetDB(), []string{existing.Email}); err != nil {
 		return false, err
 	}
-	if err := rejectUnprovenPPPRemoval(database.GetDB(), []string{existing.Email}, nil); err != nil {
+	if err := rejectUnprovenDaemonRemoval(database.GetDB(), []string{existing.Email}, nil); err != nil {
 		return false, err
 	}
 	tombstoneClientEmail(existing.Email)
@@ -697,7 +697,7 @@ func (s *ClientService) DeleteByEmail(inboundSvc *InboundService, email string, 
 	if err := rejectClientNodeIncidents(database.GetDB(), []string{email}); err != nil {
 		return false, err
 	}
-	if err := rejectUnprovenPPPRemoval(database.GetDB(), []string{email}, nil); err != nil {
+	if err := rejectUnprovenDaemonRemoval(database.GetDB(), []string{email}, nil); err != nil {
 		return false, err
 	}
 	rec, err := s.GetRecordByEmail(nil, email)
@@ -774,7 +774,7 @@ func (s *ClientService) DeleteByEmailForInbounds(inboundSvc *InboundService, ema
 		}
 		return false, err
 	}
-	if err := rejectUnprovenPPPRemoval(database.GetDB(), []string{email}, inboundIDs); err != nil {
+	if err := rejectUnprovenDaemonRemoval(database.GetDB(), []string{email}, inboundIDs); err != nil {
 		return false, err
 	}
 	// Record a baseline even for a scoped no-op: the caller may revoke the
@@ -921,7 +921,7 @@ func (s *ClientService) Detach(inboundSvc *InboundService, id int, inboundIds []
 	if err := rejectClientNodeIncidents(database.GetDB(), []string{existing.Email}); err != nil {
 		return false, err
 	}
-	if err := rejectUnprovenPPPRemoval(database.GetDB(), []string{existing.Email}, inboundIds); err != nil {
+	if err := rejectUnprovenDaemonRemoval(database.GetDB(), []string{existing.Email}, inboundIds); err != nil {
 		return false, err
 	}
 	currentIds, err := s.GetInboundIdsForRecord(id)

@@ -32,6 +32,19 @@ state. Do not simply delete or merge counters without determining their origin
 and preserving consumed bytes. Archives produced before this guard may already
 contain an inflated snapshot and require evidence-based reconciliation.
 
+## Local OpenVPN removal fence
+
+Local OpenVPN client removal, detachment and reseller unassignment are blocked
+when the relevant attachment is known. Local inbound removal and protocol
+conversion are blocked regardless of attachments until disconnect and final
+accounting are verified. A disabled inbound
+is not proof of a complete final poll. This is a conservative interim fence:
+there is no automated proof or resume workflow yet, the identity scan does not
+lock concurrent inserts, and it cannot identify an orphan daemon whose inbound
+and attachment evidence were already lost. It does not make OpenVPN traffic
+crash-durable or stop active sessions by itself. Preserve evidence and investigate
+before any manual recovery; do not infer missing usage.
+
 ## Local TUIC shutdown journal
 
 TUIC reconciliation fingerprints use structured, hashed user and listener

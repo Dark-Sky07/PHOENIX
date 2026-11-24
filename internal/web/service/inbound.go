@@ -1248,12 +1248,12 @@ func (s *InboundService) DelInbound(id int) (bool, error) {
 		if err := rejectInboundNodeIncidents(db, &ib); err != nil {
 			return false, err
 		}
-		// A daemon stop or missing marker does not prove that all PPP child
-		// sessions stopped and published their final accounting. In particular,
+		// A daemon stop or missing marker does not prove that all sessions
+		// stopped and published their final accounting. In particular,
 		// DelInbound historically continued deleting the row even if its local
 		// runtime removal failed. Keep the inbound and links for manual review.
-		if ib.NodeID == nil && (ib.Protocol == model.L2TP || ib.Protocol == model.SSTP || ib.Protocol == model.PPTP) {
-			return false, fmt.Errorf("local PPP inbound %d requires verified disconnect and accounting before removal", ib.Id)
+		if ib.NodeID == nil && (ib.Protocol == model.OpenVPN || ib.Protocol == model.L2TP || ib.Protocol == model.SSTP || ib.Protocol == model.PPTP) {
+			return false, fmt.Errorf("local %s inbound %d requires verified disconnect and accounting before removal", ib.Protocol, ib.Id)
 		}
 	} else if !database.IsNotFound(loadErr) {
 		return false, loadErr
@@ -1528,12 +1528,12 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 	}
 
 	oldRuntime := *oldInbound
-	// Protocol conversion otherwise bypasses the local PPP inbound deletion
-	// guard, discarding the runtime identity while final child-session traffic
+	// Protocol conversion otherwise bypasses the local daemon inbound deletion
+	// guard, discarding the runtime identity while final session traffic
 	// is still unproven. Disabling the inbound remains a separate operation.
 	if oldInbound.NodeID == nil && oldInbound.Protocol != inbound.Protocol &&
-		(oldInbound.Protocol == model.L2TP || oldInbound.Protocol == model.SSTP || oldInbound.Protocol == model.PPTP) {
-		return inbound, false, fmt.Errorf("local PPP inbound %d requires verified disconnect and accounting before protocol conversion", oldInbound.Id)
+		(oldInbound.Protocol == model.OpenVPN || oldInbound.Protocol == model.L2TP || oldInbound.Protocol == model.SSTP || oldInbound.Protocol == model.PPTP) {
+		return inbound, false, fmt.Errorf("local %s inbound %d requires verified disconnect and accounting before protocol conversion", oldInbound.Protocol, oldInbound.Id)
 	}
 	inbound.NodeID = oldInbound.NodeID
 	if inbound.NodeID != nil && !isNodeEligibleProtocol(inbound.Protocol) {
@@ -1939,7 +1939,7 @@ func (s *InboundService) updateClientTraffics(tx *gorm.DB, oldInbound *model.Inb
 			newEmails[key] = struct{}{}
 		}
 	}
-	if oldInbound.NodeID == nil && (oldInbound.Protocol == model.L2TP || oldInbound.Protocol == model.SSTP || oldInbound.Protocol == model.PPTP) {
+	if oldInbound.NodeID == nil && (oldInbound.Protocol == model.OpenVPN || oldInbound.Protocol == model.L2TP || oldInbound.Protocol == model.SSTP || oldInbound.Protocol == model.PPTP) {
 		// Include canonical links as well as the JSON list: older inbounds may
 		// have drifted between these sources. Guard before deleting any stats.
 		var linked []string
@@ -1960,7 +1960,7 @@ func (s *InboundService) updateClientTraffics(tx *gorm.DB, oldInbound *model.Inb
 				removed = append(removed, key)
 			}
 		}
-		if err := rejectUnprovenPPPRemoval(tx, removed, []int{oldInbound.Id}); err != nil {
+		if err := rejectUnprovenDaemonRemoval(tx, removed, []int{oldInbound.Id}); err != nil {
 			return err
 		}
 	}
