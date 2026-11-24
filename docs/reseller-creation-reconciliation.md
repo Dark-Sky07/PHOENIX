@@ -1498,10 +1498,12 @@ server and clients, tcpdump also observes the ICMP request on Bob's client
 reported packet loss and a route via `tun0`, but tcpdump did not see the probe;
 its path is not established, and the cause was not determined. A second user
 in a separate network namespace remains in status and continues to receive ICMP
-replies after Bob's kill. This covers one OpenVPN package, two UDP sessions and
-one ICMP path; it does not prove all traffic or child processes are drained,
-prove final counters were captured, or fence races between status, kill,
-reconnect and allowlist changes.
+replies after Bob's kill. After the session disappears, a separately started
+Bob client from a pinned source port is rejected by the test verifier; a later
+complete status still has Carol and not Bob, and Carol still receives replies.
+This covers one OpenVPN package, two UDP sessions and one ICMP path; it does
+not prove all traffic or child processes are drained, prove final counters were
+captured, or fence races between status, kill, reconnect and allowlist changes.
 This management sequence is not wired into production or quota release.
 
 The live experiment also records the `bytes_received` and `bytes_sent` variables
