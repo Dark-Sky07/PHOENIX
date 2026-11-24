@@ -1452,5 +1452,7 @@ and control characters in the daemon data directory are rejected before
 replacing an existing daemon or writing a profile. Generated config paths are
 quoted and escaped. This is a stricter compatibility boundary: operators using
 unusual hostname spellings, scoped IPv6 literals or malformed legacy settings
-must review them. Unit tests exercise the generated text and failure paths;
-they are not a real OpenVPN interoperability or session-drain test.
+must review them. Unit tests exercise generated text and failure paths. CI also
+installs Ubuntu's OpenVPN package and checks server and client parsing, including
+decoding quoted paths, but this is not a client/server session, a test across
+all supported versions, or a session-drain test.
