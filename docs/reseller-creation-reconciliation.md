@@ -32,6 +32,19 @@ state. Do not simply delete or merge counters without determining their origin
 and preserving consumed bytes. Archives produced before this guard may already
 contain an inflated snapshot and require evidence-based reconciliation.
 
+## OpenVPN management polling
+
+OpenVPN status version 3 is tab-separated, including empty columns; its client
+rows are parsed according to the header rather than whitespace tokenization.
+Malformed client rows, incomplete client headers and duplicate normalized
+client names reject the whole poll, retain the in-memory baseline and do not
+fall back to a later snapshot. This prevents silently treating a damaged response
+as an empty or partial client list. Such errors are logged; they are not yet a
+durable accounting incident or a quota fence. Polling still misses traffic after
+client disappearance, advances its baseline before the database commit, and has
+no crash-durable journal or reliable session generation. These changes do not
+establish complete accounting or safe final drain.
+
 ## Local OpenVPN removal fence
 
 Local OpenVPN client removal, detachment and reseller unassignment are blocked

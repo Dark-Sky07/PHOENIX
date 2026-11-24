@@ -380,6 +380,7 @@ func (m *Manager) CollectTraffic() (inbounds []InboundTraffic, clients []ClientT
 			continue
 		}
 		if err != nil {
+			logger.Warningf("openvpn: inbound %d management traffic poll failed; counters retained: %v", p.id, err)
 			clearOnline(man)
 			m.mu.Unlock()
 			continue

@@ -68,10 +68,19 @@ func clientListLayoutFromHeader(fields []string) (clientListLayout, bool) {
 	for i := base; i < len(fields); i++ {
 		switch normalizedColumn(fields[i]) {
 		case "common name", "common_name", "cn":
+			if layout.name >= 0 {
+				return clientListLayout{}, false
+			}
 			layout.name = i - base
 		case "bytes received", "bytes_received", "bytes rx", "rx":
+			if layout.rx >= 0 {
+				return clientListLayout{}, false
+			}
 			layout.rx = i - base
 		case "bytes sent", "bytes_sent", "bytes tx", "tx":
+			if layout.tx >= 0 {
+				return clientListLayout{}, false
+			}
 			layout.tx = i - base
 		}
 	}
@@ -206,17 +215,30 @@ func parseSpaceClientRow(line string) (string, clientCounters, bool) {
 // parseClientListResponse parses one complete management response. It is kept
 // separate from the socket code so the real OpenVPN response formats can be
 // tested without requiring an OpenVPN daemon in CI.
+// errUnsafeManagementResponse means a recognized response contained
+// accounting evidence that cannot be interpreted without losing information.
+// Do not hide it by trying a different command that may show another snapshot.
+var errUnsafeManagementResponse = errors.New("unsafe openvpn management response")
+
 func parseClientListResponse(reader io.Reader) (map[string]clientCounters, error) {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	out := make(map[string]clientCounters)
+	seen := make(map[string]bool)
 	var layout *clientListLayout
-	terminated := false
-
+	terminated, recognized, legacyRows := false, false, false
+	add := func(cn string, counters clientCounters) error {
+		key := strings.ToLower(strings.TrimSpace(cn))
+		if key == "" || seen[key] {
+			return fmt.Errorf("%w: blank or duplicate client identity", errUnsafeManagementResponse)
+		}
+		seen[key] = true
+		out[cn] = counters
+		return nil
+	}
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if line == "" || line == "OK" || strings.HasPrefix(line, ">INFO:") ||
-			strings.HasPrefix(line, "TITLE,") || strings.HasPrefix(line, "TIME,") {
+		if line == "" || line == "OK" || strings.HasPrefix(line, ">INFO:") {
 			continue
 		}
 		if line == "END" || line == "<END" {
@@ -226,41 +248,92 @@ func parseClientListResponse(reader io.Reader) (map[string]clientCounters, error
 		if strings.HasPrefix(line, "ERROR:") {
 			return nil, errors.New(strings.TrimSpace(line))
 		}
-		if strings.HasPrefix(line, "OpenVPN CLIENT LIST") ||
-			line == "ROUTING TABLE" || line == "GLOBAL STATS" ||
-			strings.HasPrefix(line, "HEADER,ROUTING_TABLE") {
+		if strings.HasPrefix(line, "<CLIENT_LIST VERSION ") || strings.HasPrefix(line, "<CLIENT_LIST HEADER ") {
+			recognized = true
+			continue
+		}
+		if strings.HasPrefix(line, "OpenVPN CLIENT LIST") {
+			recognized = true
+			continue
+		}
+		if line == "ROUTING TABLE" || line == "GLOBAL STATS" {
+			legacyRows = false
 			continue
 		}
 
-		// The old management response is space-separated and starts with
-		// <CLIENT_LIST (or CLIENT_LIST). Try it before CSV parsing because its
-		// header contains spaces and is not a valid CSV schema by itself.
-		if cn, counters, ok := parseSpaceClientRow(line); ok {
-			out[cn] = counters
-			continue
+		// status 3 is tab-delimited (not CSV); splitting on whitespace loses
+		// empty IPv6 fields and splits column names and timestamps into tokens.
+		var fields []string
+		var err error
+		switch i := strings.IndexAny(line, ",\t"); {
+		case i >= 0 && line[i] == '\t':
+			fields = strings.Split(line, "\t")
+		case i >= 0:
+			fields, err = csvFields(line)
 		}
-
-		if !strings.Contains(line, ",") {
-			continue
-		}
-		fields, err := csvFields(line)
 		if err != nil {
+			if strings.HasPrefix(line, "CLIENT_LIST,") || strings.HasPrefix(line, "HEADER,CLIENT_LIST,") || legacyRows {
+				return nil, fmt.Errorf("%w: malformed client row", errUnsafeManagementResponse)
+			}
 			continue
 		}
-		if parsed, ok := clientListLayoutFromHeader(fields); ok {
-			layoutCopy := parsed
-			layout = &layoutCopy
+		if len(fields) > 0 {
+			first := normalizedColumn(fields[0])
+			isHeader := first == "header" && len(fields) > 1 && normalizedColumn(fields[1]) == "client_list"
+			isLegacyHeader := first == "common name"
+			isUnprefixedHeader := first == "client_list" && len(fields) > 1 && normalizedColumn(fields[1]) == "common name"
+			if isHeader || isLegacyHeader || isUnprefixedHeader {
+				parsed, ok := clientListLayoutFromHeader(fields)
+				if !ok {
+					return nil, fmt.Errorf("%w: incomplete client header", errUnsafeManagementResponse)
+				}
+				layout = &parsed
+				recognized = true
+				legacyRows = isLegacyHeader
+				continue
+			}
+			if first == "client_list" || legacyRows {
+				if layout == nil {
+					return nil, fmt.Errorf("%w: client row without header", errUnsafeManagementResponse)
+				}
+				cn, counters, ok := parseCSVClientRow(fields, layout)
+				if !ok {
+					return nil, fmt.Errorf("%w: invalid client row", errUnsafeManagementResponse)
+				}
+				if err := add(cn, counters); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			// Routing and global-stat rows do not describe clients.
 			continue
 		}
-		if cn, counters, ok := parseCSVClientRow(fields, layout); ok {
-			out[cn] = counters
+		// Preserve the older space-delimited management format.
+		if strings.HasPrefix(line, "<CLIENT_LIST ") || strings.HasPrefix(line, "CLIENT_LIST ") {
+			cn, counters, ok := parseSpaceClientRow(line)
+			if !ok {
+				return nil, fmt.Errorf("%w: invalid legacy client row", errUnsafeManagementResponse)
+			}
+			recognized = true
+			if err := add(cn, counters); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
+		if recognized {
+			return nil, fmt.Errorf("%w: incomplete response: %v", errUnsafeManagementResponse, err)
+		}
 		return nil, err
 	}
 	if !terminated {
+		if recognized {
+			return nil, fmt.Errorf("%w: response ended before END", errUnsafeManagementResponse)
+		}
 		return nil, errors.New("openvpn management response ended before END")
+	}
+	if !recognized {
+		return nil, errors.New("unrecognized openvpn management response")
 	}
 	return out, nil
 }
@@ -280,7 +353,7 @@ func queryClientListCommand(mgmtPort int, command string) (map[string]clientCoun
 }
 
 // clientList queries the daemon's management interface and returns current
-// connected clients keyed by common name. status 3 is the canonical CSV
+// connected clients keyed by common name. status 3 is the canonical tab-separated
 // response on supported OpenVPN builds; status 2 is retained for older builds,
 // and the dedicated CLIENT_LIST command is the final legacy fallback.
 func clientList(mgmtPort int) (map[string]clientCounters, error) {
@@ -289,6 +362,9 @@ func clientList(mgmtPort int) (map[string]clientCounters, error) {
 		clients, err := queryClientListCommand(mgmtPort, command)
 		if err == nil {
 			return clients, nil
+		}
+		if errors.Is(err, errUnsafeManagementResponse) {
+			return nil, err
 		}
 		lastErr = err
 	}
