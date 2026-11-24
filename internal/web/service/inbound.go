@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"regexp"
 	"slices"
@@ -1812,100 +1813,130 @@ func (s *InboundService) buildRuntimeInboundForAPI(tx *gorm.DB, inbound *model.I
 	if inbound == nil {
 		return nil, fmt.Errorf("inbound is nil")
 	}
-
 	runtimeInbound := *inbound
 	settings := map[string]any{}
-	if err := json.Unmarshal([]byte(inbound.Settings), &settings); err != nil {
+	decoder := json.NewDecoder(strings.NewReader(inbound.Settings))
+	decoder.UseNumber() // Do not round byte quotas or other integer settings.
+	if err := decoder.Decode(&settings); err != nil {
 		return nil, err
 	}
-
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("trailing inbound settings")
+		}
+		return nil, err
+	}
+	strict := inbound.Protocol == model.TUIC || inbound.Protocol == model.OpenVPN || inbound.Protocol == model.L2TP || inbound.Protocol == model.SSTP || inbound.Protocol == model.PPTP
 	clients, ok := settings["clients"].([]any)
 	if !ok {
+		if _, exists := settings["clients"]; strict && exists {
+			return nil, fmt.Errorf("invalid daemon client list")
+		}
 		return &runtimeInbound, nil
 	}
-
-	emails := make([]string, 0, len(clients))
-	for _, client := range clients {
-		if c, ok := client.(map[string]any); ok {
-			if email, _ := c["email"].(string); email != "" {
-				emails = append(emails, transferEmailKey(email))
+	if strict {
+		// Decode just the accounting fields from the original JSON into integers,
+		// not float64. A malformed credential is omitted, not treated as unlimited.
+		var raw struct {
+			Clients []json.RawMessage `json:"clients"`
+		}
+		if err := json.Unmarshal([]byte(inbound.Settings), &raw); err != nil {
+			return nil, err
+		}
+		if len(raw.Clients) != len(clients) {
+			return nil, fmt.Errorf("daemon client list mismatch")
+		}
+		candidates := make([]model.Client, len(clients))
+		for i, item := range raw.Clients {
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(item, &fields); err != nil || fields == nil {
+				continue
+			}
+			invalid := false
+			for _, name := range []string{"enable", "totalGB", "expiryTime", "activateBefore"} {
+				if value, exists := fields[name]; exists && string(value) == "null" {
+					invalid = true
+					break
+				}
+			}
+			if invalid {
+				continue
+			}
+			var c struct {
+				Email          string `json:"email"`
+				Enable         *bool  `json:"enable"`
+				TotalGB        int64  `json:"totalGB"`
+				ExpiryTime     int64  `json:"expiryTime"`
+				ActivateBefore int64  `json:"activateBefore"`
+			}
+			if err := json.Unmarshal(item, &c); err != nil {
+				continue
+			}
+			candidates[i] = model.Client{Email: c.Email, Enable: c.Enable == nil || *c.Enable, TotalGB: c.TotalGB, ExpiryTime: c.ExpiryTime, ActivateBefore: c.ActivateBefore}
+		}
+		allowed, ids, err := daemonAccountingEligibility(tx, candidates)
+		if err != nil {
+			return nil, err
+		}
+		finalClients := make([]any, 0, len(clients))
+		for i, client := range clients {
+			c, ok := client.(map[string]any)
+			if !ok || !allowed[i] {
+				continue
+			}
+			if inbound.Protocol == model.TUIC {
+				delete(c, "traffic_id")
+				c["traffic_id"] = ids[i]
+			}
+			finalClients = append(finalClients, c)
+		}
+		settings["clients"] = finalClients
+	} else {
+		emails := make([]string, 0, len(clients))
+		for _, client := range clients {
+			if c, ok := client.(map[string]any); ok {
+				if email, _ := c["email"].(string); email != "" {
+					emails = append(emails, transferEmailKey(email))
+				}
 			}
 		}
-	}
-
-	strictDaemonIdentity := inbound.Protocol == model.TUIC || inbound.Protocol == model.OpenVPN || inbound.Protocol == model.L2TP || inbound.Protocol == model.SSTP || inbound.Protocol == model.PPTP
-	var clientStats []xray.ClientTraffic
-	q := tx.Model(xray.ClientTraffic{}).Select("id", "email", "enable")
-	if !strictDaemonIdentity {
+		var stats []xray.ClientTraffic
+		q := tx.Model(xray.ClientTraffic{}).Select("id", "email", "enable")
 		if len(emails) > 0 {
 			q = q.Where("inbound_id = ? OR LOWER(TRIM(email)) IN ?", inbound.Id, emails)
 		} else {
 			q = q.Where("inbound_id = ?", inbound.Id)
 		}
-	}
-	// SQL LOWER/TRIM is not equivalent to Go's Unicode-aware normalization
-	// (notably for tabs and non-ASCII case). Inspect all rows for strict daemon
-	// identities so a matching row on another inbound cannot be missed.
-	if err := q.Find(&clientStats).Error; err != nil {
-		return nil, err
-	}
-
-	enableMap := make(map[string]bool, len(clientStats))
-	trafficIDs := make(map[string]int, len(clientStats))
-	matchCounts := make(map[string]int, len(clientStats))
-	for _, clientTraffic := range clientStats {
-		key := transferEmailKey(clientTraffic.Email)
-		matchCounts[key]++
-		enableMap[key] = clientTraffic.Enable
-		trafficIDs[key] = clientTraffic.Id
-	}
-	var sqlTrafficIDs map[string]int
-	if strictDaemonIdentity {
-		var err error
-		sqlTrafficIDs, err = daemonSQLTrafficIDs(tx, emails)
-		if err != nil {
+		if err := q.Find(&stats).Error; err != nil {
 			return nil, err
 		}
-	}
-	finalClients := make([]any, 0, len(clients))
-	for _, client := range clients {
-		c, ok := client.(map[string]any)
-		if !ok {
-			continue
+		enabled := make(map[string]bool, len(stats))
+		for _, row := range stats {
+			enabled[transferEmailKey(row.Email)] = row.Enable
 		}
-
-		email, _ := c["email"].(string)
-		key := transferEmailKey(email)
-		// Missing or ambiguous accounting identities cannot safely authenticate.
-		// Exclude only the affected credential instead of stopping the node.
-		if strictDaemonIdentity && (key == "" || matchCounts[key] != 1 || sqlTrafficIDs[key] == 0 || sqlTrafficIDs[key] != trafficIDs[key]) {
-			continue
-		}
-		if enable, exists := enableMap[key]; exists && !enable {
-			continue
-		}
-
-		if manualEnable, ok := c["enable"].(bool); ok && !manualEnable {
-			continue
-		}
-
-		if inbound.Protocol == model.TUIC {
-			delete(c, "traffic_id")
-			if id := trafficIDs[key]; id > 0 {
-				c["traffic_id"] = id
+		finalClients := make([]any, 0, len(clients))
+		for _, client := range clients {
+			c, ok := client.(map[string]any)
+			if !ok {
+				continue
 			}
+			email, _ := c["email"].(string)
+			if enable, exists := enabled[transferEmailKey(email)]; exists && !enable {
+				continue
+			}
+			if enable, ok := c["enable"].(bool); ok && !enable {
+				continue
+			}
+			finalClients = append(finalClients, c)
 		}
-
-		finalClients = append(finalClients, c)
+		settings["clients"] = finalClients
 	}
-
-	settings["clients"] = finalClients
 	modifiedSettings, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return nil, err
 	}
 	runtimeInbound.Settings = string(modifiedSettings)
-
 	return &runtimeInbound, nil
 }
 

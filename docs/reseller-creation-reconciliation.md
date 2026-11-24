@@ -40,9 +40,14 @@ quota while holding the participating allocation lock. A disabled, exhausted,
 ambiguous or corrupt identity is rejected; a failed evidence query or pending
 journal also blocks issuance. Periodic OpenVPN/L2TP/SSTP/PPTP client filtering
 uses the same quota checks even before the next disable job updates its flag.
-These are point-in-time checks and do not capture unpolled traffic or fence
-nonparticipating writers. Other direct runtime paths still need equivalent
-quota coverage.
+The direct local runtime payload filter for TUIC and these daemons uses the
+same checks in its caller's transaction, including any existing canonical
+record; malformed client quota fields are omitted rather than made unlimited.
+JSON integer settings retain their exact precision. These are point-in-time
+checks and do not capture unpolled traffic, fence nonparticipating writers,
+or prove that previously accepted sessions stopped. Settings-only legacy
+clients without a canonical record remain supported when their traffic identity
+is unique; they need separate historical review.
 
 Legacy certificate filenames sanitize client emails and may collide. A profile
 request now refuses a stored certificate with a different CN, mismatched key,

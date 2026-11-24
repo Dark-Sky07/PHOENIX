@@ -2,10 +2,12 @@ package service
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"testing"
 
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
+	"github.com/Dark-Sky07/phoenix/internal/xray"
 	"github.com/google/uuid"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -26,7 +28,7 @@ func TestPPPRemovalGuardPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	if err := db.AutoMigrate(&model.Inbound{}, &model.ClientRecord{}, &model.ClientInbound{}); err != nil {
+	if err := db.AutoMigrate(&model.Inbound{}, &model.ClientRecord{}, &model.ClientInbound{}, &model.ClientGlobalTraffic{}, &xray.ClientTraffic{}); err != nil {
 		t.Fatal(err)
 	}
 	tx := db.Begin()
@@ -100,5 +102,26 @@ func TestPPPRemovalGuardPostgres(t *testing.T) {
 	}
 	if err := rejectUnprovenDaemonRemoval(tx, []string{id + "-unrelated@test"}, []int{ib.Id}); err == nil {
 		t.Fatal("orphan link allowed removal with unknown identity")
+	}
+	// This uncommitted global snapshot must be read on the caller's transaction
+	// and normalized by Go rather than PostgreSQL's narrower TRIM/LOWER.
+	quotaEmail := id + "@direct-quota.test"
+	traffic := xray.ClientTraffic{Email: quotaEmail, Enable: true, Total: 100}
+	global := model.ClientGlobalTraffic{MasterGuid: id, Email: "\t" + quotaEmail + "\n", Up: 100}
+	for _, evidence := range []any{&traffic, &global} {
+		if err := tx.Create(evidence).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	settings := fmt.Sprintf(`{"clients":[{"email":%q,"enable":true}]}`, quotaEmail)
+	filtered, err := (&InboundService{}).buildRuntimeInboundForAPI(tx, &model.Inbound{Protocol: model.OpenVPN, Settings: settings})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		Clients []json.RawMessage `json:"clients"`
+	}
+	if err := json.Unmarshal([]byte(filtered.Settings), &result); err != nil || len(result.Clients) != 0 {
+		t.Fatalf("PostgreSQL uncommitted exhausted quota accepted: %s %v", filtered.Settings, err)
 	}
 }

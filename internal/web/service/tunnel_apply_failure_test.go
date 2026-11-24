@@ -107,7 +107,7 @@ func TestInboundCreateDoesNotApplyUnfilteredTUICOnFilterError(t *testing.T) {
 	t.Cleanup(func() { runtime.SetManager(oldManager); tuic.GetManager().Remove(ib.Id) })
 	const callback = "test:fail-create-daemon-filter"
 	if err := db.Callback().Query().Before("gorm:query").Register(callback, func(tx *gorm.DB) {
-		if tx.Statement.Table == "client_traffics" && strings.Join(tx.Statement.Selects, ",") == "id,email,enable" {
+		if tx.Statement.Table == "client_traffics" && strings.Join(tx.Statement.Selects, ",") == "id,email,enable,up,down,total,expiry_time" {
 			tx.AddError(errors.New("injected daemon filter failure"))
 		}
 	}); err != nil {
@@ -148,7 +148,7 @@ func TestInboundEditDoesNotApplyUnfilteredTUICOnFilterError(t *testing.T) {
 	t.Cleanup(func() { runtime.SetManager(oldManager); tuic.GetManager().Remove(ib.Id) })
 	const callback = "test:fail-daemon-filter"
 	if err := db.Callback().Query().Before("gorm:query").Register(callback, func(tx *gorm.DB) {
-		if tx.Statement.Table == "client_traffics" && strings.Join(tx.Statement.Selects, ",") == "id,email,enable" {
+		if tx.Statement.Table == "client_traffics" && strings.Join(tx.Statement.Selects, ",") == "id,email,enable,up,down,total,expiry_time" {
 			tx.AddError(errors.New("injected daemon filter failure"))
 		}
 	}); err != nil {

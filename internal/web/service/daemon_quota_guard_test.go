@@ -13,9 +13,9 @@ import (
 func TestPeriodicDaemonClientsRejectExhaustedAndCorruptUsage(t *testing.T) {
 	past := time.Now().Add(-time.Hour).UnixMilli()
 	for _, tc := range []struct {
-		name                                                                     string
-		up, down, total, globalUp, globalDown, clientTotal, expiry, clientExpiry int64
-		allowed                                                                  bool
+		name                                                                                     string
+		up, down, total, globalUp, globalDown, clientTotal, expiry, clientExpiry, activateBefore int64
+		allowed                                                                                  bool
 	}{
 		{name: "healthy", up: 30, down: 20, total: 100, allowed: true},
 		{name: "exact local quota", up: 80, down: 20, total: 100},
@@ -27,6 +27,7 @@ func TestPeriodicDaemonClientsRejectExhaustedAndCorruptUsage(t *testing.T) {
 		{name: "row expiry", expiry: past},
 		{name: "canonical expiry", clientExpiry: past},
 		{name: "start on first use", expiry: -1000, allowed: true},
+		{name: "missed activation deadline", clientExpiry: -1000, activateBefore: past},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			setupConflictDB(t)
@@ -41,7 +42,7 @@ func TestPeriodicDaemonClientsRejectExhaustedAndCorruptUsage(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			client := model.Client{Email: "alice@example.test", Enable: true, TotalGB: tc.clientTotal, ExpiryTime: tc.clientExpiry}
+			client := model.Client{Email: "alice@example.test", Enable: true, TotalGB: tc.clientTotal, ExpiryTime: tc.clientExpiry, ActivateBefore: tc.activateBefore}
 			got, err := (&InboundService{}).FilterDaemonAccountingClients([]model.Client{client})
 			if err != nil || (len(got) == 1) != tc.allowed || got == nil {
 				t.Fatalf("got %v err=%v allowed=%v", got, err, tc.allowed)
