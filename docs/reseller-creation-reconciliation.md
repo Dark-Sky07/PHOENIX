@@ -1498,3 +1498,14 @@ covers one OpenVPN package, two UDP sessions and one ICMP path; it does not
 prove all traffic or child processes are drained, prove final counters were
 captured, or fence races between status, kill, reconnect and allowlist changes.
 This management sequence is not wired into production or quota release.
+
+The live experiment also records the `bytes_received` and `bytes_sent` variables
+from a test-only `client-disconnect` hook. After the last management status
+sample, Bob sends and receives more ICMP traffic; in the tested run the hook
+reports both counters greater than that sample after the management kill.
+This suggests a possible source of additional accounting evidence, not a
+production accounting implementation: the test file is not journaled, synced,
+authenticated or replayed, and hook execution is not guaranteed on process or
+host crash. The test does not prove that packets still in flight are included,
+that the event belongs to a durably identified client generation, or that quota
+may safely be released. No such hook is installed by PHOENIX.
