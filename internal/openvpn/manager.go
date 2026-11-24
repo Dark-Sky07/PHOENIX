@@ -188,34 +188,60 @@ func (m *Manager) ensureLocked(inst Instance) error {
 // daemons that are no longer wanted (and removes their data directory) and
 // (re)starts the rest. Called periodically by the openvpn job. Retained PID
 // files require manual reconciliation; they do not authorize orphan signalling.
+// stopManagedLocked keeps a failed process and its network rules visible for
+// subsequent retries. A stopped process is not proof of final accounting.
+func (m *Manager) stopManagedLocked(id int) bool {
+	cur, ok := m.procs[id]
+	if !ok {
+		return true
+	}
+	if err := cur.proc.Stop(); err != nil {
+		if m.lastError == "" {
+			m.lastError = fmt.Sprintf("inbound %d: stop failed: %v", id, err)
+		}
+		logger.Warningf("openvpn: inbound %d stop failed; retaining daemon and evidence: %v", id, err)
+		return false
+	}
+	GetNetworkManager().Remove(id)
+	delete(m.procs, id)
+	return true
+}
+
+// stopAllLocked preserves rules for any process whose stop was not confirmed.
+func (m *Manager) stopAllLocked() {
+	keep := make(map[int]struct{})
+	for id := range m.procs {
+		if !m.stopManagedLocked(id) {
+			keep[id] = struct{}{}
+		}
+	}
+	GetNetworkManager().RemoveExcept(keep)
+}
+
 func (m *Manager) Reconcile(desired []Instance) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.lastError = ""
 	if m.manualStop {
-		for id, cur := range m.procs {
-			_ = cur.proc.Stop()
-			GetNetworkManager().Remove(id)
-			delete(m.procs, id)
-		}
-		GetNetworkManager().RemoveAll()
+		m.stopAllLocked()
 		return
 	}
 	want := make(map[int]struct{}, len(desired))
 	for _, inst := range desired {
 		want[inst.Id] = struct{}{}
 	}
-	for id, cur := range m.procs {
+	for id := range m.procs {
 		if _, ok := want[id]; !ok {
-			_ = cur.proc.Stop()
-			GetNetworkManager().Remove(id)
-			delete(m.procs, id)
+			if !m.stopManagedLocked(id) {
+				// Do not remove the rules of a daemon that may still be live.
+				want[id] = struct{}{}
+				continue
+			}
 			logger.Infof("openvpn: stopped daemon for inbound %d (no longer desired)", id)
 		}
 	}
 	GetNetworkManager().RemoveExcept(want)
-	// A later successful inbound must not hide an earlier failure in this
-	// reconciliation pass. Clear stale errors only when a new pass begins.
-	m.lastError = ""
+	// A later success must not hide an earlier stop or start failure.
 	for _, inst := range desired {
 		if err := m.ensureLocked(inst); err != nil {
 			if m.lastError == "" {
@@ -242,12 +268,7 @@ func (m *Manager) StopManually() {
 	defer m.mu.Unlock()
 	m.manualStop = true
 	m.lastError = ""
-	for id, cur := range m.procs {
-		_ = cur.proc.Stop()
-		GetNetworkManager().Remove(id)
-		delete(m.procs, id)
-	}
-	GetNetworkManager().RemoveAll()
+	m.stopAllLocked()
 }
 
 // Resume clears a dashboard stop request. The next reconcile tick starts the
@@ -267,12 +288,7 @@ func (m *Manager) Restart() {
 	defer m.mu.Unlock()
 	m.manualStop = false
 	m.lastError = ""
-	for id, cur := range m.procs {
-		_ = cur.proc.Stop()
-		GetNetworkManager().Remove(id)
-		delete(m.procs, id)
-	}
-	GetNetworkManager().RemoveAll()
+	m.stopAllLocked()
 }
 
 // StopInbound stops the daemon and removes firewall rules for an inbound id
@@ -281,9 +297,8 @@ func (m *Manager) Restart() {
 func (m *Manager) StopInbound(id int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if cur, ok := m.procs[id]; ok {
-		_ = cur.proc.Stop()
-		delete(m.procs, id)
+	if !m.stopManagedLocked(id) {
+		return
 	}
 	GetNetworkManager().Remove(id)
 }
@@ -312,15 +327,14 @@ func (m *Manager) Status() RuntimeStatus {
 func (m *Manager) Remove(id int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if cur, ok := m.procs[id]; ok {
-		if err := cur.proc.Stop(); err != nil {
-			logger.Warningf("openvpn: inbound %d stop failed; retaining daemon and evidence: %v", id, err)
-			return
-		}
-		delete(m.procs, id)
+	if !m.stopManagedLocked(id) {
+		return
 	}
 	GetNetworkManager().Remove(id)
 	if err := removeDataDir(id); err != nil {
+		if m.lastError == "" {
+			m.lastError = fmt.Sprintf("inbound %d: retained data for manual review: %v", id, err)
+		}
 		logger.Warningf("openvpn: inbound %d retained data for manual review: %v", id, err)
 	}
 }
@@ -331,12 +345,7 @@ func (m *Manager) StopAll() {
 	defer m.mu.Unlock()
 	m.manualStop = false
 	m.lastError = ""
-	for id, cur := range m.procs {
-		_ = cur.proc.Stop()
-		GetNetworkManager().Remove(id)
-		delete(m.procs, id)
-	}
-	GetNetworkManager().RemoveAll()
+	m.stopAllLocked()
 }
 
 func removeDataDir(id int) error {

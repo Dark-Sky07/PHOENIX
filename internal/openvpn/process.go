@@ -209,6 +209,17 @@ func (p *Process) wait(cmd *exec.Cmd) {
 // Stop terminates the running daemon gracefully, falling back to a kill.
 func (p *Process) Stop() error {
 	if !p.IsRunning() {
+		// A previous stop may have observed process exit but failed to remove
+		// mismatched PID evidence. Do not turn that failure into success on a
+		// retry merely because the owned process is no longer running.
+		if p.intentionalStop.Load() && p.cmd != nil && p.cmd.Process != nil && p.done != nil {
+			select {
+			case <-p.done:
+				return p.removeOwnedPIDFile()
+			default:
+				return errors.New("openvpn: daemon termination not confirmed; PID evidence retained")
+			}
+		}
 		return nil
 	}
 	p.intentionalStop.Store(true)

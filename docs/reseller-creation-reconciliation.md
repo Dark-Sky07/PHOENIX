@@ -1423,5 +1423,7 @@ file. Recovery after a crash may therefore require operator intervention.
 These checks are process-local and do not fence other panels or privileged
 filesystem writers. A missing PID file does not prove there is no orphan;
 verified process-tree termination, final traffic accounting and a safe
-reconciliation override remain unimplemented. Other stop paths can still
-ignore process-stop failures. Do not remove evidence merely to bypass a block.
+reconciliation override remain unimplemented. Manager stop paths now retain
+managed state and firewall rules and report a stop failure, including repeated
+attempts after an owned PID cleanup fails. This does not prove a daemon or its
+children have drained. Do not remove evidence merely to bypass a block.
