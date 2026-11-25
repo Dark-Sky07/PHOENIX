@@ -1,6 +1,7 @@
 package job
 
 import (
+	"errors"
 	"os"
 	"testing"
 
@@ -41,7 +42,7 @@ func TestOpenvpnPollReceiptPostgres(t *testing.T) {
 		_ = db.Where("email = ?", row.Email).Delete(&row).Error
 	})
 	calls := 0
-	if err := commitOpenvpnPoll(j, func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
+	if _, err := commitOpenvpnPoll(j, func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
 		calls++
 		return nil, []*xray.ClientTraffic{{Email: row.Email, Up: 42, Down: 5}}, nil
 	}); err != nil {
@@ -52,5 +53,15 @@ func TestOpenvpnPollReceiptPostgres(t *testing.T) {
 	}
 	if err := db.First(&row, row.Id).Error; err != nil || row.Up != 42 || row.Down != 5 {
 		t.Fatalf("wrong usage: %+v %v", row, err)
+	}
+	partial := errors.New("one daemon failed")
+	pollErr, commitErr := commitOpenvpnPoll(j, func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
+		return nil, []*xray.ClientTraffic{{Email: row.Email, Up: 3, Down: 2}}, partial
+	})
+	if !errors.Is(pollErr, partial) || commitErr != nil {
+		t.Fatalf("partial poll not committed separately: poll=%v commit=%v", pollErr, commitErr)
+	}
+	if err := db.First(&row, row.Id).Error; err != nil || row.Up != 45 || row.Down != 7 {
+		t.Fatalf("wrong partial usage: %+v %v", row, err)
 	}
 }

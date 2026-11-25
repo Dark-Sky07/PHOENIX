@@ -1552,3 +1552,11 @@ command and silently replacing it with a later snapshot. An unsupported command
 that fails before a recognizable response can still fall back. Socket-level
 tests cover both paths and retention of the previous counter baseline; they do
 not prove a syntactically valid snapshot contains all session traffic.
+
+Partial OpenVPN polls may contain valid deltas from daemons whose baselines
+already advanced. The commit helper itself now journals and applies those
+observations before returning the separate poll error, rather than relying on
+its caller to hide that error from the journal. Regression tests cover normal
+commit and failed-commit retry without repolling, plus PostgreSQL in CI. This
+still does not create a durable incident for the daemon that failed: after a
+partial batch commits, its missing usage and quota safety remain unproven.

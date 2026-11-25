@@ -70,23 +70,31 @@ func newOpenvpnAccounting() *XrayTrafficJob {
 // advanced in-memory baselines, a failed write retries exactly that batch and
 // must not poll or reconcile again. An uncommitted crash marker is not proof
 // of a complete poll and continues to require manual reconciliation.
-func commitOpenvpnPoll(accounting *XrayTrafficJob, poll func() ([]*xray.Traffic, []*xray.ClientTraffic, error)) error {
+func commitOpenvpnPoll(accounting *XrayTrafficJob, poll func() ([]*xray.Traffic, []*xray.ClientTraffic, error)) (pollErr, commitErr error) {
 	if accounting.pending == nil {
 		if err := accounting.replayXrayJournal(); err != nil {
-			return fmt.Errorf("recover traffic journal: %w", err)
+			return nil, fmt.Errorf("recover traffic journal: %w", err)
 		}
 	}
-	if err := accounting.prepareXrayBatch(poll, accounting.inboundService.CaptureXrayTrafficIdentities); err != nil {
-		return fmt.Errorf("prepare OpenVPN traffic: %w", err)
+	// Even when a daemon poll fails, another daemon may have already
+	// advanced its baseline. Always journal those deltas first; expose the
+	// partial error separately so callers cannot mistake it for completeness.
+	partialPoll := func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
+		traffic, clients, err := poll()
+		pollErr = err
+		return traffic, clients, nil
+	}
+	if err := accounting.prepareXrayBatch(partialPoll, accounting.inboundService.CaptureXrayTrafficIdentities); err != nil {
+		return pollErr, fmt.Errorf("prepare OpenVPN traffic: %w", err)
 	}
 	restart, _, err := accounting.applyPending(accounting.applyJournaledXrayBatch)
 	if restart {
 		accounting.xrayService.SetToNeedRestart()
 	}
 	if err != nil {
-		return fmt.Errorf("commit OpenVPN traffic: %w", err)
+		return pollErr, fmt.Errorf("commit OpenVPN traffic: %w", err)
 	}
-	return nil
+	return pollErr, nil
 }
 
 func collectOpenvpnTraffic(mgr *openvpn.Manager) ([]*xray.Traffic, []*xray.ClientTraffic, error) {
@@ -112,14 +120,10 @@ func (j *OpenvpnJob) Run() {
 	defer accounting.runMu.Unlock()
 	mgr := openvpn.GetManager()
 	hadPending := accounting.pending != nil
-	var pollErr error
-	if err := commitOpenvpnPoll(accounting, func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
-		traffic, clients, err := collectOpenvpnTraffic(mgr)
-		pollErr = err
-		// Some other daemons may have advanced their baselines even when one
-		// failed. Commit those samples before reporting the partial failure.
-		return traffic, clients, nil
-	}); err != nil {
+	pollErr, err := commitOpenvpnPoll(accounting, func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
+		return collectOpenvpnTraffic(mgr)
+	})
+	if err != nil {
 		logger.Warning("openvpn job: traffic not committed; retaining pending evidence:", err)
 		return
 	}
