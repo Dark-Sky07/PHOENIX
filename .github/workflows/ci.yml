@@ -154,9 +154,11 @@ jobs:
           - version: "2.4.12"
             binary: "openvpn-2.4.12/src/openvpn/openvpn"
             cflags: "-DHAVE_EVP_PKEY_ID=1"
+            configure_args: ""
           - version: "2.6.12"
             binary: "openvpn-2.6.12/src/openvpn/openvpn"
             cflags: ""
+            configure_args: "--disable-dco"
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -174,7 +176,7 @@ jobs:
             curl -fsSL "https://github.com/OpenVPN/openvpn/archive/refs/tags/v${{ matrix.version }}.tar.gz" | tar xz
             cd "openvpn-${{ matrix.version }}"
             autoreconf -i
-            CFLAGS="${{ matrix.cflags }}" ./configure --prefix="/tmp/openvpn-${{ matrix.version }}"
+            CFLAGS="${{ matrix.cflags }}" ./configure --prefix="/tmp/openvpn-${{ matrix.version }}" ${{ matrix.configure_args }}
             make -j2
             ./${{ matrix.binary }} --version 2>&1 | sed -n '1,2p'
           ) 2>&1 | tee /tmp/openvpn-build.log
@@ -183,8 +185,9 @@ jobs:
           python3 - <<'PYLOG'
           from pathlib import Path
           text = Path('/tmp/openvpn-build.log').read_text(errors='replace')
-          lines = [line for line in text.splitlines() if any(k in line.lower() for k in ('error', 'cannot', 'failed', 'not found', 'configure:'))]
-          output = ('\n'.join(lines[-100:]) + '\n--- tail ---\n' + text[-4000:])
+          lines = text.splitlines()
+          flagged = [line for line in lines if any(k in line.lower() for k in ('error', 'cannot', 'failed', 'not found', 'no rule', '***', 'configure:'))]
+          output = ('\n'.join(flagged[-100:]) + '\n--- last lines ---\n' + '\n'.join(lines[-80:]))
           output = output.replace('%', '%25').replace(chr(13), '%0D').replace(chr(10), '%0A')
           print(f'::error title=openvpn-build-output::{output}')
           PYLOG
