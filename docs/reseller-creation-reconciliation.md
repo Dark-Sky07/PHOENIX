@@ -1634,3 +1634,16 @@ session's observed counters in full and reports unverified final usage for the
 old session. The reauthorization and fingerprint verifier are test-only; this
 single test does not establish complete old-session accounting, crash recovery,
 or production revocation.
+
+### OpenVPN short session between polls (live characterization)
+
+In CI's isolated Ubuntu OpenVPN server, a client connects, carries
+bidirectional ICMP and exits cleanly between two management status polls.
+A test-only disconnect hook observes positive received and sent counters, while
+both complete status snapshots are empty. Replaying those two genuine snapshots
+through the production manager emits no client or inbound usage and no
+unverified-session warning. This demonstrates a blind spot in this specific
+scenario, not proof that every short session is missed. The temporary hook is
+not deployed by PHOENIX and provides no durability, replay, identity fencing or
+crash guarantee. Polling alone cannot safely establish complete usage or quota
+release; a durable per-session evidence and recovery design remains necessary.
