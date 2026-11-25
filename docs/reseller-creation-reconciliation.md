@@ -1624,3 +1624,13 @@ IDs are scoped to a daemon generation and may eventually be reused; legacy
 formats without IDs, sessions unseen between polls, crash recovery and the old
 session's missing tail remain unresolved. This is not a final-accounting or
 quota-release guarantee.
+
+The isolated Ubuntu OpenVPN experiment also explicitly reauthorizes and
+reconnects Bob after the denied-reconnect check. It observes a different live
+client ID, sends enough ICMP for both new cumulative counters to exceed the
+old snapshot, and feeds both genuine status responses through the production
+manager over a test socket. In this scenario the manager counts the new
+session's observed counters in full and reports unverified final usage for the
+old session. The reauthorization and fingerprint verifier are test-only; this
+single test does not establish complete old-session accounting, crash recovery,
+or production revocation.
