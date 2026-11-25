@@ -216,6 +216,9 @@ sys.stdout.buffer.write(buf)
 	if _, ok := parsed["carol@example.test"]; !ok {
 		t.Fatalf("Carol missing from live parsed status: %v", parsed)
 	}
+	if parsed["bob@example.test"].ID == "" || parsed["carol@example.test"].ID == "" || parsed["bob@example.test"].ID == parsed["carol@example.test"].ID {
+		t.Fatalf("production parser did not retain distinct live client IDs: %v", parsed)
+	}
 	clientIDIndex, rxIndex, txIndex := -1, -1, -1
 	clientID := ""
 	var observedRx, observedTx uint64

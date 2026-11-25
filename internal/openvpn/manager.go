@@ -41,6 +41,7 @@ type managed struct {
 	// counters) is folded into the delta computation in CollectTraffic.
 	lastRx   map[string]int64
 	lastTx   map[string]int64
+	lastID   map[string]string
 	online   map[string]bool
 	haveLast bool
 
@@ -361,7 +362,7 @@ func (m *Manager) Status() RuntimeStatus {
 		if status.Error != "" {
 			status.Error += "\n"
 		}
-		status.Error += "OpenVPN daemon stopped, session disappeared or counters decreased; final usage is unverified"
+		status.Error += "OpenVPN daemon stopped or session changed, disappeared or counters decreased; final usage is unverified"
 	}
 	seen := make(map[string]struct{})
 	for _, cur := range m.procs {
@@ -514,7 +515,8 @@ func (m *Manager) CollectTrafficWithErrors() (inbounds []InboundTraffic, clients
 			for cn, previousRx := range man.lastRx {
 				current, ok := list[cn]
 				previousTx, txOK := man.lastTx[cn]
-				if !ok || !txOK || current.Rx < previousRx || current.Tx < previousTx {
+				previousID := man.lastID[cn]
+				if !ok || !txOK || current.Rx < previousRx || current.Tx < previousTx || current.ID != previousID {
 					unverified = true
 				}
 			}
@@ -527,6 +529,7 @@ func (m *Manager) CollectTrafficWithErrors() (inbounds []InboundTraffic, clients
 		up, down := int64(0), int64(0)
 		newOnline := make(map[string]bool, len(list))
 		newRx, newTx := make(map[string]int64, len(list)), make(map[string]int64, len(list))
+		newID := make(map[string]string, len(list))
 		var stagedClients []ClientTrafficDelta
 		overflow := false
 		for cn, c := range list {
@@ -534,6 +537,11 @@ func (m *Manager) CollectTrafficWithErrors() (inbounds []InboundTraffic, clients
 			var baseRx, baseTx int64
 			if man.haveLast {
 				baseRx, baseTx = man.lastRx[cn], man.lastTx[cn]
+				// A different known CID is a different client instance. Its
+				// counters must not be subtracted from the old session's.
+				if previousID := man.lastID[cn]; previousID != "" && c.ID != "" && previousID != c.ID {
+					baseRx, baseTx = 0, 0
+				}
 			}
 			// A lower reading is treated as a reset, as before.
 			dRx, dTx := c.Rx, c.Tx
@@ -554,7 +562,7 @@ func (m *Manager) CollectTrafficWithErrors() (inbounds []InboundTraffic, clients
 					InboundId: p.id, Email: cn, Up: dRx, Down: dTx,
 				})
 			}
-			newRx[cn], newTx[cn] = c.Rx, c.Tx
+			newRx[cn], newTx[cn], newID[cn] = c.Rx, c.Tx, c.ID
 		}
 		if overflow {
 			pollErr = errors.Join(pollErr, fmt.Errorf("inbound %d: management traffic delta sum exceeds supported range", p.id))
@@ -566,7 +574,7 @@ func (m *Manager) CollectTrafficWithErrors() (inbounds []InboundTraffic, clients
 		clients = append(clients, stagedClients...)
 		delete(m.trafficPollFailures, p.id)
 		m.unverifiedSessionTraffic = m.unverifiedSessionTraffic || unverified
-		man.lastRx, man.lastTx = newRx, newTx
+		man.lastRx, man.lastTx, man.lastID = newRx, newTx, newID
 		man.online = newOnline
 		man.haveLast = true
 		if up > 0 || down > 0 {

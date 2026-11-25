@@ -28,6 +28,10 @@ func TestManagementStatusFormatsAndUnsafeRows(t *testing.T) {
 		{"error after client row", tabHeader + tabClient + "ERROR: interrupted\n", 0, true},
 		{"error after legacy version", "<CLIENT_LIST VERSION 1\nERROR: interrupted\n", 0, true},
 		{"duplicate header column", "HEADER\tCLIENT_LIST\tCommon Name\tBytes Received\tBytes Sent\tBytes Sent\nEND\n", 0, true},
+		{"duplicate client id header", "HEADER\tCLIENT_LIST\tCommon Name\tBytes Received\tBytes Sent\tClient ID\tClient ID\nEND\n", 0, true},
+		{"invalid client id", tabHeader + strings.Replace(tabClient, "\tUNDEF\t1\t1\t", "\tUNDEF\tbad\t1\t", 1) + "END\n", 0, true},
+		{"missing client id", tabHeader + "CLIENT_LIST\talice@example.test\t203.0.113.1\t10.8.0.2\t\t1234\t5678\nEND\n", 0, true},
+		{"duplicate client id", tabHeader + tabClient + strings.Replace(tabClient, "alice@example.test", "bob@example.test", 1) + "END\n", 0, true},
 		{"duplicate client header", tabHeader + tabClient + tabHeader + "END\n", 0, true},
 		{"conflicting client header", tabHeader + "HEADER\tCLIENT_LIST\tCommon Name\tBytes Sent\tBytes Received\nEND\n", 0, true},
 		{"mixed structured and space rows", tabHeader + "CLIENT_LIST alice@example.test 203.0.113.1 10.8.0.2 1234 5678 179\nEND\n", 0, true},
@@ -62,7 +66,7 @@ func TestManagementStatusFormatsAndUnsafeRows(t *testing.T) {
 			if err != nil || len(got) != tc.count {
 				t.Fatalf("unexpected response: %v %v", got, err)
 			}
-			if tc.count == 1 && got["alice@example.test"] != (clientCounters{Rx: 1234, Tx: 5678}) {
+			if c := got["alice@example.test"]; tc.count == 1 && (c.Rx != 1234 || c.Tx != 5678) {
 				t.Fatalf("bad counters: %v", got)
 			}
 		})
@@ -291,7 +295,7 @@ func TestManagementUnsupportedCommandFallsBackBeforeSnapshot(t *testing.T) {
 		}
 	}()
 	got, err := clientList(ln.Addr().(*net.TCPAddr).Port)
-	if err != nil || got["alice@example.test"] != (clientCounters{Rx: 1234, Tx: 5678}) {
+	if c := got["alice@example.test"]; err != nil || c.Rx != 1234 || c.Tx != 5678 || c.ID != "1" {
 		t.Fatalf("legitimate fallback failed: %v %v", got, err)
 	}
 	<-serverDone
@@ -385,5 +389,56 @@ func TestUnverifiedOpenVPNSessionUsageRemainsVisible(t *testing.T) {
 				t.Fatalf("later success hid unverified usage: %q", status)
 			}
 		})
+	}
+}
+
+func TestSessionIDChangeCountsNewSessionWithoutSubtractingOld(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	var mu sync.Mutex
+	row := func(rx, tx int, id string) string {
+		return fmt.Sprintf("CLIENT_LIST\talice@example.test\t203.0.113.1:1\t10.8.0.2\t\t%d\t%d\tnow\t179\tUNDEF\t%s\t1\tAES-256-GCM\n", rx, tx, id)
+	}
+	response := tabHeader + row(100, 200, "1") + "END\n"
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = bufio.NewReader(conn).ReadString('\n')
+			mu.Lock()
+			snapshot := response
+			mu.Unlock()
+			_, _ = fmt.Fprint(conn, snapshot)
+			conn.Close()
+		}
+	}()
+	defer func() { _ = ln.Close(); <-done }()
+	m := &Manager{procs: map[int]*managed{1: {tag: "vpn", mgmtPort: ln.Addr().(*net.TCPAddr).Port}}}
+	if _, _, err := m.CollectTrafficWithErrors(); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	response = tabHeader + row(300, 400, "2") + "END\n"
+	mu.Unlock()
+	in, clients, err := m.CollectTrafficWithErrors()
+	if err != nil || len(in) != 1 || in[0].Up != 300 || in[0].Down != 400 || len(clients) != 1 || clients[0].Up != 300 || clients[0].Down != 400 {
+		t.Fatalf("new session lost traffic: inbound=%v clients=%v err=%v", in, clients, err)
+	}
+	if !strings.Contains(m.Status().Error, "final usage is unverified") {
+		t.Fatal("unobserved old session tail not warned")
+	}
+	mu.Lock()
+	response = tabHeader + row(310, 420, "2") + "END\n"
+	mu.Unlock()
+	in, clients, err = m.CollectTrafficWithErrors()
+	if err != nil || len(in) != 1 || in[0].Up != 10 || in[0].Down != 20 || len(clients) != 1 {
+		t.Fatalf("stable session did not use baseline: inbound=%v clients=%v err=%v", in, clients, err)
 	}
 }

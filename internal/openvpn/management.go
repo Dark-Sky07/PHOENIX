@@ -19,6 +19,9 @@ import (
 type clientCounters struct {
 	Rx int64
 	Tx int64
+	// ID is the server's numeric Client ID when present in the status
+	// layout. It identifies a session only within this daemon generation.
+	ID string
 }
 
 // clientListLayout describes the columns in a CSV CLIENT_LIST response. The
@@ -31,6 +34,7 @@ type clientListLayout struct {
 	name int
 	rx   int
 	tx   int
+	id   int
 }
 
 func normalizedColumn(value string) string {
@@ -64,7 +68,7 @@ func clientListLayoutFromHeader(fields []string) (clientListLayout, bool) {
 		base = 1
 	}
 
-	layout := clientListLayout{name: -1, rx: -1, tx: -1}
+	layout := clientListLayout{name: -1, rx: -1, tx: -1, id: -1}
 	for i := base; i < len(fields); i++ {
 		switch normalizedColumn(fields[i]) {
 		case "common name", "common_name", "cn":
@@ -82,6 +86,11 @@ func clientListLayoutFromHeader(fields []string) (clientListLayout, bool) {
 				return clientListLayout{}, false
 			}
 			layout.tx = i - base
+		case "client id":
+			if layout.id >= 0 {
+				return clientListLayout{}, false
+			}
+			layout.id = i - base
 		}
 	}
 	if layout.name < 0 || layout.rx < 0 || layout.tx < 0 {
@@ -142,7 +151,19 @@ func parseCSVClientRow(fields []string, layout *clientListLayout) (string, clien
 			rx, errRx := parseManagementCounter(fields[rxIndex])
 			tx, errTx := parseManagementCounter(fields[txIndex])
 			if cn != "" && errRx == nil && errTx == nil && rx >= 0 && tx >= 0 {
-				return cn, clientCounters{Rx: rx, Tx: tx}, true
+				counters := clientCounters{Rx: rx, Tx: tx}
+				if layout.id >= 0 {
+					idIndex := base + layout.id
+					if idIndex >= len(fields) {
+						return "", clientCounters{}, false
+					}
+					id, err := strconv.ParseUint(strings.TrimSpace(fields[idIndex]), 10, 64)
+					if err != nil {
+						return "", clientCounters{}, false
+					}
+					counters.ID = strconv.FormatUint(id, 10)
+				}
+				return cn, counters, true
 			}
 		}
 		return "", clientCounters{}, false
@@ -215,6 +236,7 @@ func parseClientListResponse(reader io.Reader) (map[string]clientCounters, error
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	out := make(map[string]clientCounters)
 	seen := make(map[string]bool)
+	seenIDs := make(map[string]bool)
 	var layout *clientListLayout
 	terminated, recognized, legacyRows, clientEvidence := false, false, false, false
 	add := func(cn string, counters clientCounters) error {
@@ -222,7 +244,13 @@ func parseClientListResponse(reader io.Reader) (map[string]clientCounters, error
 		if key == "" || seen[key] {
 			return fmt.Errorf("%w: blank or duplicate client identity", errUnsafeManagementResponse)
 		}
+		if counters.ID != "" && seenIDs[counters.ID] {
+			return fmt.Errorf("%w: duplicate client ID", errUnsafeManagementResponse)
+		}
 		seen[key] = true
+		if counters.ID != "" {
+			seenIDs[counters.ID] = true
+		}
 		out[cn] = counters
 		return nil
 	}

@@ -1611,3 +1611,16 @@ the in-process warning will disappear on restart even when the uncertainty
 remains. There is currently no automatic final-counter reconstruction or safe
 one-click resolution for this OpenVPN case. Review and reconcile the interval
 using independent evidence before making quota-sensitive changes.
+
+For management status formats with a numeric `Client ID` column, OpenVPN
+accounting now tracks that ID alongside each client's last counters. If the
+same client name reappears under a different known ID, the current session's
+counters are counted from zero rather than subtracted from the old session;
+the unverified-final-usage warning remains because the old session may have
+transferred more between polls. Invalid or duplicate IDs fail the poll closed.
+A change between known and unavailable IDs also raises the warning, but keeps
+the previous counter arithmetic because session identity cannot be inferred.
+IDs are scoped to a daemon generation and may eventually be reused; legacy
+formats without IDs, sessions unseen between polls, crash recovery and the old
+session's missing tail remain unresolved. This is not a final-accounting or
+quota-release guarantee.
