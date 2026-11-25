@@ -1,11 +1,13 @@
 package openvpn
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -99,14 +101,16 @@ func TestRealOpenVPNExperimentalFingerprintAdmission(t *testing.T) {
 	if err != nil || closeErr != nil {
 		t.Fatalf("write verifier config: %v %v", err, closeErr)
 	}
-	start := func(ns, config string) {
+	start := func(ns, config string) *exec.Cmd {
 		t.Helper()
 		cmd := exec.Command("ip", "netns", "exec", ns, binary, "--config", config)
 		if err := cmd.Start(); err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+		return cmd
 	}
+	clientProcesses := make(map[string]*exec.Cmd)
 	waitLog := func(path string, predicate func(string) bool) {
 		t.Helper()
 		deadline := time.Now().Add(25 * time.Second)
@@ -128,7 +132,7 @@ func TestRealOpenVPNExperimentalFingerprintAdmission(t *testing.T) {
 		if err := os.WriteFile(conf, []byte(text+"\ndisable-dco\nlog "+quoteConfigPath(log)+"\n"), 0600); err != nil {
 			t.Fatal(err)
 		}
-		start(ns, conf)
+		clientProcesses[name] = start(ns, conf)
 		return log
 	}
 	start(serverNS, confPathForID(inst.Id))
@@ -204,6 +208,7 @@ sys.stdout.buffer.write(buf)
 		return strings.ReplaceAll(string(out), "\r\n", "\n")
 	}
 	status := management("status 3")
+	beforeReconnect := status
 	// Exercise the production parser against the actual daemon response, not
 	// only synthetic status fixtures. Both distinct sessions must be present.
 	parsed, err := parseClientListResponse(strings.NewReader(status))
@@ -379,6 +384,70 @@ sys.stdout.buffer.write(buf)
 		t.Fatalf("production parser rejected live post-kill status: %v %v\n%s", parsed, err, status)
 	}
 	pingThroughCarol()
+
+	// Explicitly reauthorize Bob after the rejection experiment. Stop all old
+	// Bob processes first so only this fresh client can obtain the new CID.
+	for _, name := range []string{"bob", "bob-without-allowlist", "bob-after-kill"} {
+		cmd := clientProcesses[name]
+		if cmd == nil {
+			t.Fatalf("missing client process %s", name)
+		}
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}
+	if err := os.WriteFile(allowlist, []byte(strings.Join(fingerprints, "\n")+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	reauthorizedLog := client(clientNS, "bob-reauthorized", bob)
+	waitLog(reauthorizedLog, func(s string) bool { return strings.Contains(s, "Initialization Sequence Completed") })
+	afterReconnect := management("status 3")
+	later, err := parseClientListResponse(strings.NewReader(afterReconnect))
+	if err != nil || len(later) != 2 || later["bob@example.test"].ID == "" || later["bob@example.test"].ID == clientID {
+		t.Fatalf("new live Bob session not identified: %v %v\n%s", later, err, afterReconnect)
+	}
+	if later["bob@example.test"].Rx == 0 || later["bob@example.test"].Tx == 0 {
+		t.Fatalf("new session has no bidirectional counters: %v", later)
+	}
+
+	// Replay the two genuine status responses through the production manager
+	// using a local test socket, and verify it counts the new session in full.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for _, response := range []string{beforeReconnect, afterReconnect} {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = bufio.NewReader(conn).ReadString('\n')
+			_, _ = fmt.Fprint(conn, response)
+			_ = conn.Close()
+		}
+	}()
+	defer func() { _ = ln.Close(); <-done }()
+	manager := &Manager{procs: map[int]*managed{inst.Id: {tag: "test-openvpn", mgmtPort: ln.Addr().(*net.TCPAddr).Port}}}
+	if _, _, err := manager.CollectTrafficWithErrors(); err != nil {
+		t.Fatal(err)
+	}
+	_, deltas, err := manager.CollectTrafficWithErrors()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bobDelta *ClientTrafficDelta
+	for i := range deltas {
+		if deltas[i].Email == "bob@example.test" {
+			bobDelta = &deltas[i]
+		}
+	}
+	bobCounters := later["bob@example.test"]
+	if bobDelta == nil || bobDelta.Up != bobCounters.Rx || bobDelta.Down != bobCounters.Tx || !strings.Contains(manager.Status().Error, "final usage is unverified") {
+		t.Fatalf("reconnected session not counted in full or warning missing: delta=%v counters=%+v status=%+v", bobDelta, bobCounters, manager.Status())
+	}
 }
 
 // A failed process, a timeout, or an invalid invocation is not evidence that
