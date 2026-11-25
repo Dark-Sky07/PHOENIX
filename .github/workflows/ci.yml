@@ -150,7 +150,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: ["2.4.12", "2.6.12"]
+        include:
+          - version: "2.4.12"
+            binary: "openvpn-2.4.12/src/openvpn/openvpn"
+            cflags: "-DHAVE_EVP_PKEY_ID=1"
+          - version: "2.6.12"
+            binary: "openvpn-2.6.12/src/openvpn/openvpn"
+            cflags: ""
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -168,10 +174,9 @@ jobs:
             curl -fsSL "https://github.com/OpenVPN/openvpn/archive/refs/tags/v${{ matrix.version }}.tar.gz" | tar xz
             cd "openvpn-${{ matrix.version }}"
             autoreconf -i
-            ./configure --prefix="/tmp/openvpn-${{ matrix.version }}" --disable-dco
+            CFLAGS="${{ matrix.cflags }}" ./configure --prefix="/tmp/openvpn-${{ matrix.version }}"
             make -j2
-            make install
-            /tmp/openvpn-${{ matrix.version }}/sbin/openvpn --version | head -2
+            ./${{ matrix.binary }} --version | head -2
           ) 2>&1 | tee /tmp/openvpn-build.log
           status=${PIPESTATUS[0]}
           if [ "$status" -eq 0 ]; then exit 0; fi
@@ -194,7 +199,7 @@ jobs:
         run: |
           set -o pipefail
           go test -c -o /tmp/phoenix-openvpn-live.test ./internal/openvpn
-          if sudo env PATH="$PATH" PHOENIX_TEST_OPENVPN_LIVE_BINARY="/tmp/openvpn-${{ matrix.version }}/sbin/openvpn" /tmp/phoenix-openvpn-live.test -test.run '^TestRealOpenVPN(ProductionSessionEvidence|ProductionRevocationTerminatesSession)$' -test.v 2>&1 | tee /tmp/openvpn-version-live.log; then exit 0; fi
+          if sudo env PATH="$PATH" PHOENIX_TEST_OPENVPN_LIVE_BINARY="$PWD/${{ matrix.binary }}" /tmp/phoenix-openvpn-live.test -test.run '^TestRealOpenVPN(ProductionSessionEvidence|ProductionRevocationTerminatesSession)$' -test.v 2>&1 | tee /tmp/openvpn-version-live.log; then exit 0; fi
           python3 - <<'PYLOG'
           from pathlib import Path
           output = Path('/tmp/openvpn-version-live.log').read_text(errors='replace')[-14000:]
