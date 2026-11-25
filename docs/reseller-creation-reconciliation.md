@@ -1647,3 +1647,9 @@ scenario, not proof that every short session is missed. The temporary hook is
 not deployed by PHOENIX and provides no durability, replay, identity fencing or
 crash guarantee. Polling alone cannot safely establish complete usage or quota
 release; a durable per-session evidence and recovery design remains necessary.
+
+The dashboard's persistent OpenVPN advisory explicitly states that short
+sessions can be missed without an alert and that a running status or absence of
+warnings is not evidence of complete usage. This message is shown regardless of
+the process-local warning flag, including after a panel restart. It is an
+operator advisory, not a database fence or a way to recover missing traffic.

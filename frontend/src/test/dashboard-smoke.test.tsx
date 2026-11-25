@@ -210,7 +210,10 @@ describe('smoke: redesigned pages', () => {
     const { container } = wrap(<IndexPage />);
     expect(container.querySelector('.dash-hero')).toBeTruthy();
     expect(container.querySelector('.reseller-traffic-warning')).toBeTruthy();
-    expect(container.querySelector('.openvpn-credential-warning')).toBeTruthy();
+    const openvpnWarning = container.querySelector('.openvpn-credential-warning');
+    expect(openvpnWarning).toBeTruthy();
+    expect(openvpnWarning?.textContent).toContain('between traffic polls can be missed without any warning');
+    expect(openvpnWarning?.textContent).toContain('absence of alerts does not prove usage is complete');
     expect(container.querySelectorAll('.resource-tile').length).toBe(4);
     expect(container.querySelectorAll('.service-row').length).toBeGreaterThanOrEqual(3);
     expect(screen.getAllByText('Xray').length).toBeGreaterThan(0);
