@@ -143,3 +143,26 @@ func TestDeadStartedDaemonMarksFinalTrafficUnverified(t *testing.T) {
 		t.Fatalf("daemon exit was not visible: %q", status)
 	}
 }
+
+func TestRunningDaemonStopMarksFinalTrafficUnverified(t *testing.T) {
+	original := GetNetworkManager()
+	networkMgr = newTestNetworkManager(newFakeFirewall())
+	t.Cleanup(func() { networkMgr = original })
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	proc := &Process{cmd: cmd, done: make(chan struct{}), configPath: filepath.Join(t.TempDir(), "server.conf"), logWriter: &procLogWriter{}}
+	go proc.wait(cmd)
+	t.Cleanup(func() { _ = cmd.Process.Kill(); <-proc.done })
+	m := &Manager{procs: map[int]*managed{1: {proc: proc, mgmtPort: 12345}}}
+	m.mu.Lock()
+	err := m.stopManagedLocked(1)
+	m.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status := m.Status().Error; !strings.Contains(status, "final usage is unverified") {
+		t.Fatalf("successful running daemon stop hid uncertainty: %q", status)
+	}
+}
