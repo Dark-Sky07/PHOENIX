@@ -1523,3 +1523,10 @@ is discarded rather than applied to the replacement, and the scheduler commits
 any other observed deltas before deferring that run's reconciliation. This is a
 race detector, not recovery of the discarded sample: it does not establish the
 missing usage, final counters or complete session termination.
+
+The management parser treats a bare or tab-only `CLIENT_LIST` marker and a
+truncated unprefixed legacy client row as unsafe responses, not as an empty
+client list. The socket-level regression test verifies that those errors do not
+trigger fallback to a different snapshot or erase the previous counter baseline.
+This is syntactic fail-closed handling, not proof that a syntactically valid
+snapshot includes all traffic.

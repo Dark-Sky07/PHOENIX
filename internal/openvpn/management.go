@@ -268,6 +268,11 @@ func parseClientListResponse(reader io.Reader) (map[string]clientCounters, error
 			legacyRows = false
 			continue
 		}
+		// A truncated marker is not an empty client list. TrimSpace above
+		// also turns "CLIENT_LIST\t" into this exact form.
+		if line == "CLIENT_LIST" || line == "<CLIENT_LIST" {
+			return nil, fmt.Errorf("%w: incomplete client row marker", errUnsafeManagementResponse)
+		}
 
 		// status 3 is tab-delimited (not CSV); splitting on whitespace loses
 		// empty IPv6 fields and splits column names and timestamps into tokens.
@@ -328,6 +333,13 @@ func parseClientListResponse(reader io.Reader) (map[string]clientCounters, error
 			if err := add(cn, counters); err != nil {
 				return nil, err
 			}
+			continue
+		}
+		// While inside a traditional unprefixed client table, an unknown
+		// line with no delimiters may be a truncated client record. It must
+		// not be silently discarded as if the client had disconnected.
+		if legacyRows {
+			return nil, fmt.Errorf("%w: invalid legacy client row", errUnsafeManagementResponse)
 		}
 	}
 	if err := scanner.Err(); err != nil {
