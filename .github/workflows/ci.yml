@@ -145,6 +145,50 @@ jobs:
           PYLOG
           exit 1
 
+  openvpn-version-matrix:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ["2.4.12", "2.6.12"]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build OpenVPN ${{ matrix.version }} with the userspace data channel
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y autoconf automake libtool pkg-config libssl-dev liblzo2-dev liblz4-dev iproute2 iputils-ping
+          curl -fsSL "https://github.com/OpenVPN/openvpn/archive/refs/tags/v${{ matrix.version }}.tar.gz" | tar xz
+          cd "openvpn-${{ matrix.version }}"
+          ./autogen.sh
+          ./configure --prefix="/tmp/openvpn-${{ matrix.version }}" --disable-dco
+          make -j2
+          make install
+          /tmp/openvpn-${{ matrix.version }}/sbin/openvpn --version | head -2
+      - name: Prepare isolated tunnel test environment
+        run: |
+          sudo modprobe tun || true
+          sudo mkdir -p /dev/net
+          test -c /dev/net/tun || sudo mknod /dev/net/tun c 10 200
+      - name: Exercise production evidence and revocation on OpenVPN ${{ matrix.version }}
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -c -o /tmp/phoenix-openvpn-live.test ./internal/openvpn
+          if sudo env PATH="$PATH" PHOENIX_TEST_OPENVPN_LIVE_BINARY="/tmp/openvpn-${{ matrix.version }}/sbin/openvpn" /tmp/phoenix-openvpn-live.test -test.run '^TestRealOpenVPN(ProductionSessionEvidence|ProductionRevocationTerminatesSession)$' -test.v 2>&1 | tee /tmp/openvpn-version-live.log; then exit 0; fi
+          python3 - <<'PYLOG'
+          from pathlib import Path
+          output = Path('/tmp/openvpn-version-live.log').read_text(errors='replace')[-14000:]
+          output = output.replace('%', '%25').replace(chr(13), '%0D').replace(chr(10), '%0A')
+          print(f'::error title=openvpn-version-live-output::{output}')
+          PYLOG
+          exit 1
+
   xray-quiescence-characterization:
     runs-on: ubuntu-latest
     steps:
