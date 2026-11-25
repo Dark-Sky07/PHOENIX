@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
+	"github.com/Dark-Sky07/phoenix/internal/openvpn"
 	"github.com/Dark-Sky07/phoenix/internal/web/service"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
 )
@@ -24,6 +26,7 @@ func TestOpenvpnPollRetainsExactBatchAndMarkerOnFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	j := newOpenvpnAccounting()
+	mgr := &openvpn.Manager{}
 	t.Cleanup(func() {
 		if j.captureUnlock != nil {
 			j.captureUnlock()
@@ -39,8 +42,16 @@ func TestOpenvpnPollRetainsExactBatchAndMarkerOnFailure(t *testing.T) {
 		}
 		return nil, []*xray.ClientTraffic{{Email: row.Email, InboundId: 4, Up: 123, Down: 56}}, nil
 	}
-	if _, err := commitOpenvpnPoll(j, poll); err == nil || j.pending == nil || j.captureUnlock == nil {
+	if _, err := commitOpenvpnPollAndReport(j, mgr, poll); err == nil || j.pending == nil || j.captureUnlock == nil {
 		t.Fatalf("failed batch not retained: %v", err)
+	}
+	status := mgr.Status().Error
+	if !strings.Contains(status, "traffic accounting unavailable") || strings.Contains(status, row.Email) || strings.Contains(status, "injected") {
+		t.Fatalf("missing or unsafe accounting warning: %q", status)
+	}
+	mgr.Resume()
+	if !strings.Contains(mgr.Status().Error, "traffic accounting unavailable") {
+		t.Fatal("resume cleared pending accounting warning")
 	}
 	id := j.pending.id
 	path := filepath.Join(xrayJournalDir(), id+".manual")
@@ -56,8 +67,11 @@ func TestOpenvpnPollRetainsExactBatchAndMarkerOnFailure(t *testing.T) {
 	if err := db.Exec("DROP TRIGGER reject_openvpn").Error; err != nil {
 		t.Fatal(err)
 	}
-	if _, err := commitOpenvpnPoll(j, poll); err != nil || calls != 1 || j.pending != nil || j.captureUnlock != nil {
+	if _, err := commitOpenvpnPollAndReport(j, mgr, poll); err != nil || calls != 1 || j.pending != nil || j.captureUnlock != nil {
 		t.Fatalf("retry failed or repolled: calls=%d err=%v", calls, err)
+	}
+	if status := mgr.Status().Error; status != "" {
+		t.Fatalf("successful commit did not clear operational warning: %q", status)
 	}
 	if err := db.First(&row, row.Id).Error; err != nil || row.Up != 123 || row.Down != 56 {
 		t.Fatalf("wrong committed traffic: %+v %v", row, err)
@@ -80,13 +94,17 @@ func TestOpenvpnPollRefusesForeignMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 	j := newOpenvpnAccounting()
+	mgr := &openvpn.Manager{}
 	calls := 0
-	_, err := commitOpenvpnPoll(j, func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
+	_, err := commitOpenvpnPollAndReport(j, mgr, func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
 		calls++
 		return nil, nil, errors.New("unexpected poll")
 	})
 	if err == nil || calls != 0 {
 		t.Fatalf("foreign marker allowed poll: calls=%d err=%v", calls, err)
+	}
+	if status := mgr.Status().Error; !strings.Contains(status, "traffic accounting unavailable") || strings.Contains(status, "foreign-test-marker") {
+		t.Fatalf("foreign marker warning missing or leaked: %q", status)
 	}
 	if err := service.VerifyXrayPollMarker("foreign-test-marker"); err != nil {
 		t.Fatalf("foreign evidence removed: %v", err)

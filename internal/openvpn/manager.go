@@ -69,6 +69,7 @@ type Manager struct {
 	// for the same inbound. This is an operational warning, not a durable
 	// accounting incident or proof that unobserved traffic was recovered.
 	trafficPollFailures map[int]struct{}
+	accountingFailed    bool
 }
 
 // RuntimeStatus is the small, secret-free snapshot exposed by the dashboard.
@@ -321,6 +322,17 @@ func (m *Manager) StopInbound(id int) error {
 	return nil
 }
 
+// SetAccountingResult updates a process-local operational warning. The
+// underlying error can contain sensitive database or filesystem details and is
+// logged by the caller, never included in dashboard status. A nil result only
+// means the latest accounting operation succeeded; it does not prove complete
+// accounting for any earlier interval.
+func (m *Manager) SetAccountingResult(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.accountingFailed = err != nil
+}
+
 // Status returns a secret-free snapshot for the dashboard.
 func (m *Manager) Status() RuntimeStatus {
 	m.mu.Lock()
@@ -332,6 +344,12 @@ func (m *Manager) Status() RuntimeStatus {
 			status.Error += "\n"
 		}
 		status.Error += warning
+	}
+	if m.accountingFailed {
+		if status.Error != "" {
+			status.Error += "\n"
+		}
+		status.Error += "OpenVPN traffic accounting unavailable; pending data or recovery may require review"
 	}
 	seen := make(map[string]struct{})
 	for _, cur := range m.procs {

@@ -97,6 +97,14 @@ func commitOpenvpnPoll(accounting *XrayTrafficJob, poll func() ([]*xray.Traffic,
 	return pollErr, nil
 }
 
+// Reflect accounting failures independently of daemon poll errors. The
+// dashboard receives only a generic warning; detailed errors remain in logs.
+func commitOpenvpnPollAndReport(accounting *XrayTrafficJob, mgr *openvpn.Manager, poll func() ([]*xray.Traffic, []*xray.ClientTraffic, error)) (error, error) {
+	pollErr, commitErr := commitOpenvpnPoll(accounting, poll)
+	mgr.SetAccountingResult(commitErr)
+	return pollErr, commitErr
+}
+
 func collectOpenvpnTraffic(mgr *openvpn.Manager) ([]*xray.Traffic, []*xray.ClientTraffic, error) {
 	inboundDeltas, clientDeltas, err := mgr.CollectTrafficWithErrors()
 	traffics := make([]*xray.Traffic, 0, len(inboundDeltas))
@@ -120,7 +128,7 @@ func (j *OpenvpnJob) Run() {
 	defer accounting.runMu.Unlock()
 	mgr := openvpn.GetManager()
 	hadPending := accounting.pending != nil
-	pollErr, err := commitOpenvpnPoll(accounting, func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
+	pollErr, err := commitOpenvpnPollAndReport(accounting, mgr, func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
 		return collectOpenvpnTraffic(mgr)
 	})
 	if err != nil {

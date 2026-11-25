@@ -1569,3 +1569,11 @@ contains only a count, not client identities or raw socket output. This is
 operational visibility, not durable incident evidence: restart loses the flag,
 a later successful sample does not prove missing usage was recovered, and the
 warning does not fence quota mutations or detect every possible missed poll.
+
+The OpenVPN service status also exposes a separate process-local warning when
+journal recovery, identity capture, journal persistence or database application
+fails. It contains no raw error, marker or client identity. A later successful
+accounting operation clears this operational warning; tests exercise a failed
+write, exact-batch retry and a foreign marker without a poll. The warning is not
+itself a durable incident and clearing it does not prove the accounting history
+complete. Existing marker and journal rules continue to govern recovery.
