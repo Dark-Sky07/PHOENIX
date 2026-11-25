@@ -1530,3 +1530,11 @@ client list. The socket-level regression test verifies that those errors do not
 trigger fallback to a different snapshot or erase the previous counter baseline.
 This is syntactic fail-closed handling, not proof that a syntactically valid
 snapshot includes all traffic.
+
+When adding a daemon's individual OpenVPN traffic deltas would overflow the
+supported signed 64-bit inbound total, the poll now rejects that daemon's
+entire snapshot without advancing any of its baselines or emitting a partial
+set of client deltas. Other successfully observed daemons' deltas remain
+available for the journal, and the poll reports an error so reconciliation is
+deferred. This prevents silent saturation, but it neither recovers values beyond
+the supported range nor proves missing or reset session counters complete.

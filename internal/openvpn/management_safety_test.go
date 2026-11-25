@@ -196,3 +196,57 @@ func TestManagementPollReportsDaemonReplacement(t *testing.T) {
 		t.Fatalf("sample mutated old or replacement baseline: old=%v new=%v", old.lastRx, replacement.lastRx)
 	}
 }
+
+func TestManagementAggregateOverflowPreservesWholeDaemonBaseline(t *testing.T) {
+	for _, direction := range []string{"received", "sent"} {
+		t.Run(direction, func(t *testing.T) {
+			bad := &fakeMgmtServer{clients: map[string]clientCounters{
+				"alice@example.test": {Rx: 10, Tx: 10},
+				"bob@example.test":   {Rx: 0, Tx: 0},
+			}}
+			bad.start(t)
+			defer bad.close()
+			good := &fakeMgmtServer{clients: map[string]clientCounters{"good@example.test": {Rx: 3, Tx: 4}}}
+			good.start(t)
+			defer good.close()
+			man := &managed{tag: "overflow", mgmtPort: bad.port, haveLast: true,
+				lastRx: map[string]int64{"alice@example.test": 10, "bob@example.test": 0},
+				lastTx: map[string]int64{"alice@example.test": 10, "bob@example.test": 0}}
+			m := &Manager{procs: map[int]*managed{1: man, 2: {tag: "good", mgmtPort: good.port}}}
+			if direction == "received" {
+				bad.setClient("alice@example.test", clientCounters{Rx: maxManagementCounter, Tx: 10})
+				bad.setClient("bob@example.test", clientCounters{Rx: 11, Tx: 0})
+			} else {
+				bad.setClient("alice@example.test", clientCounters{Rx: 10, Tx: maxManagementCounter})
+				bad.setClient("bob@example.test", clientCounters{Rx: 0, Tx: 11})
+			}
+			ins, clients, err := m.CollectTrafficWithErrors()
+			if err == nil || !strings.Contains(err.Error(), "delta sum exceeds supported range") || len(ins) != 1 || ins[0].InboundId != 2 || len(clients) != 1 || clients[0].Email != "good@example.test" {
+				t.Fatalf("bad partial result: inbound=%v clients=%v err=%v", ins, clients, err)
+			}
+			if len(man.lastRx) != 2 || len(man.lastTx) != 2 || man.lastRx["alice@example.test"] != 10 || man.lastTx["alice@example.test"] != 10 || man.lastRx["bob@example.test"] != 0 || man.lastTx["bob@example.test"] != 0 {
+				t.Fatalf("overflow advanced a baseline: rx=%v tx=%v", man.lastRx, man.lastTx)
+			}
+			bad.setClient("alice@example.test", clientCounters{Rx: 30, Tx: 40})
+			bad.setClient("bob@example.test", clientCounters{Rx: 15, Tx: 25})
+			ins, clients, err = m.CollectTrafficWithErrors()
+			if err != nil || len(ins) != 1 || ins[0].InboundId != 1 || ins[0].Up != 35 || ins[0].Down != 55 || len(clients) != 2 {
+				t.Fatalf("retry lost or duplicated deltas: inbound=%v clients=%v err=%v", ins, clients, err)
+			}
+		})
+	}
+}
+
+func TestManagementAggregateAtLimitIsAcceptedExactly(t *testing.T) {
+	server := &fakeMgmtServer{clients: map[string]clientCounters{
+		"alice@example.test": {Rx: maxManagementCounter - 1, Tx: 1},
+		"bob@example.test":   {Rx: 1, Tx: maxManagementCounter - 1},
+	}}
+	server.start(t)
+	defer server.close()
+	m := &Manager{procs: map[int]*managed{1: {tag: "ovpn", mgmtPort: server.port}}}
+	ins, clients, err := m.CollectTrafficWithErrors()
+	if err != nil || len(ins) != 1 || ins[0].Up != maxManagementCounter || ins[0].Down != maxManagementCounter || len(clients) != 2 {
+		t.Fatalf("valid maximum rejected or altered: inbound=%v clients=%v err=%v", ins, clients, err)
+	}
+}

@@ -440,54 +440,49 @@ func (m *Manager) CollectTrafficWithErrors() (inbounds []InboundTraffic, clients
 			m.mu.Unlock()
 			continue
 		}
-		if man.lastRx == nil {
-			man.lastRx = make(map[string]int64)
-		}
-		if man.lastTx == nil {
-			man.lastTx = make(map[string]int64)
-		}
+		// Stage the whole daemon snapshot before touching baselines or emitting
+		// client deltas. Saturating the aggregate silently loses traffic and
+		// committing only a prefix would make a retry double-count that prefix.
 		up, down := int64(0), int64(0)
 		newOnline := make(map[string]bool, len(list))
+		newRx, newTx := make(map[string]int64, len(list)), make(map[string]int64, len(list))
+		var stagedClients []ClientTrafficDelta
+		overflow := false
 		for cn, c := range list {
 			newOnline[cn] = true
 			var baseRx, baseTx int64
 			if man.haveLast {
 				baseRx, baseTx = man.lastRx[cn], man.lastTx[cn]
 			}
-			// A restarted daemon zeroes its counters; a lower reading than
-			// last time means a reset, so count from zero.
-			dRx := c.Rx
-			if c.Rx < baseRx {
-				dRx = c.Rx
-			} else {
+			// A lower reading is treated as a reset, as before.
+			dRx, dTx := c.Rx, c.Tx
+			if c.Rx >= baseRx {
 				dRx = c.Rx - baseRx
 			}
-			dTx := c.Tx
-			if c.Tx < baseTx {
-				dTx = c.Tx
-			} else {
+			if c.Tx >= baseTx {
 				dTx = c.Tx - baseTx
 			}
-			up = saturatingManagementAdd(up, dRx)
-			down = saturatingManagementAdd(down, dTx)
+			if dRx > maxManagementCounter-up || dTx > maxManagementCounter-down {
+				overflow = true
+				break
+			}
+			up += dRx
+			down += dTx
 			if dRx > 0 || dTx > 0 {
-				clients = append(clients, ClientTrafficDelta{
-					InboundId: p.id,
-					Email:     cn,
-					Up:        dRx,
-					Down:      dTx,
+				stagedClients = append(stagedClients, ClientTrafficDelta{
+					InboundId: p.id, Email: cn, Up: dRx, Down: dTx,
 				})
 			}
-			man.lastRx[cn] = c.Rx
-			man.lastTx[cn] = c.Tx
+			newRx[cn], newTx[cn] = c.Rx, c.Tx
 		}
-		// Forget counters of clients that disconnected (and prune the maps).
-		for cn := range man.lastRx {
-			if !newOnline[cn] {
-				delete(man.lastRx, cn)
-				delete(man.lastTx, cn)
-			}
+		if overflow {
+			pollErr = errors.Join(pollErr, fmt.Errorf("inbound %d: management traffic delta sum exceeds supported range", p.id))
+			clearOnline(man)
+			m.mu.Unlock()
+			continue
 		}
+		clients = append(clients, stagedClients...)
+		man.lastRx, man.lastTx = newRx, newTx
 		man.online = newOnline
 		man.haveLast = true
 		if up > 0 || down > 0 {

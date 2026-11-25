@@ -103,16 +103,6 @@ func parseManagementCounter(raw string) (int64, error) {
 	return int64(value), nil
 }
 
-func saturatingManagementAdd(current, delta int64) int64 {
-	if delta <= 0 {
-		return current
-	}
-	if current >= maxManagementCounter-delta {
-		return maxManagementCounter
-	}
-	return current + delta
-}
-
 func parseCounterPair(fields []string, start int) (clientCounters, bool) {
 	// Headerless formats are only safe when the expected counter columns are
 	// present at their known offsets. Searching forward can reinterpret a
