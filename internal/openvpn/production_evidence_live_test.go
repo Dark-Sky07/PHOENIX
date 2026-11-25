@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -87,7 +88,9 @@ func TestRealOpenVPNProductionSessionEvidence(t *testing.T) {
 
 	clientLog := filepath.Join(t.TempDir(), "client.log")
 	clientConf := filepath.Join(t.TempDir(), "client.ovpn")
-	if err := os.WriteFile(clientConf, []byte(profile+"\nlog "+quoteConfigPath(clientLog)+"\n"), 0o600); err != nil {
+	// The client uses the userspace data channel so that SIGTERM sends a clean
+	// exit notification in this CI environment; server hooks remain production.
+	if err := os.WriteFile(clientConf, []byte(profile+"\ndisable-dco\nexplicit-exit-notify 1\nlog "+quoteConfigPath(clientLog)+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	client := start(clientNS, clientConf)
@@ -104,7 +107,7 @@ func TestRealOpenVPNProductionSessionEvidence(t *testing.T) {
 		t.Fatalf("tunnel did not carry ICMP: %v\n%s", err, out)
 	}
 
-	if err := client.Process.Signal(os.Interrupt); err != nil {
+	if err := client.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatalf("stop client: %v", err)
 	}
 	done := make(chan error, 1)
