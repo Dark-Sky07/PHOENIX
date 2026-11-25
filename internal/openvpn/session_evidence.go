@@ -203,6 +203,11 @@ func writeSessionEvidenceSetup(dir string, inst Instance, generation string) err
 		return err
 	}
 
+	// OpenVPN does not export a stable session ID to client-connect and
+	// client-disconnect scripts (the internal TLS session ID is not in their
+	// environment). The connect hook therefore creates a random durable ID and
+	// the disconnect hook resolves it by the client identity tuple. A missing
+	// or ambiguous admission record fails closed; usage is never guessed.
 	connect := `#!/bin/sh
 set -eu
 umask 077
@@ -217,18 +222,32 @@ incident() {
   sync "$f" "$incidents" "$root" || exit 1
   exit 1
 }
-sid="${session_id:-}"
 cn="${common_name:-}"
-case "$sid" in ''|*[!0-9a-fA-F]*) incident 'invalid OpenVPN session id' ;; esac
+ip="${trusted_ip:-${trusted_ip6:-}}"
+port="${trusted_port:-}"
 case "$cn" in ''|*[!A-Za-z0-9_.+@-]*) incident 'invalid OpenVPN client identity' ;; esac
+case "$ip" in ''|*[!0-9A-Fa-f:.]*) incident 'invalid OpenVPN client address' ;; esac
+case "$port" in ''|*[!0-9]*) incident 'invalid OpenVPN client port' ;; esac
+trusted="$ip:$port"
+generation=` + shellQuote(generation) + `
+for f in "$records"/*.open; do
+  [ -f "$f" ] || continue
+  grep -Fqx "common_name=$cn" "$f" || continue
+  grep -Fqx "trusted=$trusted" "$f" || continue
+  grep -Fqx "generation=$generation" "$f" || continue
+  incident 'duplicate active client session'
+done
+sid=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n') || incident 'cannot generate session id'
+case "$sid" in ''|*[!0-9a-f]*) incident 'invalid generated session id' ;; esac
 tmp=$(mktemp "$records/.connect.XXXXXXXXXX") || incident 'cannot stage session evidence'
-printf 'session=%s\ncommon_name=%s\ninbound=%s\ngeneration=%s\ntrusted=%s:%s\ndigest=%s\n' \
-  "$sid" "$cn" ` + strconv.Itoa(inst.Id) + ` ` + shellQuote(generation) + ` "${trusted_ip:-}" "${trusted_port:-}" "${tls_digest_sha256_0:-}" > "$tmp" || incident 'cannot write session evidence'
+printf 'session=%s\ncommon_name=%s\ninbound=%s\ngeneration=%s\ntrusted=%s\n' \
+  "$sid" "$cn" ` + strconv.Itoa(inst.Id) + ` "$generation" "$trusted" > "$tmp" || incident 'cannot write session evidence'
 sync "$tmp" || incident 'cannot sync session evidence'
 ln "$tmp" "$records/$sid.open" 2>/dev/null || incident 'conflicting or duplicate session evidence'
 rm -f "$tmp" || incident 'cannot remove staged session evidence'
 sync "$records" || incident 'cannot sync session evidence directory'
 `
+
 	disconnect := `#!/bin/sh
 set -eu
 umask 077
@@ -243,14 +262,30 @@ incident() {
   sync "$f" "$incidents" "$root" || exit 1
   exit 1
 }
-sid="${session_id:-}"
 cn="${common_name:-}"
+ip="${trusted_ip:-${trusted_ip6:-}}"
+port="${trusted_port:-}"
 rx="${bytes_received:-}"
 tx="${bytes_sent:-}"
-case "$sid" in ''|*[!0-9a-fA-F]*) incident 'invalid disconnect session id' ;; esac
 case "$cn" in ''|*[!A-Za-z0-9_.+@-]*) incident 'invalid disconnect client identity' ;; esac
+case "$ip" in ''|*[!0-9A-Fa-f:.]*) incident 'invalid disconnect client address' ;; esac
+case "$port" in ''|*[!0-9]*) incident 'invalid disconnect client port' ;; esac
 case "$rx" in ''|*[!0-9]*) incident 'invalid disconnect received counter' ;; esac
 case "$tx" in ''|*[!0-9]*) incident 'invalid disconnect sent counter' ;; esac
+trusted="$ip:$port"
+generation=` + shellQuote(generation) + `
+sid=''
+count=0
+for f in "$records"/*.open; do
+  [ -f "$f" ] || continue
+  grep -Fqx "common_name=$cn" "$f" || continue
+  grep -Fqx "trusted=$trusted" "$f" || continue
+  grep -Fqx "generation=$generation" "$f" || continue
+  count=$((count + 1))
+  sid=$(sed -n 's/^session=//p' "$f") || incident 'cannot read admission session id'
+done
+[ "$count" = 1 ] || incident 'missing or ambiguous admission record'
+case "$sid" in ''|*[!0-9a-fA-F]*) incident 'invalid admission session id' ;; esac
 tmp=$(mktemp "$records/.disconnect.XXXXXXXXXX") || incident 'cannot stage final evidence'
 printf 'session=%s\ncommon_name=%s\nrx=%s\ntx=%s\n' "$sid" "$cn" "$rx" "$tx" > "$tmp" || incident 'cannot write final evidence'
 sync "$tmp" || incident 'cannot sync final evidence'
@@ -258,6 +293,7 @@ ln "$tmp" "$records/$sid.close" 2>/dev/null || incident 'conflicting or duplicat
 rm -f "$tmp" || incident 'cannot remove staged final evidence'
 sync "$records" || incident 'cannot sync final evidence directory'
 `
+
 	// OpenVPN versions differ in the case of tls_digest_sha256_*: 2.7 emits
 	// lowercase while older releases emit uppercase. Normalize before the
 	// exact, literal-line comparison so the stored uppercase allowlist works

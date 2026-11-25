@@ -36,6 +36,23 @@ func setupEvidenceTest(t *testing.T, id int, email string) (string, string) {
 	return dir, generation
 }
 
+func openSessionID(t *testing.T, dir string) string {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join(dir, evidenceRoot, evidenceRecords, "*.open"))
+	if err != nil || len(files) != 1 {
+		t.Fatalf("expected one admission record, got %d (%v)", len(files), err)
+	}
+	data, err := os.ReadFile(files[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields, err := parseSessionFields(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fields["session"]
+}
+
 func runHook(t *testing.T, dir, name string, env []string) error {
 	t.Helper()
 	cmd := exec.Command("sh", filepath.Join(dir, name))
@@ -49,17 +66,15 @@ func runHook(t *testing.T, dir, name string, env []string) error {
 
 func TestSessionEvidenceHookLifecycle(t *testing.T) {
 	dir, generation := setupEvidenceTest(t, 741, "alice@example.test")
-	session := strings.Repeat("ab", 16)
 	env := []string{
-		"session_id=" + session,
 		"common_name=alice@example.test",
 		"trusted_ip=192.0.2.10",
 		"trusted_port=4000",
-		"tls_digest_sha256_0=AA:BB",
 	}
 	if err := runHook(t, dir, "client-connect", env); err != nil {
 		t.Fatalf("client-connect: %v", err)
 	}
+	session := openSessionID(t, dir)
 	if !ActiveSessionEmails()["alice@example.test"] {
 		t.Fatal("open session not visible to management suppression")
 	}
@@ -88,13 +103,16 @@ func TestSessionEvidenceHookLifecycle(t *testing.T) {
 
 func TestSessionEvidenceFailClosed(t *testing.T) {
 	dir, _ := setupEvidenceTest(t, 742, "bob@example.test")
-	session := strings.Repeat("cd", 16)
-	if err := runHook(t, dir, "client-disconnect", []string{
-		"session_id=" + session,
+	admit := []string{
 		"common_name=bob@example.test",
-		"bytes_received=not-a-number",
-		"bytes_sent=10",
-	}); err == nil {
+		"trusted_ip=192.0.2.11",
+		"trusted_port=4001",
+	}
+	if err := runHook(t, dir, "client-connect", admit); err != nil {
+		t.Fatal(err)
+	}
+	if err := runHook(t, dir, "client-disconnect", append(append([]string{}, admit...),
+		"bytes_received=not-a-number", "bytes_sent=10")); err == nil {
 		t.Fatal("invalid final counter accepted")
 	}
 	if err := CheckSessionEvidenceIncidents(); err == nil {
@@ -174,13 +192,10 @@ func TestServerConfigInstallsHooks(t *testing.T) {
 
 func TestManagementDeltasAreSuppressedForHookedSessions(t *testing.T) {
 	dir, _ := setupEvidenceTest(t, 745, "alice@example.test")
-	session := strings.Repeat("ef", 16)
 	if err := runHook(t, dir, "client-connect", []string{
-		"session_id=" + session,
 		"common_name=alice@example.test",
 		"trusted_ip=203.0.113.1",
 		"trusted_port=2222",
-		"tls_digest_sha256_0=AA:BB",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -292,5 +307,43 @@ func TestWriteConfigInstallsStableEvidenceGeneration(t *testing.T) {
 	}
 	if _, err := loadOrCreateDaemonGeneration(dir); err == nil {
 		t.Fatal("malformed generation was silently replaced")
+	}
+}
+
+func TestSessionEvidenceUnmatchedDisconnectFailsClosed(t *testing.T) {
+	dir, _ := setupEvidenceTest(t, 747, "frank@example.test")
+	env := []string{
+		"common_name=frank@example.test",
+		"trusted_ip=192.0.2.12",
+		"trusted_port=4002",
+		"bytes_received=100",
+		"bytes_sent=200",
+	}
+	if err := runHook(t, dir, "client-disconnect", env); err == nil {
+		t.Fatal("disconnect without an admission record was accepted")
+	}
+	if err := CheckSessionEvidenceIncidents(); err == nil {
+		t.Fatal("unmatched disconnect left no incident")
+	}
+	if sessions, err := CollectSessionEvidence(); err == nil || len(sessions) != 0 {
+		t.Fatalf("unmatched disconnect invented usage: %v %v", sessions, err)
+	}
+}
+
+func TestSessionEvidenceDuplicateAdmissionFailsClosed(t *testing.T) {
+	dir, _ := setupEvidenceTest(t, 748, "grace@example.test")
+	env := []string{
+		"common_name=grace@example.test",
+		"trusted_ip=192.0.2.13",
+		"trusted_port=4003",
+	}
+	if err := runHook(t, dir, "client-connect", env); err != nil {
+		t.Fatal(err)
+	}
+	if err := runHook(t, dir, "client-connect", env); err == nil {
+		t.Fatal("duplicate active admission was accepted")
+	}
+	if err := CheckSessionEvidenceIncidents(); err == nil {
+		t.Fatal("duplicate admission left no incident")
 	}
 }
