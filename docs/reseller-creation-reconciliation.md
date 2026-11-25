@@ -1595,3 +1595,19 @@ and a pre-stop poll does not fence traffic through termination. A failed start
 without a management port does not by itself trigger this warning. These
 observations are diagnostic: the warning is lost on panel restart, does not
 block quota operations and does not recover missing counters.
+
+#### Operator response to an OpenVPN accounting warning
+
+Treat an unverified-usage warning as an indication to investigate, not as an
+accounting adjustment or proof of a particular amount. Avoid quota releases,
+resets and client or reseller transfers that depend on the affected interval
+until evidence has been reviewed. Preserve the panel and daemon logs, relevant
+management observations, existing poll markers, receipts, and journal files;
+protect backups and logs as potentially sensitive. Record the time of the
+warning, affected inbounds and any daemon or panel restarts using trusted
+operational records. Do not remove a marker or journal simply to make the
+warning disappear, and do not assume restarting the panel reconciles traffic:
+the in-process warning will disappear on restart even when the uncertainty
+remains. There is currently no automatic final-counter reconstruction or safe
+one-click resolution for this OpenVPN case. Review and reconcile the interval
+using independent evidence before making quota-sensitive changes.
