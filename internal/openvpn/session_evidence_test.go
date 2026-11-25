@@ -126,6 +126,10 @@ func TestTLSVerifierFailsClosed(t *testing.T) {
 	if err := verify("0", digest); err != nil {
 		t.Fatalf("known certificate rejected: %v", err)
 	}
+	// OpenVPN 2.7 exposes the same digest in lowercase; normalize and accept.
+	if err := verify("0", strings.ToLower(digest)); err != nil {
+		t.Fatalf("lowercase digest rejected: %v", err)
+	}
 	if err := verify("0", "00:11"); err == nil {
 		t.Fatal("unknown certificate accepted")
 	}

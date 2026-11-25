@@ -258,11 +258,18 @@ ln "$tmp" "$records/$sid.close" 2>/dev/null || incident 'conflicting or duplicat
 rm -f "$tmp" || incident 'cannot remove staged final evidence'
 sync "$records" || incident 'cannot sync final evidence directory'
 `
+	// OpenVPN versions differ in the case of tls_digest_sha256_*: 2.7 emits
+	// lowercase while older releases emit uppercase. Normalize before the
+	// exact, literal-line comparison so the stored uppercase allowlist works
+	// on every supported version.
 	verifier := `#!/bin/sh
 set -u
 depth="${1:-0}"
 [ "$depth" = 0 ] || exit 0
 digest="${tls_digest_sha256_0:-}"
+[ -n "$digest" ] || exit 1
+case "$digest" in *[!0-9A-Fa-f:]*) exit 1 ;; esac
+digest=$(printf '%s' "$digest" | tr '[:lower:]' '[:upper:]') || exit 1
 [ -n "$digest" ] || exit 1
 allow=` + shellQuote(filepath.Join(dir, "client-allowlist")) + `
 [ -f "$allow" ] || exit 1
