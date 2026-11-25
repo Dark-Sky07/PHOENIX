@@ -45,6 +45,14 @@ func TestRealOpenVPNProductionConcurrentAdmissionEvidence(t *testing.T) {
 	hosts := []string{"192.0.2.1", "192.0.2.5"}
 	namespaces := []string{clientANS, clientBNS}
 	inst := Instance{Id: inboundID, Port: 31794, Proto: "udp", Clients: emails}
+	profiles := make([]string, 0, len(emails))
+	for i, email := range emails {
+		profile, err := BuildProfile(inst, email, hosts[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		profiles = append(profiles, profile)
+	}
 	if err := writeConfig(inst, mgmtPort); err != nil {
 		t.Fatal(err)
 	}
@@ -78,10 +86,7 @@ func TestRealOpenVPNProductionConcurrentAdmissionEvidence(t *testing.T) {
 
 	clients := make([]*exec.Cmd, 0, 2)
 	for i, email := range emails {
-		profile, err := BuildProfile(inst, email, hosts[i])
-		if err != nil {
-			t.Fatal(err)
-		}
+		profile := profiles[i]
 		logPath := filepath.Join(t.TempDir(), fmt.Sprintf("client-%d.log", i))
 		confPath := filepath.Join(t.TempDir(), fmt.Sprintf("client-%d.ovpn", i))
 		body := profile + clientDataChannelDirectives(binary) + "explicit-exit-notify 1\nlog " + quoteConfigPath(logPath) + "\n"
