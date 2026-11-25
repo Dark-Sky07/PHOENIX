@@ -38,6 +38,20 @@ func TestRealOpenVPNProductionSessionEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	diag := filepath.Join(t.TempDir(), "verify.log")
+	defer func() {
+		data, _ := os.ReadFile(diag)
+		t.Logf("tls-verify diagnostic: %s", data)
+	}()
+	verifyPath := filepath.Join(dir, "tls-verify")
+	script, err := os.ReadFile(verifyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	debug := "#!/bin/sh\nprintf 'digest=%s id=%s\\n' \"${tls_digest_sha256_0:-}\" \"$(id -u)\" >> " + shellQuote(diag) + "\ncat " + shellQuote(filepath.Join(dir, "client-allowlist")) + " >> " + shellQuote(diag) + "\n" + strings.TrimPrefix(string(script), "#!/bin/sh\n")
+	if err := os.WriteFile(verifyPath, []byte(debug), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	for _, directive := range []string{"script-security 2", "tls-verify ", "client-connect ", "client-disconnect "} {
 		if !strings.Contains(string(conf), directive) {
 			t.Fatalf("production config missing %q:\n%s", directive, conf)
