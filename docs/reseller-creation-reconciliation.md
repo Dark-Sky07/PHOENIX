@@ -1516,3 +1516,10 @@ authenticated or replayed, and hook execution is not guaranteed on process or
 host crash. The test does not prove that packets still in flight are included,
 that the event belongs to a durably identified client generation, or that quota
 may safely be released. No such hook is installed by PHOENIX.
+
+OpenVPN accounting polls also report a partial-poll error if a managed daemon
+is replaced or removed while its management query is in flight. The old sample
+is discarded rather than applied to the replacement, and the scheduler commits
+any other observed deltas before deferring that run's reconciliation. This is a
+race detector, not recovery of the discarded sample: it does not establish the
+missing usage, final counters or complete session termination.

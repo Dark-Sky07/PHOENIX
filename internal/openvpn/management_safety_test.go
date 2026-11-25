@@ -142,3 +142,51 @@ func TestPartialManagementPollReturnsObservedDeltasAndError(t *testing.T) {
 		t.Fatal("failed daemon baseline lost")
 	}
 }
+
+// A replacement while the management query is blocked discards that daemon's
+// sample, but must not make the overall poll look complete to the scheduler.
+func TestManagementPollReportsDaemonReplacement(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	request := make(chan struct{})
+	release := make(chan struct{})
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = bufio.NewReader(conn).ReadString('\n')
+		close(request)
+		<-release
+		_, _ = fmt.Fprint(conn, tabHeader+tabClient+"END\n")
+	}()
+	old := &managed{tag: "old", mgmtPort: ln.Addr().(*net.TCPAddr).Port, haveLast: true, lastRx: map[string]int64{"alice@example.test": 100}, lastTx: map[string]int64{"alice@example.test": 200}}
+	replacement := &managed{tag: "new", lastRx: map[string]int64{"other@example.test": 9}}
+	m := &Manager{procs: map[int]*managed{1: old}}
+	type result struct {
+		inbound []InboundTraffic
+		clients []ClientTrafficDelta
+		err     error
+	}
+	resultCh := make(chan result, 1)
+	go func() { in, clients, err := m.CollectTrafficWithErrors(); resultCh <- result{in, clients, err} }()
+	<-request
+	m.mu.Lock()
+	m.procs[1] = replacement
+	m.mu.Unlock()
+	close(release)
+	got := <-resultCh
+	<-serverDone
+	if got.err == nil || !strings.Contains(got.err.Error(), "daemon changed during management traffic poll") || len(got.inbound) != 0 || len(got.clients) != 0 {
+		t.Fatalf("discarded sample reported as complete: %+v", got)
+	}
+	if old.lastRx["alice@example.test"] != 100 || replacement.lastRx["other@example.test"] != 9 || len(replacement.lastRx) != 1 {
+		t.Fatalf("sample mutated old or replacement baseline: old=%v new=%v", old.lastRx, replacement.lastRx)
+	}
+}

@@ -426,6 +426,10 @@ func (m *Manager) CollectTrafficWithErrors() (inbounds []InboundTraffic, clients
 		m.mu.Lock()
 		man, current := m.procs[p.id]
 		if !current || man != p.man {
+			// A discarded sample is not a complete poll. Propagate the gap so
+			// callers commit any other deltas but defer reconciliation rather
+			// than treating an old daemon's counters as safely accounted for.
+			pollErr = errors.Join(pollErr, fmt.Errorf("inbound %d: daemon changed during management traffic poll", p.id))
 			m.mu.Unlock()
 			continue
 		}
