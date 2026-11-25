@@ -27,6 +27,13 @@ func TestRealOpenVPNProductionSessionEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := dataDirForID(inst.Id)
+	defer func() {
+		files, _ := os.ReadDir(filepath.Join(dir, evidenceRoot, evidenceInc))
+		for _, file := range files {
+			data, _ := os.ReadFile(filepath.Join(dir, evidenceRoot, evidenceInc, file.Name()))
+			t.Logf("session evidence incident %s: %s", file.Name(), data)
+		}
+	}()
 	generation, err := loadOrCreateDaemonGeneration(dir)
 	if err != nil {
 		t.Fatal(err)
