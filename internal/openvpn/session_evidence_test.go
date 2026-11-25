@@ -140,11 +140,19 @@ func TestTLSVerifierFailsClosed(t *testing.T) {
 	if err := verify("1", ""); err != nil {
 		t.Fatalf("intermediate verification should not require client digest: %v", err)
 	}
-	if err := writeConfig(Instance{Id: 743, Port: 1194}, 1234); err != nil {
+	inst := Instance{Id: 743, Port: 1194, Clients: []string{"carol@example.test"}}
+	if err := os.WriteFile(confPathForID(inst.Id), []byte(renderServerConf(inst, 1234)), 0o640); err != nil {
 		t.Fatal(err)
 	}
 	if err := CheckSessionEvidenceIncidents(); err == nil {
 		t.Fatal("missing configured allowlist did not raise a durable incident")
+	}
+	// Rendering the config also restores the panel-owned authorization file.
+	if err := writeConfig(inst, 1234); err != nil {
+		t.Fatal(err)
+	}
+	if err := verify("0", digest); err != nil {
+		t.Fatalf("allowlist was not restored by writeConfig: %v", err)
 	}
 }
 
@@ -228,5 +236,57 @@ func TestStatusSurfacesDurableEvidenceWarnings(t *testing.T) {
 	writeOpenVPNFixture("incidents/failure.1", "hook failed\n")
 	if status := m.Status(); !strings.Contains(status.Error, "session evidence incident") {
 		t.Fatalf("durable incident warning missing: %q", status.Error)
+	}
+}
+
+func TestWriteConfigInstallsStableEvidenceGeneration(t *testing.T) {
+	t.Setenv("XUI_BIN_FOLDER", t.TempDir())
+	inst := Instance{Id: 746, Port: 1194, Clients: []string{"erin@example.test"}}
+	dir := dataDirForID(inst.Id)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureServerCertLocked(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureClientCertLocked(dir, "erin@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeConfig(inst, 1234); err != nil {
+		t.Fatal(err)
+	}
+	first, err := loadOrCreateDaemonGeneration(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !generationPattern.MatchString(first) {
+		t.Fatalf("invalid generation %q", first)
+	}
+	// A config-only rerender must not invalidate evidence from this daemon.
+	if err := writeConfig(inst, 1234); err != nil {
+		t.Fatal(err)
+	}
+	second, err := loadOrCreateDaemonGeneration(dir)
+	if err != nil || second != first {
+		t.Fatalf("generation changed without a daemon restart: %q -> %q (%v)", first, second, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "client-allowlist")); err != nil {
+		t.Fatalf("config did not install authorization file: %v", err)
+	}
+	if err := CheckSessionEvidenceIncidents(); err != nil {
+		t.Fatal(err)
+	}
+	rotated, err := rotateDaemonGeneration(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rotated == first {
+		t.Fatal("daemon restart did not rotate generation")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "daemon-generation"), []byte("bad\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadOrCreateDaemonGeneration(dir); err == nil {
+		t.Fatal("malformed generation was silently replaced")
 	}
 }

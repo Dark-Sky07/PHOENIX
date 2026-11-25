@@ -112,7 +112,9 @@ jobs:
       - name: Verify generated configuration with OpenVPN parser
         env:
           PHOENIX_TEST_OPENVPN_BINARY: /usr/sbin/openvpn
-        run: go test ./internal/openvpn -run '^TestRealOpenVPNConfigParser$' -count=1 -v
+        run: go test ./internal/openvpn -run '^(TestRealOpenVPNConfigParser|TestConfigPathsAreQuotedAndControlsRejected)$' -count=1 -v
+      - name: Verify durable authorization, evidence and revocation state
+        run: go test ./internal/openvpn -run '^(TestServerConfigInstallsHooks|TestWriteConfigInstallsStableEvidenceGeneration|TestTLSVerifierFailsClosed|TestSessionEvidenceHookLifecycle|TestRevocationSurvivesAllowlistRegeneration|TestRevokeClientPersistsDenyAndVerifiesTermination|TestStatusSurfacesDurableEvidenceWarnings)$' -count=1 -v
 
   openvpn-live-characterization:
     runs-on: ubuntu-latest
@@ -134,7 +136,7 @@ jobs:
         run: |
           set -o pipefail
           go test -c -o /tmp/phoenix-openvpn-live.test ./internal/openvpn
-          if sudo env PATH="$PATH" PHOENIX_TEST_OPENVPN_LIVE_BINARY=/usr/sbin/openvpn /tmp/phoenix-openvpn-live.test -test.run '^TestRealOpenVPN(PreviouslyIssuedProfileStillConnects|ExperimentalFingerprintAdmission|ShortSessionBetweenPolls)$' -test.v 2>&1 | tee /tmp/openvpn-live.log; then exit 0; fi
+          if sudo env PATH="$PATH" PHOENIX_TEST_OPENVPN_LIVE_BINARY=/usr/sbin/openvpn /tmp/phoenix-openvpn-live.test -test.run '^TestRealOpenVPN(PreviouslyIssuedProfileStillConnects|ExperimentalFingerprintAdmission|ShortSessionBetweenPolls|ProductionSessionEvidence)$' -test.v 2>&1 | tee /tmp/openvpn-live.log; then exit 0; fi
           python3 - <<'PYLOG'
           from pathlib import Path
           output = Path('/tmp/openvpn-live.log').read_text(errors='replace')[-4000:]

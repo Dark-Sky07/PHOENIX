@@ -162,15 +162,9 @@ func (m *Manager) ensureLocked(inst Instance) error {
 	if err := pruneClientCertsLocked(dir, inst.Clients); err != nil {
 		return fmt.Errorf("archive and prune client certificates: %w", err)
 	}
-	generation, err := newDaemonGeneration()
+	generation, err := rotateDaemonGeneration(dir)
 	if err != nil {
 		return fmt.Errorf("create daemon generation: %w", err)
-	}
-	if err := writeClientAllowlist(dir, inst.Clients); err != nil {
-		return fmt.Errorf("publish client authorization state: %w", err)
-	}
-	if err := writeSessionEvidenceSetup(dir, inst, generation); err != nil {
-		return fmt.Errorf("publish session evidence hooks: %w", err)
 	}
 
 	mgmtPort, err := FreeLocalPort()

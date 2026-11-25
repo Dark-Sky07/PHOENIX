@@ -34,6 +34,7 @@ func TestRealOpenVPNPreviouslyIssuedProfileStillConnects(t *testing.T) {
 	if err := writeConfig(inst, 31195); err != nil {
 		t.Fatal(err)
 	}
+	stripProductionHooks(t, inst)
 	start := func(ns, config string) {
 		t.Helper()
 		cmd := exec.Command("ip", "netns", "exec", ns, binary, "--config", config)
@@ -106,4 +107,28 @@ func setupOpenVPNLiveNamespaces(t *testing.T) (string, string) {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// stripProductionHooks removes the panel-managed authorization/evidence
+// directives from a live test configuration. Live characterization tests use
+// their own temporary hooks and must not accidentally exercise or be blocked
+// by the production allowlist. Production configs always keep these lines.
+func stripProductionHooks(t *testing.T, inst Instance) {
+	t.Helper()
+	data, err := os.ReadFile(confPathForID(inst.Id))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(data), "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if strings.HasPrefix(line, "script-security ") || strings.HasPrefix(line, "tls-verify ") ||
+			strings.HasPrefix(line, "client-connect ") || strings.HasPrefix(line, "client-disconnect ") {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	if err := os.WriteFile(confPathForID(inst.Id), []byte(strings.Join(kept, "\n")), 0o640); err != nil {
+		t.Fatal(err)
+	}
 }

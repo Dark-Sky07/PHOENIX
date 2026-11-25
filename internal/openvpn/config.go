@@ -97,5 +97,8 @@ func writeConfig(inst Instance, mgmtPort int) error {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err
 	}
+	if err := ensureEvidenceForConfig(dir, inst); err != nil {
+		return fmt.Errorf("prepare OpenVPN authorization and session evidence: %w", err)
+	}
 	return os.WriteFile(confPathForID(inst.Id), []byte(renderServerConf(inst, mgmtPort)), 0o640)
 }

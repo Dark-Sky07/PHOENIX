@@ -52,6 +52,75 @@ func newDaemonGeneration() (string, error) {
 	return hex.EncodeToString(buf), nil
 }
 
+// loadOrCreateDaemonGeneration keeps evidence generation stable when a config
+// is rendered without a daemon restart (for example by the real parser test).
+// A malformed or unsafe file fails closed rather than being regenerated.
+func loadOrCreateDaemonGeneration(dir string) (string, error) {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return "", err
+	}
+	defer root.Close()
+	info, err := root.Lstat("daemon-generation")
+	if err == nil {
+		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 || info.Size() > 128 {
+			return "", errors.New("openvpn: unsafe daemon generation file")
+		}
+		data, err := root.ReadFile("daemon-generation")
+		if err != nil {
+			return "", err
+		}
+		generation := strings.TrimSpace(string(data))
+		if !generationPattern.MatchString(generation) {
+			return "", errors.New("openvpn: malformed daemon generation")
+		}
+		return generation, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	generation, err := newDaemonGeneration()
+	if err != nil {
+		return "", err
+	}
+	if err := writeManagedFile(root, "daemon-generation", []byte(generation+"\n"), 0o600); err != nil {
+		return "", err
+	}
+	return generation, nil
+}
+
+// rotateDaemonGeneration is called only when a new daemon process is about to
+// start. Evidence from the previous epoch remains on disk with its old value.
+func rotateDaemonGeneration(dir string) (string, error) {
+	generation, err := newDaemonGeneration()
+	if err != nil {
+		return "", err
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return "", err
+	}
+	defer root.Close()
+	if err := writeManagedFile(root, "daemon-generation", []byte(generation+"\n"), 0o600); err != nil {
+		return "", err
+	}
+	return generation, nil
+}
+
+// ensureEvidenceForConfig installs the authorization and hook files that the
+// rendered config references. Keeping this with writeConfig prevents any
+// caller from producing a config whose scripts are missing.
+func ensureEvidenceForConfig(dir string, inst Instance) error {
+	generation, err := loadOrCreateDaemonGeneration(dir)
+	if err != nil {
+		return err
+	}
+	if err := writeClientAllowlist(dir, inst.Clients); err != nil {
+		return err
+	}
+	return writeSessionEvidenceSetup(dir, inst, generation)
+}
+
 func syncDir(root *os.Root, name string) error {
 	dir, err := root.Open(name)
 	if err != nil {
