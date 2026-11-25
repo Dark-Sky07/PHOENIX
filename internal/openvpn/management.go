@@ -236,7 +236,14 @@ func parseClientListResponse(reader io.Reader) (map[string]clientCounters, error
 			break
 		}
 		if strings.HasPrefix(line, "ERROR:") {
-			return nil, errors.New(strings.TrimSpace(line))
+			// An unsupported command may safely fall back only before any
+			// accounting response has begun. Once a client snapshot is in
+			// progress, another command would read a different point in time
+			// and could hide an incomplete sample.
+			if recognized {
+				return nil, fmt.Errorf("%w: management error after response began: %s", errUnsafeManagementResponse, line)
+			}
+			return nil, errors.New(line)
 		}
 		if strings.HasPrefix(line, "<CLIENT_LIST VERSION ") {
 			recognized = true

@@ -1545,3 +1545,10 @@ rejected as ambiguous, retaining the old counter baseline. CI also feeds the
 actual OpenVPN `status 3` output from the isolated two-client experiment into
 the production parser before and after disconnect. This validates the tested
 Ubuntu OpenVPN format, not every supported version or snapshot completeness.
+
+If the management socket sends `ERROR:` after an accounting response has begun,
+the poll now treats the response as unsafe instead of trying a different
+command and silently replacing it with a later snapshot. An unsupported command
+that fails before a recognizable response can still fall back. Socket-level
+tests cover both paths and retention of the previous counter baseline; they do
+not prove a syntactically valid snapshot contains all session traffic.

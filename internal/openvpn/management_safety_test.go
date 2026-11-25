@@ -24,6 +24,9 @@ func TestManagementStatusFormatsAndUnsafeRows(t *testing.T) {
 		{"status2 empty", "HEADER,CLIENT_LIST,Common Name,Real Address,Virtual Address,Virtual IPv6 Address,Bytes Received,Bytes Sent\nEND\n", 0, false},
 		{"status1", "OpenVPN CLIENT LIST\nUpdated,now\nCommon Name,Real Address,Bytes Received,Bytes Sent,Connected Since\nalice@example.test,203.0.113.1:2222,1234,5678,now\nROUTING TABLE\nVirtual Address,Common Name,Real Address,Last Ref\n10.8.0.2,alice@example.test,203.0.113.1:2222,now\nGLOBAL STATS\nEND\n", 1, false},
 		{"truncated", tabHeader + tabClient, 0, true},
+		{"error after client header", tabHeader + "ERROR: interrupted\n", 0, true},
+		{"error after client row", tabHeader + tabClient + "ERROR: interrupted\n", 0, true},
+		{"error after legacy version", "<CLIENT_LIST VERSION 1\nERROR: interrupted\n", 0, true},
 		{"duplicate header column", "HEADER\tCLIENT_LIST\tCommon Name\tBytes Received\tBytes Sent\tBytes Sent\nEND\n", 0, true},
 		{"duplicate client header", tabHeader + tabClient + tabHeader + "END\n", 0, true},
 		{"conflicting client header", tabHeader + "HEADER\tCLIENT_LIST\tCommon Name\tBytes Sent\tBytes Received\nEND\n", 0, true},
@@ -110,6 +113,7 @@ func TestStatusThreePollRetainsBaselineOnInvalidResponse(t *testing.T) {
 		tabHeader + strings.Replace(tabClient, "1234", "9223372036854775808", 1) + "END\n",
 		"CLIENT_LIST alice@example.test 203.0.113.1 10.8.0.2 bad 1234 5678 179\nEND\n",
 		tabHeader + "CLIENT_LIST\t\nEND\n",
+		tabHeader + tabClient + "ERROR: interrupted\n",
 		tabHeader + tabClient + "HEADER\tCLIENT_LIST\tCommon Name\tBytes Sent\tBytes Received\nEND\n",
 		tabHeader + "CLIENT_LIST alice@example.test 203.0.113.1 10.8.0.2 1234 5678 179\nEND\n",
 		"OpenVPN CLIENT LIST\nCommon Name,Real Address,Bytes Received,Bytes Sent,Connected Since\nalice@example.test\nEND\n",
@@ -126,7 +130,7 @@ func TestStatusThreePollRetainsBaselineOnInvalidResponse(t *testing.T) {
 	response = tabHeader + strings.Replace(tabClient, "1234", "1300", 1) + "END\n"
 	count := len(commands)
 	mu.Unlock()
-	if count != 8 {
+	if count != 9 {
 		t.Fatalf("unsafe response retried with another command: %v", commands)
 	}
 	ins, clients = m.CollectTraffic()
@@ -255,5 +259,41 @@ func TestManagementAggregateAtLimitIsAcceptedExactly(t *testing.T) {
 	ins, clients, err := m.CollectTrafficWithErrors()
 	if err != nil || len(ins) != 1 || ins[0].Up != maxManagementCounter || ins[0].Down != maxManagementCounter || len(clients) != 2 {
 		t.Fatalf("valid maximum rejected or altered: inbound=%v clients=%v err=%v", ins, clients, err)
+	}
+}
+
+func TestManagementUnsupportedCommandFallsBackBeforeSnapshot(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	commands := make(chan string, 2)
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		for i := 0; i < 2; i++ {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			cmd, _ := bufio.NewReader(conn).ReadString('\n')
+			commands <- strings.TrimSpace(cmd)
+			if i == 0 {
+				fmt.Fprint(conn, ">INFO:management\nERROR: unsupported\n")
+			} else {
+				fmt.Fprint(conn, tabHeader+tabClient+"END\n")
+			}
+			conn.Close()
+		}
+	}()
+	got, err := clientList(ln.Addr().(*net.TCPAddr).Port)
+	if err != nil || got["alice@example.test"] != (clientCounters{Rx: 1234, Tx: 5678}) {
+		t.Fatalf("legitimate fallback failed: %v %v", got, err)
+	}
+	<-serverDone
+	first, second := <-commands, <-commands
+	if first != "status 3" || second != "status 2" {
+		t.Fatalf("unexpected fallback commands %q %q", first, second)
 	}
 }
