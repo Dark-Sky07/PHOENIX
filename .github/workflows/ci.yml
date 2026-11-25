@@ -164,10 +164,10 @@ jobs:
           (
             set -euo pipefail
             sudo apt-get update
-            sudo apt-get install -y autoconf automake libtool pkg-config libssl-dev liblzo2-dev liblz4-dev iproute2 iputils-ping
+            sudo apt-get install -y autoconf automake libtool pkg-config libssl-dev liblzo2-dev liblz4-dev gettext iproute2 iputils-ping
             curl -fsSL "https://github.com/OpenVPN/openvpn/archive/refs/tags/v${{ matrix.version }}.tar.gz" | tar xz
             cd "openvpn-${{ matrix.version }}"
-            ./autogen.sh
+            autoreconf -i
             ./configure --prefix="/tmp/openvpn-${{ matrix.version }}" --disable-dco
             make -j2
             make install
