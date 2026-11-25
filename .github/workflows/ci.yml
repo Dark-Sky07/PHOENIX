@@ -187,7 +187,8 @@ jobs:
           text = Path('/tmp/openvpn-build.log').read_text(errors='replace')
           lines = text.splitlines()
           flagged = [line for line in lines if any(k in line.lower() for k in ('error', 'cannot', 'failed', 'not found', 'no rule', '***', 'configure:'))]
-          output = ('\n'.join(flagged[-100:]) + '\n--- last lines ---\n' + '\n'.join(lines[-80:]))
+          clip = lambda line: line[:300]
+          output = ('\n'.join(clip(line) for line in flagged[-20:]) + '\n--- last lines ---\n' + '\n'.join(clip(line) for line in lines[-30:]))
           output = output.replace('%', '%25').replace(chr(13), '%0D').replace(chr(10), '%0A')
           print(f'::error title=openvpn-build-output::{output}')
           PYLOG
