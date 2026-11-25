@@ -28,11 +28,18 @@ func TestRealOpenVPNProductionSessionEvidence(t *testing.T) {
 	}
 	dir := dataDirForID(inst.Id)
 	defer func() {
-		files, _ := os.ReadDir(filepath.Join(dir, evidenceRoot, evidenceInc))
-		for _, file := range files {
-			data, _ := os.ReadFile(filepath.Join(dir, evidenceRoot, evidenceInc, file.Name()))
-			t.Logf("session evidence incident %s: %s", file.Name(), data)
+		for _, sub := range []string{evidenceInc, evidenceRecords} {
+			files, _ := os.ReadDir(filepath.Join(dir, evidenceRoot, sub))
+			for _, file := range files {
+				data, _ := os.ReadFile(filepath.Join(dir, evidenceRoot, sub, file.Name()))
+				t.Logf("session evidence %s/%s: %s", sub, file.Name(), data)
+			}
 		}
+		log, _ := os.ReadFile(logPathForID(inst.Id))
+		if len(log) > 4000 {
+			log = log[len(log)-4000:]
+		}
+		t.Logf("server log tail: %s", log)
 	}()
 	generation, err := loadOrCreateDaemonGeneration(dir)
 	if err != nil {
