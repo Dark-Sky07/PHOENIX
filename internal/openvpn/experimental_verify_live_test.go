@@ -224,6 +224,7 @@ sys.stdout.buffer.write(buf)
 	if parsed["bob@example.test"].ID == "" || parsed["carol@example.test"].ID == "" || parsed["bob@example.test"].ID == parsed["carol@example.test"].ID {
 		t.Fatalf("production parser did not retain distinct live client IDs: %v", parsed)
 	}
+	beforeBob := parsed["bob@example.test"]
 	clientIDIndex, rxIndex, txIndex := -1, -1, -1
 	clientID := ""
 	var observedRx, observedTx uint64
@@ -400,13 +401,19 @@ sys.stdout.buffer.write(buf)
 	}
 	reauthorizedLog := client(clientNS, "bob-reauthorized", bob)
 	waitLog(reauthorizedLog, func(s string) bool { return strings.Contains(s, "Initialization Sequence Completed") })
+	// Make both new counters larger than the old snapshot. A simple
+	// decrease-only reset detector would miss this real reconnection.
+	probeOut, probeErr := exec.Command("ip", "netns", "exec", clientNS, "ping", "-I", "tun0", "-n", "-c", "128", "-i", "0.01", "-s", "1024", "-W", "3", "10.120.0.1").CombinedOutput()
+	if probeErr != nil {
+		t.Fatalf("reauthorized Bob tunnel did not carry probe traffic: %v\n%s", probeErr, probeOut)
+	}
 	afterReconnect := management("status 3")
 	later, err := parseClientListResponse(strings.NewReader(afterReconnect))
 	if err != nil || len(later) != 2 || later["bob@example.test"].ID == "" || later["bob@example.test"].ID == clientID {
 		t.Fatalf("new live Bob session not identified: %v %v\n%s", later, err, afterReconnect)
 	}
-	if later["bob@example.test"].Rx == 0 || later["bob@example.test"].Tx == 0 {
-		t.Fatalf("new session has no bidirectional counters: %v", later)
+	if later["bob@example.test"].Rx <= beforeBob.Rx || later["bob@example.test"].Tx <= beforeBob.Tx {
+		t.Fatalf("new session counters did not exceed old snapshot: before=%+v after=%+v", beforeBob, later["bob@example.test"])
 	}
 
 	// Replay the two genuine status responses through the production manager
