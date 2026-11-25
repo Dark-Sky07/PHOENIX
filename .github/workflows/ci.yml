@@ -160,16 +160,28 @@ jobs:
       - name: Build OpenVPN ${{ matrix.version }} with the userspace data channel
         shell: bash
         run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y autoconf automake libtool pkg-config libssl-dev liblzo2-dev liblz4-dev iproute2 iputils-ping
-          curl -fsSL "https://github.com/OpenVPN/openvpn/archive/refs/tags/v${{ matrix.version }}.tar.gz" | tar xz
-          cd "openvpn-${{ matrix.version }}"
-          ./autogen.sh
-          ./configure --prefix="/tmp/openvpn-${{ matrix.version }}" --disable-dco
-          make -j2
-          make install
-          /tmp/openvpn-${{ matrix.version }}/sbin/openvpn --version | head -2
+          set -o pipefail
+          (
+            set -euo pipefail
+            sudo apt-get update
+            sudo apt-get install -y autoconf automake libtool pkg-config libssl-dev liblzo2-dev liblz4-dev iproute2 iputils-ping
+            curl -fsSL "https://github.com/OpenVPN/openvpn/archive/refs/tags/v${{ matrix.version }}.tar.gz" | tar xz
+            cd "openvpn-${{ matrix.version }}"
+            ./autogen.sh
+            ./configure --prefix="/tmp/openvpn-${{ matrix.version }}" --disable-dco
+            make -j2
+            make install
+            /tmp/openvpn-${{ matrix.version }}/sbin/openvpn --version | head -2
+          ) 2>&1 | tee /tmp/openvpn-build.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -eq 0 ]; then exit 0; fi
+          python3 - <<'PYLOG'
+          from pathlib import Path
+          output = Path('/tmp/openvpn-build.log').read_text(errors='replace')[-6000:]
+          output = output.replace('%', '%25').replace(chr(13), '%0D').replace(chr(10), '%0A')
+          print(f'::error title=openvpn-build-output::{output}')
+          PYLOG
+          exit 1
       - name: Prepare isolated tunnel test environment
         run: |
           sudo modprobe tun || true
