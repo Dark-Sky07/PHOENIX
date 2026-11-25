@@ -65,6 +65,10 @@ type Manager struct {
 	// a full panel restart should return to the database's desired state.
 	manualStop bool
 	lastError  string
+	// Current process-local poll failures, cleared only by a successful poll
+	// for the same inbound. This is an operational warning, not a durable
+	// accounting incident or proof that unobserved traffic was recovered.
+	trafficPollFailures map[int]struct{}
 }
 
 // RuntimeStatus is the small, secret-free snapshot exposed by the dashboard.
@@ -322,6 +326,13 @@ func (m *Manager) Status() RuntimeStatus {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	status := RuntimeStatus{ManualStop: m.manualStop, Error: m.lastError}
+	if len(m.trafficPollFailures) > 0 {
+		warning := fmt.Sprintf("OpenVPN traffic poll incomplete for %d inbound(s); missing usage may require review", len(m.trafficPollFailures))
+		if status.Error != "" {
+			status.Error += "\n"
+		}
+		status.Error += warning
+	}
 	seen := make(map[string]struct{})
 	for _, cur := range m.procs {
 		if cur.proc != nil && cur.proc.IsRunning() {
@@ -384,6 +395,15 @@ func (m *Manager) CollectTraffic() (inbounds []InboundTraffic, clients []ClientT
 	return
 }
 
+// markTrafficPollFailureLocked records no raw socket data or client identity.
+// m.mu must be held. The flag survives reconcile/stop within this process.
+func (m *Manager) markTrafficPollFailureLocked(id int) {
+	if m.trafficPollFailures == nil {
+		m.trafficPollFailures = make(map[int]struct{})
+	}
+	m.trafficPollFailures[id] = struct{}{}
+}
+
 // CollectTrafficWithErrors returns usable deltas even when another daemon's
 // poll failed. Callers must commit those deltas before acting on the error;
 // discarding them would discard already-advanced in-memory baselines.
@@ -430,11 +450,13 @@ func (m *Manager) CollectTrafficWithErrors() (inbounds []InboundTraffic, clients
 			// callers commit any other deltas but defer reconciliation rather
 			// than treating an old daemon's counters as safely accounted for.
 			pollErr = errors.Join(pollErr, fmt.Errorf("inbound %d: daemon changed during management traffic poll", p.id))
+			m.markTrafficPollFailureLocked(p.id)
 			m.mu.Unlock()
 			continue
 		}
 		if err != nil {
 			pollErr = errors.Join(pollErr, fmt.Errorf("inbound %d: %w", p.id, err))
+			m.markTrafficPollFailureLocked(p.id)
 			logger.Warningf("openvpn: inbound %d management traffic poll failed; counters retained: %v", p.id, err)
 			clearOnline(man)
 			m.mu.Unlock()
@@ -477,11 +499,13 @@ func (m *Manager) CollectTrafficWithErrors() (inbounds []InboundTraffic, clients
 		}
 		if overflow {
 			pollErr = errors.Join(pollErr, fmt.Errorf("inbound %d: management traffic delta sum exceeds supported range", p.id))
+			m.markTrafficPollFailureLocked(p.id)
 			clearOnline(man)
 			m.mu.Unlock()
 			continue
 		}
 		clients = append(clients, stagedClients...)
+		delete(m.trafficPollFailures, p.id)
 		man.lastRx, man.lastTx = newRx, newTx
 		man.online = newOnline
 		man.haveLast = true

@@ -200,6 +200,7 @@ describe('smoke: redesigned pages', () => {
   afterEach(() => {
     statusObj.counterIncidents = { available: true, databaseCount: 0, fallbackPresent: false, pendingInProcess: false };
     statusObj.nodeSnapshotSafety = { available: true, nodeCount: 0 };
+    statusObj.openvpn.errorMsg = '';
     cleanup();
     vi.restoreAllMocks();
   });
@@ -218,6 +219,16 @@ describe('smoke: redesigned pages', () => {
     expect(screen.getByText('185.92.14.37')).toBeTruthy();
     const realErrors = errors.filter(isRealError);
     expect(realErrors, JSON.stringify(realErrors.map((a) => String(a[0]).slice(0, 200)))).toEqual([]);
+  });
+
+  it('shows daemon errors even while OpenVPN is running', async () => {
+    const { default: IndexPage } = await import('@/pages/index/IndexPage');
+    statusObj.openvpn.errorMsg = 'OpenVPN traffic poll incomplete for 1 inbound(s); missing usage may require review';
+    const { container } = wrap(<IndexPage />);
+    const warning = container.querySelector('.service-row-warning');
+    expect(warning?.textContent).toContain('traffic poll incomplete');
+    expect(warning?.getAttribute('role')).toBe('alert');
+    expect(warning?.closest('.service-row')?.classList.contains('is-running')).toBe(true);
   });
 
   it('warns when accounting incident status is active or unavailable', async () => {

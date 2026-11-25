@@ -190,6 +190,7 @@
       "updateDaemon": "Update",
       "daemonInbounds": "Inbounds",
       "daemonOnline": "Online",
+      "daemonWarning": "Warning",
       "xrayErrorPopoverTitle": "An error occurred while running Xray",
       "operationHours": "Uptime",
       "systemHistoryTitle": "System History",

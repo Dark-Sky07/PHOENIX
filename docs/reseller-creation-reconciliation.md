@@ -1560,3 +1560,12 @@ its caller to hide that error from the journal. Regression tests cover normal
 commit and failed-commit retry without repolling, plus PostgreSQL in CI. This
 still does not create a durable incident for the daemon that failed: after a
 partial batch commits, its missing usage and quota safety remain unproven.
+
+Detected OpenVPN management poll failures now appear in the service status and
+are visible even while the daemon remains running. The in-process warning is
+retained across reconcile and stop, and unrelated successful polls do not clear
+it; a successful poll for the same inbound clears the current warning. It
+contains only a count, not client identities or raw socket output. This is
+operational visibility, not durable incident evidence: restart loses the flag,
+a later successful sample does not prove missing usage was recovered, and the
+warning does not fence quota mutations or detect every possible missed poll.

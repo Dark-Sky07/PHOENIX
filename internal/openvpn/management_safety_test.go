@@ -297,3 +297,47 @@ func TestManagementUnsupportedCommandFallsBackBeforeSnapshot(t *testing.T) {
 		t.Fatalf("unexpected fallback commands %q %q", first, second)
 	}
 }
+
+func TestPollFailureStatusSurvivesUnrelatedSuccessAndResume(t *testing.T) {
+	bad := &fakeMgmtServer{}
+	bad.start(t)
+	port := bad.port
+	bad.close()
+	good := &fakeMgmtServer{clients: map[string]clientCounters{"private@example.test": {Rx: 1}}}
+	good.start(t)
+	defer good.close()
+	m := &Manager{procs: map[int]*managed{
+		1: {tag: "bad", mgmtPort: port},
+		2: {tag: "good", mgmtPort: good.port},
+	}, lastError: "previous daemon error"}
+	if _, _, err := m.CollectTrafficWithErrors(); err == nil {
+		t.Fatal("missing poll failure")
+	}
+	status := m.Status().Error
+	if !strings.Contains(status, "previous daemon error") || !strings.Contains(status, "traffic poll incomplete for 1 inbound(s)") || strings.Contains(status, "private@example.test") {
+		t.Fatalf("unexpected dashboard status: %q", status)
+	}
+	m.Resume()
+	if status = m.Status().Error; !strings.Contains(status, "traffic poll incomplete") {
+		t.Fatalf("resume hid poll warning: %q", status)
+	}
+	// Removal or a successful poll of another daemon is not recovery evidence.
+	m.mu.Lock()
+	delete(m.procs, 1)
+	m.mu.Unlock()
+	if _, _, err := m.CollectTrafficWithErrors(); err != nil {
+		t.Fatal(err)
+	}
+	if status = m.Status().Error; !strings.Contains(status, "traffic poll incomplete") {
+		t.Fatalf("unrelated poll hid warning: %q", status)
+	}
+	m.mu.Lock()
+	m.procs[1] = &managed{tag: "replacement", mgmtPort: good.port}
+	m.mu.Unlock()
+	if _, _, err := m.CollectTrafficWithErrors(); err != nil {
+		t.Fatal(err)
+	}
+	if status = m.Status().Error; status != "" {
+		t.Fatalf("successful same-inbound poll not reflected: %q", status)
+	}
+}
