@@ -86,30 +86,53 @@ func TestRealOpenVPNProductionSessionEvidence(t *testing.T) {
 	defer func() { _ = server.Process.Kill(); _ = server.Wait() }()
 	waitFor(logPathForID(inst.Id), "Initialization Sequence Completed", 25*time.Second)
 
+	first := runProductionClientSession(t, binary, clientNS, inst, profile, email, generation)
+	second := runProductionClientSession(t, binary, clientNS, inst, profile, email, generation)
+	if first == second {
+		t.Fatalf("reconnect reused the durable session identity: %s", first)
+	}
+
+}
+
+// runProductionClientSession connects one client through the generated config,
+// produces traffic, closes it cleanly and acknowledges the resulting durable
+// evidence. It returns the session identity so a reconnect can be compared.
+func runProductionClientSession(t *testing.T, binary, ns string, inst Instance, profile, email, generation string) string {
+	t.Helper()
 	clientLog := filepath.Join(t.TempDir(), "client.log")
 	clientConf := filepath.Join(t.TempDir(), "client.ovpn")
-	// The client uses the userspace data channel so that SIGTERM sends a clean
-	// exit notification in this CI environment; server hooks remain production.
-	if err := os.WriteFile(clientConf, []byte(profile+clientDataChannelDirectives(binary)+"explicit-exit-notify 1\nlog "+quoteConfigPath(clientLog)+"\n"), 0o600); err != nil {
+	body := profile + clientDataChannelDirectives(binary) + "explicit-exit-notify 1\nlog " + quoteConfigPath(clientLog) + "\n"
+	if err := os.WriteFile(clientConf, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	client := start(clientNS, clientConf)
-	defer func() {
+	client := exec.Command("ip", "netns", "exec", ns, binary, "--config", clientConf)
+	if err := client.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
 		if client.ProcessState == nil {
 			_ = client.Process.Kill()
 			_ = client.Wait()
 		}
-	}()
-	waitFor(clientLog, "Initialization Sequence Completed", 25*time.Second)
-
-	out, err := exec.Command("ip", "netns", "exec", clientNS, "ping", "-n", "-c", "4", "-W", "3", "10.122.0.1").CombinedOutput()
+	})
+	deadline := time.Now().Add(25 * time.Second)
+	for time.Now().Before(deadline) {
+		data, _ := os.ReadFile(clientLog)
+		if strings.Contains(string(data), "Initialization Sequence Completed") {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if data, _ := os.ReadFile(clientLog); !strings.Contains(string(data), "Initialization Sequence Completed") {
+		server, _ := os.ReadFile(logPathForID(inst.Id))
+		t.Fatalf("client did not initialize:\n%s\nserver:\n%s", data, server)
+	}
+	gateway := strings.TrimSuffix(inst.serverSubnetCIDR(), "0/24") + "1"
+	out, err := exec.Command("ip", "netns", "exec", ns, "ping", "-n", "-c", "4", "-W", "3", gateway).CombinedOutput()
 	if err != nil {
 		t.Fatalf("tunnel did not carry ICMP: %v\n%s", err, out)
 	}
-
-	if err := client.Process.Signal(syscall.SIGTERM); err != nil {
-		t.Fatalf("stop client: %v", err)
-	}
+	_ = client.Process.Signal(syscall.SIGTERM)
 	done := make(chan error, 1)
 	go func() { done <- client.Wait() }()
 	select {
@@ -118,7 +141,7 @@ func TestRealOpenVPNProductionSessionEvidence(t *testing.T) {
 		t.Fatal("client did not stop")
 	}
 
-	deadline := time.Now().Add(25 * time.Second)
+	deadline = time.Now().Add(25 * time.Second)
 	var sessions []SessionEvidence
 	for time.Now().Before(deadline) {
 		sessions, err = CollectSessionEvidence()
@@ -146,6 +169,7 @@ func TestRealOpenVPNProductionSessionEvidence(t *testing.T) {
 	if remaining, err := CollectSessionEvidence(); err != nil || len(remaining) != 0 {
 		t.Fatalf("acknowledged evidence remained: %v %v", remaining, err)
 	}
+	return sample.Key
 }
 
 // clientDataChannelDirectives keeps the client userspace for versions that
