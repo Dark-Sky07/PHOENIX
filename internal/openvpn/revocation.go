@@ -111,6 +111,18 @@ func (m *Manager) RevokeClient(email string, generation string) error {
 		return errors.New("openvpn: no daemon in the requested generation serves that client")
 	}
 
+	// Persist the deny decision before touching the generated allowlist, so a
+	// restart or re-attachment cannot re-authorize the same certificate.
+	for _, t := range targets {
+		dir := dataDirForID(t.id)
+		digest, err := certificateDigestForClient(dir, email)
+		if err != nil {
+			return fmt.Errorf("inbound %d: %w", t.id, err)
+		}
+		if err := recordRevokedDigest(dir, digest); err != nil {
+			return fmt.Errorf("inbound %d: persist revocation: %w", t.id, err)
+		}
+	}
 	// Fail closed for new authentication before touching active sessions.
 	for _, t := range targets {
 		remaining := make([]string, 0, len(t.clients))
@@ -136,7 +148,7 @@ func (m *Manager) RevokeClient(email string, generation string) error {
 			if cn != email {
 				continue
 			}
-			if counters.ID == "" || strings.Trim(counters.ID, "0123456789") == "" {
+			if counters.ID == "" || strings.Trim(counters.ID, "0123456789") != "" {
 				joined = errors.Join(joined, fmt.Errorf("inbound %d: client ID missing before revocation", t.id))
 				continue
 			}

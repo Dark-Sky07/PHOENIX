@@ -1,0 +1,99 @@
+# OpenVPN session evidence and revocation runbook
+
+This document is an operator procedure for the durable OpenVPN accounting and
+revocation safeguards added to PHOENIX. It is a safety barrier, not a proof that
+every byte was observed. Keep backups and logs before any change.
+
+## What the dashboard warnings mean
+
+| Warning | Meaning | Required action |
+| --- | --- | --- |
+| OpenVPN session evidence incident requires manual review | A hook could not publish evidence, saw an invalid counter, or found conflicting/duplicate files. | Stop relying on quota for the affected listener; inspect the incident and reconcile. |
+| OpenVPN sessions without final usage evidence require review | A `client-connect` record has no matching `client-disconnect` record. Final absolute counters are unknown. | Do not reset, delete or reduce quota for the owner. Look for an active session, a killed daemon, or a lost hook. |
+| daemon stopped or session changed/disappeared | A status poll saw a counter decrease, a changed client ID or a vanished client. | Treat final usage as unverified; use independent evidence. |
+
+An absent warning is not proof of completeness: a panel restart clears
+process-local warnings, and a session that ends without a hook leaves only the
+durable warning described above.
+
+## Where the evidence lives
+
+Paths are relative to the configured binary folder (default `bin/`):
+
+```
+openvpn/<inbound-id>/session-evidence/records/<session>.open
+openvpn/<inbound-id>/session-evidence/records/<session>.close
+openvpn/<inbound-id>/session-evidence/incidents/
+openvpn/<inbound-id>/client-allowlist
+openvpn/<inbound-id>/client-revocations
+openvpn/<inbound-id>/retired-certificates/
+```
+
+The `.open` record contains the common name, OpenVPN session ID, daemon
+generation, inbound ID, peer address and certificate digest. The `.close`
+record contains the final absolute received/sent counters. Files are fsynced,
+published with a hard link and never overwritten. `.tmp.*` files mean a hook
+was interrupted; keep them as evidence until reviewed. The allowlist contains
+colon-separated certificate SHA-256 digests accepted for **new** client
+authentication. The revision-independent `client-revocations` deny list is
+written before the allowlist and survives a daemon restart or re-attachment;
+a revoked digest is never added back automatically. Retired certificates preserve public evidence after a local
+certificate is pruned; they do not revoke a profile.
+
+## Safe recovery sequence
+
+1. **Freeze quota-sensitive operations.** While any incident or unclosed record
+   exists, PHOENIX rejects resets, client/inbound removal and quota reduction
+   for affected identities. Do not work around these guards with direct SQL.
+2. **Preserve evidence.** Back up the database, the whole `openvpn/<id>`
+   directory, panel logs, management observations and any receipts/journals.
+   Restrict permissions: emails, counters and certificates are sensitive.
+3. **Identify the session.** Read the `.open`/`.close` pair, the daemon
+   generation, the incident text and the corresponding `client_traffics` row.
+   The committed checkpoint lives in the GORM table
+   `open_vpn_session_counters` (`session_id`, `email`, `inbound_id`,
+   `rx_bytes`, `tx_bytes`). A checkpoint is evidence of what was already
+   billed, not proof of the missing tail.
+4. **Stop further traffic for the affected listener** if uncertain. For an
+   active client, use `POST /panel/api/openvpn/revoke` with
+   `{"email":"user@example.com"}` as superadmin. It removes the current digest
+   from the allowlist and kills sessions using numeric client IDs observed in
+   a live management status, then verifies that those IDs disappeared. A
+   `SUCCESS` callback alone is not proof of termination. The endpoint refuses
+   to claim success when generation or ID evidence is missing.
+5. **Wait for the next accounting tick.** The job commits closed-session
+   evidence under the allocation lock and a durable poll marker. A replay after
+   a crash adds zero bytes because the checkpoint is in the same transaction.
+   If the marker remains, review the journal and database receipt before
+   retrying; never delete a marker merely to clear a warning.
+6. **Reconcile missing final evidence from independent records** (management
+   logs, daemon logs, node counters, receipts, backups). If no trustworthy
+   source exists, document that usage cannot be reconstructed. Do not invent
+   bytes and do not release capacity on a guess.
+7. **Only then clear durable state.** After documenting the decision and
+   confirming the corresponding checkpoint transaction, remove the reviewed
+   incident or stale `.open` file. Acknowledge completed session files are
+   removed automatically by the job after a successful commit. Restarting the
+   panel is not a resolution step.
+
+## Migration notes
+
+Certificates pruned before the allowlist existed cannot be reconstructed from
+the new archive; the public certificate archive only covers certificates
+pruned by the current code. Consider rotating the inbound CA and reissuing
+profiles when old profiles must be invalidated. Existing sessions are not
+re-authenticated by `tls-verify`, so a client admitted before migration can
+continue forwarding traffic until it is disconnected or the listener is
+restricted.
+
+## Known limits
+
+- The spool is local to one host and does not fence a privileged filesystem
+  writer or follow a backup to another host.
+- A crash before the first fsync, simultaneous database and filesystem loss,
+  and a session that ends before any hook runs cannot be recovered here.
+- The daemon generation binds evidence to an epoch but is not cryptographic
+  attestation; the allowlist is a separate fail-closed authentication control.
+- OpenVPN versions, DCO and cross-host/multi-panel scenarios need separate
+  validation before production sign-off. Keep PRs in draft until those tests
+  and a security review are complete.

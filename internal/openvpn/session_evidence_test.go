@@ -140,6 +140,12 @@ func TestTLSVerifierFailsClosed(t *testing.T) {
 	if err := verify("1", ""); err != nil {
 		t.Fatalf("intermediate verification should not require client digest: %v", err)
 	}
+	if err := writeConfig(Instance{Id: 743, Port: 1194}, 1234); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckSessionEvidenceIncidents(); err == nil {
+		t.Fatal("missing configured allowlist did not raise a durable incident")
+	}
 }
 
 func TestServerConfigInstallsHooks(t *testing.T) {
@@ -195,5 +201,32 @@ func TestManagementDeltasAreSuppressedForHookedSessions(t *testing.T) {
 	}
 	if len(inbounds) != 1 || inbounds[0].Up != 1234 || inbounds[0].Down != 5678 {
 		t.Fatalf("inbound aggregate missing: %+v", inbounds)
+	}
+}
+
+func TestStatusSurfacesDurableEvidenceWarnings(t *testing.T) {
+	t.Setenv("XUI_BIN_FOLDER", t.TempDir())
+	m := &Manager{}
+	if status := m.Status(); status.Error != "" {
+		t.Fatalf("unexpected warning on clean spool: %q", status.Error)
+	}
+	session := strings.Repeat("cc", 16)
+	writeOpenVPNFixture := func(name, data string) {
+		t.Helper()
+		path := filepath.Join(openvpnDir(), "748", evidenceRoot, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeOpenVPNFixture("records/"+session+".open", "session="+session+"\ncommon_name=alice@example.test\ninbound=748\ngeneration="+strings.Repeat("a", 32)+"\n")
+	if status := m.Status(); !strings.Contains(status.Error, "sessions without final usage evidence") {
+		t.Fatalf("open session warning missing: %q", status.Error)
+	}
+	writeOpenVPNFixture("incidents/failure.1", "hook failed\n")
+	if status := m.Status(); !strings.Contains(status.Error, "session evidence incident") {
+		t.Fatalf("durable incident warning missing: %q", status.Error)
 	}
 }

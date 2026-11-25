@@ -129,7 +129,9 @@ inbound data directory. A crash before the first fsync, simultaneous database
 and filesystem loss, and cross-host restore are outside this design. The
 generation value binds evidence to a daemon epoch but is not a cryptographic
 attestation of the client certificate; the authorization allowlist is a
-separate, fail-closed control.
+separate, fail-closed control. See `docs/openvpn-session-recovery.md` for the
+operator procedure and the exact conditions under which removal, quota reset
+and quota reduction are refused.
 
 ## Local OpenVPN removal fence
 

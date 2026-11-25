@@ -228,6 +228,10 @@ func certificateDigest(cert *x509.Certificate) string {
 // separated uppercase hex; a missing or unreadable file fails closed in the
 // verifier. Existing sessions are not re-authenticated by tls-verify.
 func writeClientAllowlist(dir string, clients []string) error {
+	revoked, err := loadRevokedDigests(dir)
+	if err != nil {
+		return err
+	}
 	var b strings.Builder
 	for _, email := range clients {
 		crt, key := clientFiles(dir, email)
@@ -235,7 +239,11 @@ func writeClientAllowlist(dir string, clients []string) error {
 		if err != nil {
 			return fmt.Errorf("openvpn: authorize %q: %w", email, err)
 		}
-		b.WriteString(certificateDigest(cert) + "\n")
+		digest := certificateDigest(cert)
+		if revoked[digest] {
+			continue
+		}
+		b.WriteString(digest + "\n")
 	}
 	root, err := os.OpenRoot(dir)
 	if err != nil {
@@ -435,13 +443,34 @@ func CheckSessionEvidenceIncidents() error {
 		dir := filepath.Join(entry.Name(), evidenceRoot, evidenceInc)
 		files, err := fs.ReadDir(root.FS(), dir)
 		if errors.Is(err, os.ErrNotExist) {
-			continue
+			files = nil
 		}
-		if err != nil {
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 		if len(files) > 0 {
 			return fmt.Errorf("openvpn: %d unresolved session evidence incident(s) for inbound %s require manual review", len(files), entry.Name())
+		}
+		// A configured daemon whose authorization files disappeared must be
+		// visible to operators even though tls-verify itself fails closed.
+		conf := filepath.Join(entry.Name(), "openvpn.conf")
+		if _, err := root.Lstat(conf); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return err
+		}
+		for _, required := range []string{"client-allowlist", "tls-verify", "client-connect", "client-disconnect"} {
+			path := filepath.Join(entry.Name(), required)
+			info, err := root.Lstat(path)
+			if err != nil {
+				return fmt.Errorf("openvpn: inbound %s missing %s; manual review required", entry.Name(), required)
+			}
+			if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
+				return fmt.Errorf("openvpn: inbound %s has unsafe %s; manual review required", entry.Name(), required)
+			}
+		}
+		if _, err := loadRevokedDigests(filepath.Join(openvpnDir(), entry.Name())); err != nil {
+			return fmt.Errorf("openvpn: inbound %s revocation state: %w", entry.Name(), err)
 		}
 	}
 	return nil
@@ -516,8 +545,77 @@ func AckSessionEvidence(sample SessionEvidence) error {
 	return syncDir(root, filepath.Dir(sample.Paths[0]))
 }
 
-// ActiveSessionEmails returns CNs whose admission record is recent without a
-// matching final record. Management deltas for those CNs are deliberately
+// CheckClientSessionEvidence fences quota-sensitive removal for the given
+// accounting identities. Any unresolved hook incident blocks all such
+// operations; an admitted session without final counters blocks its owner.
+// Neither condition is itself a measurement, and neither is cleared merely by
+// restarting the panel.
+func CheckClientSessionEvidence(emails []string) error {
+	if err := CheckSessionEvidenceIncidents(); err != nil {
+		return err
+	}
+	wanted := make(map[string]bool, len(emails))
+	for _, email := range emails {
+		key := strings.ToLower(strings.TrimSpace(email))
+		if key != "" {
+			wanted[key] = true
+		}
+	}
+	if len(wanted) == 0 {
+		return nil
+	}
+	root, err := os.OpenRoot(openvpnDir())
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	entries, err := fs.ReadDir(root.FS(), ".")
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		records := filepath.Join(entry.Name(), evidenceRoot, evidenceRecords)
+		files, err := fs.ReadDir(root.FS(), records)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		for _, file := range files {
+			if !strings.HasSuffix(file.Name(), ".open") {
+				continue
+			}
+			session := strings.TrimSuffix(file.Name(), ".open")
+			if _, err := root.Lstat(filepath.Join(records, session+".close")); err == nil {
+				continue
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			data, err := root.ReadFile(filepath.Join(records, file.Name()))
+			if err != nil {
+				return err
+			}
+			fields, err := parseSessionFields(data)
+			if err != nil {
+				return fmt.Errorf("openvpn: unreadable session evidence %q", session)
+			}
+			if wanted[strings.ToLower(strings.TrimSpace(fields["common_name"]))] {
+				return fmt.Errorf("openvpn: client %q has a session without final usage evidence; reconcile before removal", fields["common_name"])
+			}
+		}
+	}
+	return nil
+}
+
+// ActiveSessionEmails returns CNs whose admission record is not yet paired
+// with final evidence. Management deltas for those CNs are deliberately
 // suppressed: their complete usage must come from the durable final counter.
 func ActiveSessionEmails() map[string]bool {
 	out := make(map[string]bool)

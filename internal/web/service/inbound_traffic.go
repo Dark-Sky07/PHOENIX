@@ -1178,6 +1178,9 @@ func (s *InboundService) delClientStatsByEmails(tx *gorm.DB, emails []string) er
 }
 
 func (s *InboundService) ResetClientTrafficByEmail(clientEmail string) error {
+	if err := rejectUnverifiedOpenVPNReset([]string{clientEmail}); err != nil {
+		return err
+	}
 	return submitTrafficWrite(func() error {
 		return database.GetDB().Transaction(func(tx *gorm.DB) error {
 			if err := closeResellerTrafficWindowTx(tx, clientEmail); err != nil {
@@ -1205,6 +1208,9 @@ func (s *InboundService) ResetClientTraffic(id int, clientEmail string) (needRes
 func (s *InboundService) resetClientTrafficLocked(id int, clientEmail string) (bool, error) {
 	needRestart := false
 
+	if err := rejectUnverifiedOpenVPNReset([]string{clientEmail}); err != nil {
+		return false, err
+	}
 	if err := rejectNegativeTrafficEvidence(database.GetDB(), []string{clientEmail}); err != nil {
 		return false, err
 	}
@@ -1319,6 +1325,9 @@ func (s *InboundService) resetClientTrafficLocked(id int, clientEmail string) (b
 }
 
 func (s *InboundService) ResetAllTraffics() error {
+	if err := rejectUnverifiedOpenVPNReset(nil); err != nil {
+		return err
+	}
 	return submitTrafficWrite(func() error {
 		return s.resetAllTrafficsLocked()
 	})
@@ -1353,6 +1362,9 @@ func (s *InboundService) resetAllTrafficsLocked() error {
 }
 
 func (s *InboundService) ResetInboundTraffic(id int) error {
+	if err := rejectUnverifiedOpenVPNReset(nil); err != nil {
+		return err
+	}
 	return submitTrafficWrite(func() error {
 		db := database.GetDB()
 		if err := db.Model(model.Inbound{}).

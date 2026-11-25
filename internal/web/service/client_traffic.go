@@ -14,6 +14,9 @@ import (
 )
 
 func (s *ClientService) ResetTrafficByEmail(inboundSvc *InboundService, email string) (bool, error) {
+	if err := rejectUnverifiedOpenVPNReset([]string{email}); err != nil {
+		return false, err
+	}
 	if email == "" {
 		return false, common.NewError("client email is required")
 	}
@@ -32,6 +35,9 @@ func (s *ClientService) ResetTrafficByEmail(inboundSvc *InboundService, email st
 // complete association set. Because the traffic row is shared by canonical
 // email, a client with any out-of-scope association is rejected as a no-op.
 func (s *ClientService) ResetTrafficByEmailForInbounds(inboundSvc *InboundService, email string, inboundIDs []int) (bool, error) {
+	if err := rejectUnverifiedOpenVPNReset([]string{email}); err != nil {
+		return false, err
+	}
 	if email == "" {
 		return false, common.NewError("client email is required")
 	}
@@ -109,6 +115,9 @@ func (s *ClientService) resetTrafficForInboundIDs(inboundSvc *InboundService, re
 // skipped instead of allowing a reseller reset to erase another tenant's
 // usage.
 func (s *ClientService) BulkResetTrafficForInbounds(inboundSvc *InboundService, emails []string, inboundIDs []int) (int, bool, error) {
+	if err := rejectUnverifiedOpenVPNReset(emails); err != nil {
+		return 0, false, err
+	}
 	if len(emails) == 0 || len(inboundIDs) == 0 {
 		return 0, false, nil
 	}
@@ -160,6 +169,9 @@ func allInboundIDsInScope(current, allowed []int) bool {
 }
 
 func (s *ClientService) BulkResetTraffic(inboundSvc *InboundService, emails []string) (int, error) {
+	if err := rejectUnverifiedOpenVPNReset(emails); err != nil {
+		return 0, err
+	}
 	if len(emails) == 0 {
 		return 0, nil
 	}
@@ -221,6 +233,9 @@ func (s *ClientService) BulkResetTraffic(inboundSvc *InboundService, emails []st
 }
 
 func (s *ClientService) ResetAllClientTraffics(inboundSvc *InboundService, id int) error {
+	if err := rejectUnverifiedOpenVPNReset(nil); err != nil {
+		return err
+	}
 	return submitTrafficWrite(func() error {
 		return s.resetAllClientTrafficsLocked(id)
 	})
@@ -279,6 +294,9 @@ func (s *ClientService) resetAllClientTrafficsLocked(id int) error {
 }
 
 func (s *ClientService) ResetAllTraffics() (bool, error) {
+	if err := rejectUnverifiedOpenVPNReset(nil); err != nil {
+		return false, err
+	}
 	var affected int64
 	err := submitTrafficWrite(func() error {
 		return database.GetDB().Transaction(func(tx *gorm.DB) error {

@@ -7,6 +7,7 @@ import (
 
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
 	"github.com/Dark-Sky07/phoenix/internal/l2tp"
+	"github.com/Dark-Sky07/phoenix/internal/openvpn"
 	"github.com/Dark-Sky07/phoenix/internal/pppvpn"
 	"gorm.io/gorm"
 )
@@ -35,7 +36,16 @@ func rejectUnprovenDaemonRemoval(db *gorm.DB, emails []string, scope []int) erro
 		}
 	}
 	if len(keys) == 0 {
+		// A hook incident can affect identities no longer linked locally.
+		// Keep the fence even for an empty removal set rather than silently
+		// clearing capacity while evidence is unresolved.
+		if err := openvpn.CheckSessionEvidenceIncidents(); err != nil {
+			return fmt.Errorf("OpenVPN removal requires reconciliation: %w", err)
+		}
 		return nil
+	}
+	if err := openvpn.CheckClientSessionEvidence(keys); err != nil {
+		return fmt.Errorf("OpenVPN removal requires reconciliation: %w", err)
 	}
 	if err := pppvpn.CheckClientSessionEvidence(keys, scope); err != nil {
 		return fmt.Errorf("PPP client removal requires reconciliation: %w", err)
