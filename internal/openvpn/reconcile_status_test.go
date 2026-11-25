@@ -103,3 +103,43 @@ func TestStopFailuresRetainManagedProcessAndRules(t *testing.T) {
 		})
 	}
 }
+
+func TestStoppedDaemonMarksFinalTrafficUnverified(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		port        int
+		wantWarning bool
+	}{
+		{"previously started", 12345, true},
+		{"failed before start", 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			original := GetNetworkManager()
+			networkMgr = newTestNetworkManager(newFakeFirewall())
+			t.Cleanup(func() { networkMgr = original })
+			m := &Manager{procs: map[int]*managed{1: {proc: &Process{}, mgmtPort: tc.port}}}
+			m.mu.Lock()
+			err := m.stopManagedLocked(1)
+			m.mu.Unlock()
+			if err != nil {
+				t.Fatal(err)
+			}
+			m.Resume()
+			got := strings.Contains(m.Status().Error, "final usage is unverified")
+			if got != tc.wantWarning {
+				t.Fatalf("warning=%v want %v: %+v", got, tc.wantWarning, m.Status())
+			}
+		})
+	}
+}
+
+func TestDeadStartedDaemonMarksFinalTrafficUnverified(t *testing.T) {
+	m := &Manager{procs: map[int]*managed{1: {proc: &Process{}, mgmtPort: 12345}}}
+	if _, _, err := m.CollectTrafficWithErrors(); err != nil {
+		t.Fatal(err)
+	}
+	m.Resume()
+	if status := m.Status().Error; !strings.Contains(status, "final usage is unverified") {
+		t.Fatalf("daemon exit was not visible: %q", status)
+	}
+}

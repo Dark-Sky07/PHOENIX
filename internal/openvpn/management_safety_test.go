@@ -203,6 +203,9 @@ func TestManagementPollReportsDaemonReplacement(t *testing.T) {
 	if got.err == nil || !strings.Contains(got.err.Error(), "daemon changed during management traffic poll") || len(got.inbound) != 0 || len(got.clients) != 0 {
 		t.Fatalf("discarded sample reported as complete: %+v", got)
 	}
+	if status := m.Status().Error; !strings.Contains(status, "final usage is unverified") {
+		t.Fatalf("replacement hid unverified interval: %q", status)
+	}
 	if old.lastRx["alice@example.test"] != 100 || replacement.lastRx["other@example.test"] != 9 || len(replacement.lastRx) != 1 {
 		t.Fatalf("sample mutated old or replacement baseline: old=%v new=%v", old.lastRx, replacement.lastRx)
 	}

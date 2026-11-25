@@ -1587,3 +1587,11 @@ closure from traffic lost between polls. This is diagnostic only; it does not
 block quota changes, survive panel restart, retain final counters, detect every
 reconnect or detect a session that begins and ends between polls. It is not a
 substitute for durable session identity, final accounting and recovery.
+
+The same in-process unverified-usage warning is also raised when a started
+OpenVPN daemon is stopped, found dead, or replaced during a management query.
+Even an empty last status does not rule out a short-lived session between polls,
+and a pre-stop poll does not fence traffic through termination. A failed start
+without a management port does not by itself trigger this warning. These
+observations are diagnostic: the warning is lost on panel restart, does not
+block quota operations and does not recover missing counters.

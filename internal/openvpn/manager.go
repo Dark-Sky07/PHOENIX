@@ -70,9 +70,9 @@ type Manager struct {
 	// accounting incident or proof that unobserved traffic was recovered.
 	trafficPollFailures map[int]struct{}
 	accountingFailed    bool
-	// Once a previously sampled session disappears or its counter drops,
-	// status polls alone cannot prove its final usage. Retain this warning
-	// for the process lifetime; it is not durable incident evidence.
+	// A stopped daemon, a disappeared session or a counter drop leaves final
+	// usage unproven by status polls. Retain this warning for the process
+	// lifetime; it is not durable incident evidence.
 	unverifiedSessionTraffic bool
 }
 
@@ -150,6 +150,7 @@ func (m *Manager) ensureLocked(inst Instance) error {
 		if err := cur.proc.Stop(); err != nil {
 			return fmt.Errorf("stop existing OpenVPN daemon: %w", err)
 		}
+		m.noteStoppedTrafficLocked(cur)
 		GetNetworkManager().Remove(inst.Id)
 		delete(m.procs, inst.Id)
 	}
@@ -214,6 +215,7 @@ func (m *Manager) stopManagedLocked(id int) error {
 		logger.Warningf("openvpn: inbound %d stop failed; retaining daemon and evidence: %v", id, err)
 		return fmt.Errorf("inbound %d stop failed: %w", id, err)
 	}
+	m.noteStoppedTrafficLocked(cur)
 	GetNetworkManager().Remove(id)
 	delete(m.procs, id)
 	return nil
@@ -359,7 +361,7 @@ func (m *Manager) Status() RuntimeStatus {
 		if status.Error != "" {
 			status.Error += "\n"
 		}
-		status.Error += "OpenVPN session disappeared or counters decreased; final usage is unverified"
+		status.Error += "OpenVPN daemon stopped, session disappeared or counters decreased; final usage is unverified"
 	}
 	seen := make(map[string]struct{})
 	for _, cur := range m.procs {
@@ -423,6 +425,17 @@ func (m *Manager) CollectTraffic() (inbounds []InboundTraffic, clients []ClientT
 	return
 }
 
+// noteStoppedTrafficLocked marks a successfully started daemon's final usage
+// unverified. A last status poll does not fence traffic before the stop, and a
+// session can start and end entirely between polls. Failed starts have no
+// management port and are not evidence that such a daemon actually ran.
+// m.mu must be held.
+func (m *Manager) noteStoppedTrafficLocked(man *managed) {
+	if man != nil && man.mgmtPort > 0 {
+		m.unverifiedSessionTraffic = true
+	}
+}
+
 // markTrafficPollFailureLocked records no raw socket data or client identity.
 // m.mu must be held. The flag survives reconcile/stop within this process.
 func (m *Manager) markTrafficPollFailureLocked(id int) {
@@ -458,8 +471,10 @@ func (m *Manager) CollectTrafficWithErrors() (inbounds []InboundTraffic, clients
 			probes = append(probes, probe{id: id, tag: man.tag, mgmtPort: man.mgmtPort, man: man})
 			continue
 		}
-		// Not running: its online set is stale. This mutation is protected by
-		// mu because Status and OnlineEmails read the same map.
+		// Not running: a started daemon may have exited with unpolled traffic,
+		// even if the last snapshot contained no clients.
+		m.noteStoppedTrafficLocked(man)
+		// Its online set is stale. Status and OnlineEmails use the same lock.
 		clearOnline(man)
 	}
 	m.mu.Unlock()
@@ -478,6 +493,7 @@ func (m *Manager) CollectTrafficWithErrors() (inbounds []InboundTraffic, clients
 			// callers commit any other deltas but defer reconciliation rather
 			// than treating an old daemon's counters as safely accounted for.
 			pollErr = errors.Join(pollErr, fmt.Errorf("inbound %d: daemon changed during management traffic poll", p.id))
+			m.noteStoppedTrafficLocked(p.man)
 			m.markTrafficPollFailureLocked(p.id)
 			m.mu.Unlock()
 			continue
