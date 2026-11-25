@@ -37,8 +37,8 @@ func TestRealOpenVPNProductionSessionEvidence(t *testing.T) {
 			}
 		}
 		log, _ := os.ReadFile(logPathForID(inst.Id))
-		if len(log) > 4000 {
-			log = log[len(log)-4000:]
+		if len(log) > 900 {
+			log = log[len(log)-900:]
 		}
 		t.Logf("server log tail: %s", log)
 	}()
