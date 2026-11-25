@@ -70,6 +70,10 @@ type Manager struct {
 	// accounting incident or proof that unobserved traffic was recovered.
 	trafficPollFailures map[int]struct{}
 	accountingFailed    bool
+	// Once a previously sampled session disappears or its counter drops,
+	// status polls alone cannot prove its final usage. Retain this warning
+	// for the process lifetime; it is not durable incident evidence.
+	unverifiedSessionTraffic bool
 }
 
 // RuntimeStatus is the small, secret-free snapshot exposed by the dashboard.
@@ -351,6 +355,12 @@ func (m *Manager) Status() RuntimeStatus {
 		}
 		status.Error += "OpenVPN traffic accounting unavailable; pending data or recovery may require review"
 	}
+	if m.unverifiedSessionTraffic {
+		if status.Error != "" {
+			status.Error += "\n"
+		}
+		status.Error += "OpenVPN session disappeared or counters decreased; final usage is unverified"
+	}
 	seen := make(map[string]struct{})
 	for _, cur := range m.procs {
 		if cur.proc != nil && cur.proc.IsRunning() {
@@ -483,6 +493,21 @@ func (m *Manager) CollectTrafficWithErrors() (inbounds []InboundTraffic, clients
 		// Stage the whole daemon snapshot before touching baselines or emitting
 		// client deltas. Saturating the aggregate silently loses traffic and
 		// committing only a prefix would make a retry double-count that prefix.
+		unverified := false
+		if man.haveLast {
+			for cn, previousRx := range man.lastRx {
+				current, ok := list[cn]
+				previousTx, txOK := man.lastTx[cn]
+				if !ok || !txOK || current.Rx < previousRx || current.Tx < previousTx {
+					unverified = true
+				}
+			}
+			for cn := range man.lastTx {
+				if _, ok := man.lastRx[cn]; !ok {
+					unverified = true
+				}
+			}
+		}
 		up, down := int64(0), int64(0)
 		newOnline := make(map[string]bool, len(list))
 		newRx, newTx := make(map[string]int64, len(list)), make(map[string]int64, len(list))
@@ -524,6 +549,7 @@ func (m *Manager) CollectTrafficWithErrors() (inbounds []InboundTraffic, clients
 		}
 		clients = append(clients, stagedClients...)
 		delete(m.trafficPollFailures, p.id)
+		m.unverifiedSessionTraffic = m.unverifiedSessionTraffic || unverified
 		man.lastRx, man.lastTx = newRx, newTx
 		man.online = newOnline
 		man.haveLast = true

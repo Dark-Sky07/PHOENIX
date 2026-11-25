@@ -341,3 +341,46 @@ func TestPollFailureStatusSurvivesUnrelatedSuccessAndResume(t *testing.T) {
 		t.Fatalf("successful same-inbound poll not reflected: %q", status)
 	}
 }
+
+func TestUnverifiedOpenVPNSessionUsageRemainsVisible(t *testing.T) {
+	for _, event := range []string{"disappeared", "received decreased", "sent decreased"} {
+		t.Run(event, func(t *testing.T) {
+			server := &fakeMgmtServer{clients: map[string]clientCounters{"private@example.test": {Rx: 100, Tx: 200}}}
+			server.start(t)
+			defer server.close()
+			m := &Manager{procs: map[int]*managed{1: {tag: "vpn", mgmtPort: server.port}}}
+			if _, _, err := m.CollectTrafficWithErrors(); err != nil {
+				t.Fatal(err)
+			}
+			server.setClient("private@example.test", clientCounters{Rx: 110, Tx: 210})
+			if _, _, err := m.CollectTrafficWithErrors(); err != nil || m.Status().Error != "" {
+				t.Fatalf("normal increase caused warning: %q %v", m.Status().Error, err)
+			}
+			switch event {
+			case "disappeared":
+				server.clearClients()
+			case "received decreased":
+				server.setClient("private@example.test", clientCounters{Rx: 2, Tx: 220})
+			case "sent decreased":
+				server.setClient("private@example.test", clientCounters{Rx: 120, Tx: 2})
+			}
+			if _, _, err := m.CollectTrafficWithErrors(); err != nil {
+				t.Fatal(err)
+			}
+			status := m.Status().Error
+			if !strings.Contains(status, "final usage is unverified") || strings.Contains(status, "private@example.test") {
+				t.Fatalf("missing or unsafe warning: %q", status)
+			}
+			// A later successful status or a resume does not prove the missing
+			// interval was accounted for and must not clear this warning.
+			m.Resume()
+			server.setClient("private@example.test", clientCounters{Rx: 300, Tx: 300})
+			if _, _, err := m.CollectTrafficWithErrors(); err != nil {
+				t.Fatal(err)
+			}
+			if status = m.Status().Error; !strings.Contains(status, "final usage is unverified") {
+				t.Fatalf("later success hid unverified usage: %q", status)
+			}
+		})
+	}
+}

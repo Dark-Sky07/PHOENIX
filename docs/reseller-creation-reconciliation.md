@@ -1577,3 +1577,13 @@ accounting operation clears this operational warning; tests exercise a failed
 write, exact-batch retry and a foreign marker without a poll. The warning is not
 itself a durable incident and clearing it does not prove the accounting history
 complete. Existing marker and journal rules continue to govern recovery.
+
+When an OpenVPN client previously present in a valid management snapshot is
+absent in a later valid snapshot, or either cumulative counter decreases, the
+service status now retains an in-process warning that final usage is unverified.
+A subsequent successful poll or resume does not clear it. A normal disconnect
+can produce this warning: status alone cannot distinguish fully accounted
+closure from traffic lost between polls. This is diagnostic only; it does not
+block quota changes, survive panel restart, retain final counters, detect every
+reconnect or detect a session that begins and ends between polls. It is not a
+substitute for durable session identity, final accounting and recovery.
