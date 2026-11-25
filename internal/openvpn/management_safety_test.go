@@ -25,6 +25,11 @@ func TestManagementStatusFormatsAndUnsafeRows(t *testing.T) {
 		{"status1", "OpenVPN CLIENT LIST\nUpdated,now\nCommon Name,Real Address,Bytes Received,Bytes Sent,Connected Since\nalice@example.test,203.0.113.1:2222,1234,5678,now\nROUTING TABLE\nVirtual Address,Common Name,Real Address,Last Ref\n10.8.0.2,alice@example.test,203.0.113.1:2222,now\nGLOBAL STATS\nEND\n", 1, false},
 		{"truncated", tabHeader + tabClient, 0, true},
 		{"duplicate header column", "HEADER\tCLIENT_LIST\tCommon Name\tBytes Received\tBytes Sent\tBytes Sent\nEND\n", 0, true},
+		{"duplicate client header", tabHeader + tabClient + tabHeader + "END\n", 0, true},
+		{"conflicting client header", tabHeader + "HEADER\tCLIENT_LIST\tCommon Name\tBytes Sent\tBytes Received\nEND\n", 0, true},
+		{"mixed structured and space rows", tabHeader + "CLIENT_LIST alice@example.test 203.0.113.1 10.8.0.2 1234 5678 179\nEND\n", 0, true},
+		{"duplicate legacy header", "<CLIENT_LIST HEADER ID Common Name Real Address Virtual Address Bytes Received Bytes Sent Connected Since\n<CLIENT_LIST HEADER ID Common Name Real Address Virtual Address Bytes Received Bytes Sent Connected Since\n<END\n", 0, true},
+		{"mixed legacy and structured headers", "<CLIENT_LIST HEADER ID Common Name Real Address Virtual Address Bytes Received Bytes Sent Connected Since\n" + tabHeader + "END\n", 0, true},
 		{"invalid counter", tabHeader + strings.Replace(tabClient, "1234", "bad", 1) + "END\n", 0, true},
 		{"counter outside signed range", tabHeader + strings.Replace(tabClient, "1234", "9223372036854775808", 1) + "END\n", 0, true},
 		{"legacy bad counter before numeric fields", "CLIENT_LIST alice@example.test 203.0.113.1 10.8.0.2 bad 1234 5678 179\nEND\n", 0, true},
@@ -105,6 +110,8 @@ func TestStatusThreePollRetainsBaselineOnInvalidResponse(t *testing.T) {
 		tabHeader + strings.Replace(tabClient, "1234", "9223372036854775808", 1) + "END\n",
 		"CLIENT_LIST alice@example.test 203.0.113.1 10.8.0.2 bad 1234 5678 179\nEND\n",
 		tabHeader + "CLIENT_LIST\t\nEND\n",
+		tabHeader + tabClient + "HEADER\tCLIENT_LIST\tCommon Name\tBytes Sent\tBytes Received\nEND\n",
+		tabHeader + "CLIENT_LIST alice@example.test 203.0.113.1 10.8.0.2 1234 5678 179\nEND\n",
 		"OpenVPN CLIENT LIST\nCommon Name,Real Address,Bytes Received,Bytes Sent,Connected Since\nalice@example.test\nEND\n",
 	} {
 		mu.Lock()
@@ -119,7 +126,7 @@ func TestStatusThreePollRetainsBaselineOnInvalidResponse(t *testing.T) {
 	response = tabHeader + strings.Replace(tabClient, "1234", "1300", 1) + "END\n"
 	count := len(commands)
 	mu.Unlock()
-	if count != 6 {
+	if count != 8 {
 		t.Fatalf("unsafe response retried with another command: %v", commands)
 	}
 	ins, clients = m.CollectTraffic()

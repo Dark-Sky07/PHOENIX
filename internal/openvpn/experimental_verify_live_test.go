@@ -204,6 +204,18 @@ sys.stdout.buffer.write(buf)
 		return strings.ReplaceAll(string(out), "\r\n", "\n")
 	}
 	status := management("status 3")
+	// Exercise the production parser against the actual daemon response, not
+	// only synthetic status fixtures. Both distinct sessions must be present.
+	parsed, err := parseClientListResponse(strings.NewReader(status))
+	if err != nil || len(parsed) != 2 {
+		t.Fatalf("production parser rejected live two-client status: %v %v\n%s", parsed, err, status)
+	}
+	if _, ok := parsed["bob@example.test"]; !ok {
+		t.Fatalf("Bob missing from live parsed status: %v", parsed)
+	}
+	if _, ok := parsed["carol@example.test"]; !ok {
+		t.Fatalf("Carol missing from live parsed status: %v", parsed)
+	}
 	clientIDIndex, rxIndex, txIndex := -1, -1, -1
 	clientID := ""
 	var observedRx, observedTx uint64
@@ -358,6 +370,10 @@ sys.stdout.buffer.write(buf)
 	if !strings.Contains(status, "HEADER\tCLIENT_LIST\t") || !strings.Contains(status, "\nEND\n") ||
 		strings.Contains(status, "CLIENT_LIST\tbob@example.test\t") || !strings.Contains(status, "CLIENT_LIST\tcarol@example.test\t") {
 		t.Fatalf("unexpected status after Bob reconnect attempt: %s", status)
+	}
+	parsed, err = parseClientListResponse(strings.NewReader(status))
+	if _, ok := parsed["carol@example.test"]; err != nil || !ok || len(parsed) != 1 {
+		t.Fatalf("production parser rejected live post-kill status: %v %v\n%s", parsed, err, status)
 	}
 	pingThroughCarol()
 }

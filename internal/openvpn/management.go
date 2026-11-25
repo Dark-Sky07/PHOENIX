@@ -244,6 +244,9 @@ func parseClientListResponse(reader io.Reader) (map[string]clientCounters, error
 		}
 		if strings.HasPrefix(line, "<CLIENT_LIST HEADER ") {
 			recognized = true
+			if clientEvidence {
+				return nil, fmt.Errorf("%w: duplicate or mixed client header", errUnsafeManagementResponse)
+			}
 			if !strings.Contains(line, "Common Name") || !strings.Contains(line, "Bytes Received") || !strings.Contains(line, "Bytes Sent") {
 				return nil, fmt.Errorf("%w: incomplete legacy client header", errUnsafeManagementResponse)
 			}
@@ -286,6 +289,9 @@ func parseClientListResponse(reader io.Reader) (map[string]clientCounters, error
 			isLegacyHeader := first == "common name"
 			isUnprefixedHeader := first == "client_list" && len(fields) > 1 && normalizedColumn(fields[1]) == "common name"
 			if isHeader || isLegacyHeader || isUnprefixedHeader {
+				if clientEvidence {
+					return nil, fmt.Errorf("%w: duplicate or mixed client header", errUnsafeManagementResponse)
+				}
 				parsed, ok := clientListLayoutFromHeader(fields)
 				if !ok {
 					return nil, fmt.Errorf("%w: incomplete client header", errUnsafeManagementResponse)
@@ -314,6 +320,9 @@ func parseClientListResponse(reader io.Reader) (map[string]clientCounters, error
 		}
 		// Preserve the older space-delimited management format.
 		if strings.HasPrefix(line, "<CLIENT_LIST ") || strings.HasPrefix(line, "CLIENT_LIST ") {
+			if layout != nil {
+				return nil, fmt.Errorf("%w: mixed client row formats", errUnsafeManagementResponse)
+			}
 			cn, counters, ok := parseSpaceClientRow(line)
 			if !ok {
 				return nil, fmt.Errorf("%w: invalid legacy client row", errUnsafeManagementResponse)
