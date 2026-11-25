@@ -3,11 +3,14 @@ package job
 import (
 	"fmt"
 
+	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
 	"github.com/Dark-Sky07/phoenix/internal/logger"
 	"github.com/Dark-Sky07/phoenix/internal/openvpn"
 	"github.com/Dark-Sky07/phoenix/internal/web/service"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
+
+	"github.com/google/uuid"
 )
 
 // OpenvpnJob reconciles the running openvpn daemon processes against the
@@ -118,6 +121,79 @@ func collectOpenvpnTraffic(mgr *openvpn.Manager) ([]*xray.Traffic, []*xray.Clien
 	return traffics, clients, err
 }
 
+// Closed-session evidence is committed before management polling. Its marker
+// deliberately spans a retry: if the transaction or marker deletion is
+// uncertain, other allocation paths stay fenced until a later tick proves the
+// outcome from the database checkpoint and the durable session files.
+type openvpnSessionPollState struct {
+	marker string
+	unlock func()
+}
+
+var sharedOpenvpnSessionPoll openvpnSessionPollState
+
+func (j *OpenvpnJob) commitSessionEvidence() error {
+	if database.GetDB() == nil {
+		// Unit tests without a database still exercise daemon polling; the
+		// production scheduler always has one.
+		return nil
+	}
+	samples, err := openvpn.CollectSessionEvidence()
+	if err != nil {
+		return fmt.Errorf("inspect OpenVPN session evidence: %w", err)
+	}
+	state := &sharedOpenvpnSessionPoll
+	if len(samples) == 0 && state.unlock == nil {
+		return nil
+	}
+	if state.unlock == nil {
+		unlock, err := service.LockResellerAllocation()
+		if err != nil {
+			return fmt.Errorf("lock allocation for OpenVPN sessions: %w", err)
+		}
+		id := uuid.NewString()
+		if err := service.BeginXrayPoll(id); err != nil {
+			unlock()
+			return fmt.Errorf("create OpenVPN session poll marker: %w", err)
+		}
+		state.marker, state.unlock = id, unlock
+	} else if err := service.VerifyXrayPollMarker(state.marker); err != nil {
+		return fmt.Errorf("verify OpenVPN session poll marker: %w", err)
+	}
+	if len(samples) > 0 {
+		clients := make([]*xray.ClientTraffic, 0, len(samples))
+		for _, sample := range samples {
+			clients = append(clients, &xray.ClientTraffic{
+				Email: sample.Email, Enable: true,
+				OpenVPNSessionID: sample.Key, OpenVPNInboundID: sample.InboundID,
+				OpenVPNRxBytes: sample.Rx, OpenVPNTxBytes: sample.Tx,
+			})
+		}
+		if _, _, err := j.inboundService.AddOpenVPNSessionTrafficUnderAllocationLock(state.marker, clients); err != nil {
+			return fmt.Errorf("commit OpenVPN session usage: %w", err)
+		}
+		// A failed acknowledgement is safe to retry: the checkpoint makes a
+		// replay a zero-delta operation. It must not leave a permanent fence.
+		for _, sample := range samples {
+			if err := openvpn.AckSessionEvidence(sample); err != nil {
+				logger.Warning("openvpn: retain acknowledged session evidence for retry:", err)
+			}
+		}
+	}
+	if err := service.FinishXrayPoll(state.marker); err != nil {
+		// The deletion may have committed despite the error. Keep the fence
+		// and lock until the marker is demonstrably restored.
+		if restoreErr := service.EnsureXrayPollMarker(state.marker); restoreErr != nil {
+			logger.Warning("openvpn: restore uncertain session poll marker failed:", restoreErr)
+		}
+		return fmt.Errorf("finish OpenVPN session poll marker: %w", err)
+	}
+	state.unlock()
+	state.unlock = nil
+	state.marker = ""
+	return nil
+}
+
 // Run records the observed counters before potentially restarting daemons.
 // The poll is not a drain: traffic may still arrive before or during restart.
 func (j *OpenvpnJob) Run() {
@@ -126,6 +202,10 @@ func (j *OpenvpnJob) Run() {
 		return
 	}
 	defer accounting.runMu.Unlock()
+	if err := j.commitSessionEvidence(); err != nil {
+		logger.Warning("openvpn: session evidence pending; delaying polling and reconciliation:", err)
+		return
+	}
 	mgr := openvpn.GetManager()
 	hadPending := accounting.pending != nil
 	pollErr, err := commitOpenvpnPollAndReport(accounting, mgr, func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {

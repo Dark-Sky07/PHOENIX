@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
+	"github.com/Dark-Sky07/phoenix/internal/logger"
+	"github.com/Dark-Sky07/phoenix/internal/openvpn"
 	"github.com/Dark-Sky07/phoenix/internal/web/middleware"
 	"github.com/Dark-Sky07/phoenix/internal/web/service"
 	"github.com/Dark-Sky07/phoenix/internal/web/service/panel"
@@ -121,6 +123,33 @@ func (a *APIController) initRouter(g *gin.RouterGroup) {
 
 	// Extra routes
 	api.POST("/backuptotgbot", a.BackuptoTgbot)
+	api.POST("/openvpn/revoke", a.RevokeOpenVPNClient)
+}
+
+// RevokeOpenVPNClient removes a client from the generated certificate
+// allowlist and kills its currently managed sessions. It is an explicit
+// superadmin action: the caller still has to verify final accounting before
+// releasing quota or deleting the client, and the response never claims that
+// an acknowledged kill was fully drained.
+func (a *APIController) RevokeOpenVPNClient(c *gin.Context) {
+	user := session.GetLoginUser(c)
+	if user == nil || user.Id != 1 {
+		c.JSON(http.StatusForbidden, gin.H{"success": false, "msg": "superadmin required for OpenVPN revocation"})
+		return
+	}
+	var request struct {
+		Email string `json:"email" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "msg": "invalid revocation request"})
+		return
+	}
+	if err := openvpn.GetManager().RevokeClientEverywhere(request.Email); err != nil {
+		logger.Warning("openvpn revocation failed:", err)
+		c.JSON(http.StatusConflict, gin.H{"success": false, "msg": "revocation incomplete; verify sessions and accounting before releasing quota"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "msg": "authorization revoked and current sessions confirmed terminated; verify final usage before quota changes"})
 }
 
 // BackuptoTgbot sends a backup of the panel data to Telegram bot admins.
@@ -166,6 +195,8 @@ func classifyAuditModule(relPath string) string {
 		return "xray"
 	case strings.HasPrefix(relPath, "/panel/api/server"):
 		return "server"
+	case strings.HasPrefix(relPath, "/panel/api/openvpn"):
+		return "openvpn"
 	default:
 		return "settings"
 	}

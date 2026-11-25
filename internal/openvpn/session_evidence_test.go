@@ -1,0 +1,199 @@
+package openvpn
+
+import (
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func setupEvidenceTest(t *testing.T, id int, email string) (string, string) {
+	t.Helper()
+	t.Setenv("XUI_BIN_FOLDER", t.TempDir())
+	dir := dataDirForID(id)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureServerCertLocked(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureClientCertLocked(dir, email); err != nil {
+		t.Fatal(err)
+	}
+	generation, err := newDaemonGeneration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst := Instance{Id: id, Port: 1194, Clients: []string{email}}
+	if err := writeClientAllowlist(dir, inst.Clients); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeSessionEvidenceSetup(dir, inst, generation); err != nil {
+		t.Fatal(err)
+	}
+	return dir, generation
+}
+
+func runHook(t *testing.T, dir, name string, env []string) error {
+	t.Helper()
+	cmd := exec.Command("sh", filepath.Join(dir, name))
+	cmd.Env = append(os.Environ(), env...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Logf("%s: %s", name, out)
+	}
+	return err
+}
+
+func TestSessionEvidenceHookLifecycle(t *testing.T) {
+	dir, generation := setupEvidenceTest(t, 741, "alice@example.test")
+	session := strings.Repeat("ab", 16)
+	env := []string{
+		"session_id=" + session,
+		"common_name=alice@example.test",
+		"trusted_ip=192.0.2.10",
+		"trusted_port=4000",
+		"tls_digest_sha256_0=AA:BB",
+	}
+	if err := runHook(t, dir, "client-connect", env); err != nil {
+		t.Fatalf("client-connect: %v", err)
+	}
+	if !ActiveSessionEmails()["alice@example.test"] {
+		t.Fatal("open session not visible to management suppression")
+	}
+	if sessions, err := CollectSessionEvidence(); err != nil || len(sessions) != 0 {
+		t.Fatalf("unfinished session must not be billed: %v %v", sessions, err)
+	}
+	disconnectEnv := append(append([]string{}, env...), "bytes_received=1200", "bytes_sent=3400")
+	if err := runHook(t, dir, "client-disconnect", disconnectEnv); err != nil {
+		t.Fatalf("client-disconnect: %v", err)
+	}
+	sessions, err := CollectSessionEvidence()
+	if err != nil || len(sessions) != 1 {
+		t.Fatalf("collect sessions: %v %v", sessions, err)
+	}
+	wantKey := "openvpn:741:" + generation + ":" + session
+	if sessions[0].Key != wantKey || sessions[0].Rx != 1200 || sessions[0].Tx != 3400 || sessions[0].Email != "alice@example.test" {
+		t.Fatalf("unexpected session evidence: %+v", sessions[0])
+	}
+	if err := AckSessionEvidence(sessions[0]); err != nil {
+		t.Fatal(err)
+	}
+	if sessions, err := CollectSessionEvidence(); err != nil || len(sessions) != 0 {
+		t.Fatalf("acknowledged evidence retained: %v %v", sessions, err)
+	}
+}
+
+func TestSessionEvidenceFailClosed(t *testing.T) {
+	dir, _ := setupEvidenceTest(t, 742, "bob@example.test")
+	session := strings.Repeat("cd", 16)
+	if err := runHook(t, dir, "client-disconnect", []string{
+		"session_id=" + session,
+		"common_name=bob@example.test",
+		"bytes_received=not-a-number",
+		"bytes_sent=10",
+	}); err == nil {
+		t.Fatal("invalid final counter accepted")
+	}
+	if err := CheckSessionEvidenceIncidents(); err == nil {
+		t.Fatal("hook incident not visible")
+	}
+	if _, err := CollectSessionEvidence(); err == nil {
+		t.Fatal("accounting proceeded with an unresolved incident")
+	}
+}
+
+func TestTLSVerifierFailsClosed(t *testing.T) {
+	dir, _ := setupEvidenceTest(t, 743, "carol@example.test")
+	crt, key := clientFiles(dir, "carol@example.test")
+	cert, _, err := loadKeyPair(crt, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := certificateDigest(cert)
+	verify := func(depth, digest string) error {
+		t.Helper()
+		cmd := exec.Command("sh", filepath.Join(dir, "tls-verify"), depth)
+		cmd.Env = append(os.Environ(), "tls_digest_sha256_0="+digest)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Logf("tls-verify: %s", out)
+		}
+		return err
+	}
+	if err := verify("0", digest); err != nil {
+		t.Fatalf("known certificate rejected: %v", err)
+	}
+	if err := verify("0", "00:11"); err == nil {
+		t.Fatal("unknown certificate accepted")
+	}
+	if err := os.Remove(filepath.Join(dir, "client-allowlist")); err != nil {
+		t.Fatal(err)
+	}
+	if err := verify("0", digest); err == nil {
+		t.Fatal("missing allowlist accepted")
+	}
+	// Intermediate certificates do not carry the client digest; verification
+	// of depth 0 is what enforces the client allowlist.
+	if err := verify("1", ""); err != nil {
+		t.Fatalf("intermediate verification should not require client digest: %v", err)
+	}
+}
+
+func TestServerConfigInstallsHooks(t *testing.T) {
+	inst := Instance{Id: 744, Port: 1194, Clients: []string{"dave@example.test"}}
+	conf := renderServerConf(inst, 12345)
+	for _, want := range []string{
+		"script-security 2\n", "tls-verify ", "client-connect ", "client-disconnect ",
+	} {
+		if !strings.Contains(conf, want) {
+			t.Fatalf("config missing %q:\n%s", want, conf)
+		}
+	}
+}
+
+func TestManagementDeltasAreSuppressedForHookedSessions(t *testing.T) {
+	dir, _ := setupEvidenceTest(t, 745, "alice@example.test")
+	session := strings.Repeat("ef", 16)
+	if err := runHook(t, dir, "client-connect", []string{
+		"session_id=" + session,
+		"common_name=alice@example.test",
+		"trusted_ip=203.0.113.1",
+		"trusted_port=2222",
+		"tls_digest_sha256_0=AA:BB",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = conn.Write([]byte(tabHeader + tabClient + "END\n"))
+			_ = conn.Close()
+		}
+	}()
+	port := listener.Addr().(*net.TCPAddr).Port
+	mgr := &Manager{procs: map[int]*managed{
+		745: {mgmtPort: port, tag: "inbound-745"},
+	}}
+	inbounds, clients, err := mgr.CollectTrafficWithErrors()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(clients) != 0 {
+		t.Fatalf("management deltas double-billed a hooked session: %+v", clients)
+	}
+	if len(inbounds) != 1 || inbounds[0].Up != 1234 || inbounds[0].Down != 5678 {
+		t.Fatalf("inbound aggregate missing: %+v", inbounds)
+	}
+}

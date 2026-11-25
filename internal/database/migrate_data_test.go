@@ -264,6 +264,7 @@ func TestCopyAllModelsPreservesTrafficProtocolEvidence(t *testing.T) {
 		&model.ResellerNodeCounterIncident{NodeId: -2, Email: "", Direction: "l2tp-orphan"},
 		&model.ResellerNodeCounterIncident{NodeId: -3, Email: "", Direction: "ppp-counter-decreased"},
 		&model.PPPClientTrafficCounter{SessionID: "ppp-migration", Email: "migration@example.test", InboundID: 27, RxBytes: 123, TxBytes: 321},
+		&model.OpenVPNSessionCounter{SessionID: "openvpn-migration", Email: "migration@example.test", InboundID: 28, RxBytes: 456, TxBytes: 654},
 		&model.ClientGlobalTraffic{MasterGuid: "master", Email: "migration@example.test", Up: 77},
 		&model.XrayTrafficReceipt{ID: "batch-committed", PayloadHash: "v1:test-migration-hash"},
 		&model.TuicTrafficReceipt{ID: "tuic-committed", PayloadHash: "v1:tuic-migration-hash"},
@@ -289,6 +290,10 @@ func TestCopyAllModelsPreservesTrafficProtocolEvidence(t *testing.T) {
 	var sender model.TrafficSnapshotSender
 	if err := dst.First(&sender, "id = ?", "sender-token").Error; err != nil || sender.LastSequence != 43 {
 		t.Fatalf("sender: %+v %v", sender, err)
+	}
+	var ovpn model.OpenVPNSessionCounter
+	if err := dst.First(&ovpn, "session_id = ?", "openvpn-migration").Error; err != nil || ovpn.RxBytes != 456 || ovpn.TxBytes != 654 {
+		t.Fatalf("openvpn session: %+v %v", ovpn, err)
 	}
 	var global model.ClientGlobalTraffic
 	if err := dst.First(&global, "master_guid = ?", "master").Error; err != nil || global.Up != 77 {

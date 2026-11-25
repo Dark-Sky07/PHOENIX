@@ -360,13 +360,61 @@ func pruneClientCertsLocked(dir string, keep []string) error {
 		}
 		return err
 	}
-	for _, e := range entries {
-		if e.IsDir() {
+	// Never delete an unexamined entry or the only evidence of an issued
+	// certificate. Incomplete pairs require manual reconciliation.
+	type pair struct{ crt, key string }
+	pairs := make(map[string]*pair)
+	for _, entry := range entries {
+		ext := filepath.Ext(entry.Name())
+		base := strings.TrimSuffix(entry.Name(), ext)
+		if keepSet[base] {
 			continue
 		}
-		base := strings.TrimSuffix(e.Name(), filepath.Ext(e.Name()))
-		if !keepSet[base] {
-			_ = os.Remove(filepath.Join(dir, "clients", e.Name()))
+		if (ext != ".crt" && ext != ".key") || base == "" || !entry.Type().IsRegular() {
+			return fmt.Errorf("openvpn: unexpected client material requires manual review")
+		}
+		p := pairs[base]
+		if p == nil {
+			p = &pair{}
+			pairs[base] = p
+		}
+		if ext == ".crt" {
+			p.crt = entry.Name()
+		} else {
+			p.key = entry.Name()
+		}
+	}
+	if len(pairs) == 0 {
+		return nil
+	}
+	caPath, caKey := caFiles(dir)
+	ca, _, err := loadKeyPair(caPath, caKey)
+	if err != nil {
+		return fmt.Errorf("openvpn: cannot validate retired certificates: %w", err)
+	}
+	for base, p := range pairs {
+		if p.crt == "" || p.key == "" {
+			return fmt.Errorf("openvpn: incomplete retired certificate pair requires manual review")
+		}
+		crtPath := filepath.Join(dir, "clients", p.crt)
+		keyPath := filepath.Join(dir, "clients", p.key)
+		cert, key, err := loadKeyPair(crtPath, keyPath)
+		if err != nil {
+			return fmt.Errorf("openvpn: invalid retired certificate pair: %w", err)
+		}
+		pub, ok := cert.PublicKey.(*ecdsa.PublicKey)
+		if !ok || !pub.Equal(&key.PublicKey) || cert.Subject.CommonName == "" ||
+			sanitizeCertName(cert.Subject.CommonName) != base || cert.CheckSignatureFrom(ca) != nil {
+			return fmt.Errorf("openvpn: retired certificate identity or trust mismatch; manual review required")
+		}
+		if err := archiveRetiredCertificateLocked(dir, cert); err != nil {
+			return err
+		}
+		if err := os.Remove(crtPath); err != nil {
+			return fmt.Errorf("openvpn: remove archived certificate: %w", err)
+		}
+		if err := os.Remove(keyPath); err != nil {
+			return fmt.Errorf("openvpn: remove retired private key: %w", err)
 		}
 	}
 	return nil

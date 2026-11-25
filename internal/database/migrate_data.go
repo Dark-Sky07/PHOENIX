@@ -58,6 +58,7 @@ func migrationModels() []any {
 		&model.TrafficSnapshotReceiver{},
 		&model.TrafficSnapshotSender{},
 		&model.PPPClientTrafficCounter{},
+		&model.OpenVPNSessionCounter{},
 		&model.OutboundSubscription{},
 		&model.Reseller{},
 		&model.ResellerInbound{},
@@ -81,7 +82,8 @@ func migrationModels() []any {
 // have lost replay or incident evidence. Require an upgraded source and review
 // before copying rather than silently resetting its accounting safeguards.
 func validateTrafficEvidenceTables(src *gorm.DB) error {
-	for _, m := range []any{&model.ResellerNodeCounterIncident{}, &model.ClientGlobalTraffic{}, &model.XrayTrafficReceipt{}, &model.TuicTrafficReceipt{}, &model.XrayTrafficInFlight{}, &model.PPPClientTrafficCounter{}, &model.TrafficSnapshotReceiver{}, &model.TrafficSnapshotSender{}} {
+	for _, m := range []any{&model.ResellerNodeCounterIncident{}, &model.ClientGlobalTraffic{}, &model.XrayTrafficReceipt{}, &model.TuicTrafficReceipt{}, &model.XrayTrafficInFlight{}, &model.PPPClientTrafficCounter{},
+		&model.OpenVPNSessionCounter{}, &model.TrafficSnapshotReceiver{}, &model.TrafficSnapshotSender{}} {
 		if !src.Migrator().HasTable(m) {
 			return fmt.Errorf("source missing traffic safety table %T; upgrade and reconcile before migration", m)
 		}

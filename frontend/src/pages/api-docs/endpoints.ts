@@ -2057,6 +2057,25 @@ export const sections: readonly Section[] = [
   },
 
   {
+    id: 'openvpn',
+    title: 'OpenVPN revocation',
+    description: 'Explicit superadmin revocation of an OpenVPN client. The endpoint removes the current certificate fingerprint from the daemon allowlist and kills managed sessions after validating their numeric client IDs. It does not prove final traffic or release quota.',
+    endpoints: [
+      {
+        method: 'POST',
+        path: '/panel/api/openvpn/revoke',
+        summary: 'Revoke one client on every managed OpenVPN daemon generation. A conflict response means the operation is incomplete and quota must not be released.',
+        params: [
+          { name: 'email', in: 'body (json)', type: 'string', desc: 'Client certificate CN (email).' },
+        ],
+        body: '{ "email": "alice@example.com" }',
+        response: '{ "success": true, "msg": "authorization revoked and current sessions confirmed terminated; verify final usage before quota changes" }',
+        errorResponse: '{ "success": false, "msg": "revocation incomplete; verify sessions and accounting before releasing quota" }',
+      },
+    ],
+  },
+
+  {
     id: 'websocket',
     title: 'WebSocket',
     description:
