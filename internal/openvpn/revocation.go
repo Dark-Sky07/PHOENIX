@@ -165,7 +165,11 @@ func (m *Manager) RevokeClient(email string, generation string) error {
 		// A kill acknowledgement is not proof of removal. Confirm against a
 		// fresh management snapshot instead of relying on the callback.
 		confirmed := false
-		for attempt := 0; attempt < 10; attempt++ {
+		// OpenVPN can delay instance deletion for several seconds after a
+		// client-kill when explicit-exit-notify is negotiated. Wait long
+		// enough for a fresh status to stop reporting the killed ID before
+		// claiming that termination was confirmed.
+		for attempt := 0; attempt < 75; attempt++ {
 			current, err := clientList(t.port)
 			if err != nil {
 				break
