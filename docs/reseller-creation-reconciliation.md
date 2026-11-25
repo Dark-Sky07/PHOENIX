@@ -1538,3 +1538,10 @@ set of client deltas. Other successfully observed daemons' deltas remain
 available for the journal, and the poll reports an error so reconciliation is
 deferred. This prevents silent saturation, but it neither recovers values beyond
 the supported range nor proves missing or reset session counters complete.
+
+A management response with duplicate client headers, conflicting column
+layouts, or structured headers mixed with space-delimited client rows is now
+rejected as ambiguous, retaining the old counter baseline. CI also feeds the
+actual OpenVPN `status 3` output from the isolated two-client experiment into
+the production parser before and after disconnect. This validates the tested
+Ubuntu OpenVPN format, not every supported version or snapshot completeness.
