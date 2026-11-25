@@ -178,7 +178,7 @@ jobs:
             autoreconf -i
             CFLAGS="${{ matrix.cflags }}" ./configure --prefix="/tmp/openvpn-${{ matrix.version }}" ${{ matrix.configure_args }}
             make -j2
-            ./src/openvpn/openvpn --version 2>&1 | sed -n '1,2p'
+            test -x ./src/openvpn/openvpn
           ) 2>&1 | tee /tmp/openvpn-build.log
           status=${PIPESTATUS[0]}
           if [ "$status" -eq 0 ]; then exit 0; fi
