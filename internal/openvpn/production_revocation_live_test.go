@@ -99,7 +99,7 @@ func TestRealOpenVPNProductionRevocationTerminatesSession(t *testing.T) {
 
 	clientLog := filepath.Join(t.TempDir(), "client.log")
 	clientConf := filepath.Join(t.TempDir(), "client.ovpn")
-	if err := os.WriteFile(clientConf, []byte(profile+"\ndisable-dco\nexplicit-exit-notify 1\nlog "+quoteConfigPath(clientLog)+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(clientConf, []byte(profile+clientDataChannelDirectives(binary)+"explicit-exit-notify 1\nlog "+quoteConfigPath(clientLog)+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	client := start(clientNS, clientConf)

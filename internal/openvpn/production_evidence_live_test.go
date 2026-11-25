@@ -90,7 +90,7 @@ func TestRealOpenVPNProductionSessionEvidence(t *testing.T) {
 	clientConf := filepath.Join(t.TempDir(), "client.ovpn")
 	// The client uses the userspace data channel so that SIGTERM sends a clean
 	// exit notification in this CI environment; server hooks remain production.
-	if err := os.WriteFile(clientConf, []byte(profile+"\ndisable-dco\nexplicit-exit-notify 1\nlog "+quoteConfigPath(clientLog)+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(clientConf, []byte(profile+clientDataChannelDirectives(binary)+"explicit-exit-notify 1\nlog "+quoteConfigPath(clientLog)+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	client := start(clientNS, clientConf)
@@ -146,4 +146,15 @@ func TestRealOpenVPNProductionSessionEvidence(t *testing.T) {
 	if remaining, err := CollectSessionEvidence(); err != nil || len(remaining) != 0 {
 		t.Fatalf("acknowledged evidence remained: %v %v", remaining, err)
 	}
+}
+
+// clientDataChannelDirectives keeps the client userspace for versions that
+// support DCO. OpenVPN 2.4 predates --disable-dco and fails config parsing if
+// the directive is present, so it uses its normal userspace data channel.
+func clientDataChannelDirectives(binary string) string {
+	out, err := exec.Command(binary, "--version").CombinedOutput()
+	if err != nil || strings.Contains(string(out), "OpenVPN 2.4.") {
+		return "\n"
+	}
+	return "\ndisable-dco\n"
 }
