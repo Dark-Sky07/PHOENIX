@@ -158,7 +158,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Build OpenVPN ${{ matrix.version }} with the userspace data channel
-        shell: bash
+        shell: bash {0}
         run: |
           set -o pipefail
           (
