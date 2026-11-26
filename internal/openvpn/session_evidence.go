@@ -586,6 +586,18 @@ func CheckSessionEvidenceIncidents() error {
 		} else if err != nil {
 			return err
 		}
+		// Directories rendered by older releases have a config but no
+		// daemon-generation marker and never installed these hooks. They are
+		// an upgrade boundary, not evidence that a hook disappeared: fail
+		// closed only after the first new render creates the marker. Without
+		// this distinction the first evidence check blocks reconciliation,
+		// so the render can never happen on an upgraded host.
+		generation := filepath.Join(entry.Name(), "daemon-generation")
+		if _, err := root.Lstat(generation); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return err
+		}
 		for _, required := range []string{"client-allowlist", "tls-verify", "client-connect", "client-disconnect"} {
 			path := filepath.Join(entry.Name(), required)
 			info, err := root.Lstat(path)
