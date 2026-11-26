@@ -28,6 +28,14 @@ _command_exists() {
     type "$1" &> /dev/null
 }
 
+# APT can be held by another administrator or unattended-upgrades. Wait for
+# the dpkg frontend lock instead of aborting the whole panel update on a
+# transient lock. Five minutes is long enough for a normal apt run and short
+# enough to surface a stuck holder without touching its lock files.
+apt_get_locked() {
+    apt-get -o DPkg::Lock::Timeout=300 "$@"
+}
+
 # Fail, log and exit script function
 _fail() {
     local msg=${1}
@@ -237,7 +245,7 @@ install_base() {
     echo -e "${green}Updating and install dependency packages...${plain}"
     case "${release}" in
         ubuntu | debian | armbian)
-            apt-get update > /dev/null 2>&1 && apt-get install -y -q cron curl tar unzip tzdata socat openssl > /dev/null 2>&1
+            apt_get_locked update > /dev/null 2>&1 && apt_get_locked install -y -q cron curl tar unzip tzdata socat openssl > /dev/null 2>&1
             ;;
         fedora | amzn | virtuozzo | rhel | almalinux | rocky | ol)
             dnf -y update > /dev/null 2>&1 && dnf install -y -q cronie curl tar unzip tzdata socat openssl > /dev/null 2>&1
@@ -259,7 +267,7 @@ install_base() {
             apk update > /dev/null 2>&1 && apk add dcron curl tar unzip tzdata socat openssl > /dev/null 2>&1
             ;;
         *)
-            apt-get update > /dev/null 2>&1 && apt install -y -q cron curl tar unzip tzdata socat openssl > /dev/null 2>&1
+            apt_get_locked update > /dev/null 2>&1 && apt_get_locked install -y -q cron curl tar unzip tzdata socat openssl > /dev/null 2>&1
             ;;
     esac
 }
@@ -302,7 +310,7 @@ install_pppvpn() {
     case "${release}" in
         ubuntu | debian | armbian | linuxmint)
             packages="pptpd ppp iptables iproute2 python3 python3-venv python3-dev build-essential"
-            apt-get update && apt-get install -y -q $packages || return 1
+            apt_get_locked update && apt_get_locked install -y -q $packages || return 1
             ;;
         fedora | amzn | virtuozzo | rhel | almalinux | rocky | ol)
             packages="pptpd ppp iptables iproute python3 python3-pip python3-devel gcc"

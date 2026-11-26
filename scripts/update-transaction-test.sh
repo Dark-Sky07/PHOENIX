@@ -54,3 +54,22 @@ require('service_restart_for_config()')
 
 print("update transaction static checks passed")
 PY
+
+python3 - "$script" "${root_dir}/install-phoenix.sh" <<'PY'
+from pathlib import Path
+import sys
+
+for raw in sys.argv[1:]:
+    text = Path(raw).read_text()
+    name = Path(raw).name
+    if "apt_get_locked() {" not in text:
+        raise SystemExit(f"{name}: missing apt lock helper")
+    if "apt-get -o DPkg::Lock::Timeout=300" not in text:
+        raise SystemExit(f"{name}: apt lock helper must wait for the dpkg frontend lock")
+    for number, line in enumerate(text.splitlines(), 1):
+        if "apt-get " in line and "DPkg::Lock::Timeout" not in line:
+            raise SystemExit(f"{name}:{number}: raw apt-get bypasses the lock helper")
+        if line.lstrip().startswith("apt install"):
+            raise SystemExit(f"{name}:{number}: raw apt bypasses the lock helper")
+print("apt lock static checks passed")
+PY
