@@ -414,4 +414,5 @@ jobs:
       - name: Test PostgreSQL traffic evidence migration round-trip
         env:
           XUI_TEST_PG_DSN: postgres://phoenix:phoenix@localhost:5432/phoenix_test?sslmode=disable
-        run: go test ./internal/database -run '^TestTrafficEvidenceMigrationPostgres$' -count=1
+          PHOENIX_TEST_POSTGRES_DSN: postgres://phoenix:phoenix@localhost:5432/phoenix_test?sslmode=disable
+        run: go test ./internal/database -run '^(TestTrafficEvidenceMigrationPostgres|TestInitDBConcurrentPostgres)$' -count=1

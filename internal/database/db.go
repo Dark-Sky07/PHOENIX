@@ -4,6 +4,8 @@ package database
 
 import (
 	"bytes"
+	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -56,6 +58,50 @@ const (
 	defaultPassword = "admin"
 )
 
+// A second panel process, migrate CLI or old service still shutting down can
+// race GORM's first CREATE TYPE/INDEX during AutoMigrate. PostgreSQL reports
+// that race as SQLSTATE 23505 on pg_type/pg_index. Serialize schema migration
+// across processes on a session advisory lock; the lock is distinct from the
+// traffic-allocation key used by the quota path.
+const schemaMigrationAdvisoryKey int64 = 0x50484f454e4959
+
+func withPostgresSchemaMigrationLock(pool *sql.DB, migrate func() error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	conn, err := pool.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "SELECT pg_advisory_lock($1)", schemaMigrationAdvisoryKey); err != nil {
+		return err
+	}
+	defer func() {
+		_, _ = conn.ExecContext(context.Background(), "SELECT pg_advisory_unlock($1)", schemaMigrationAdvisoryKey)
+	}()
+	return migrate()
+}
+
+// isConcurrentSchemaChangeErr identifies the PostgreSQL catalog race GORM can
+// hit when two processes migrate the same fresh schema. It does not hide real
+// duplicate data or constraint violations in tables.
+func isConcurrentSchemaChangeErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if !strings.Contains(msg, "sqlstate 23505") &&
+		!strings.Contains(msg, "duplicate key value violates unique constraint") {
+		return false
+	}
+	for _, catalog := range []string{"pg_type_", "pg_index", "pg_class", "pg_constraint", "pg_namespace"} {
+		if strings.Contains(msg, catalog) {
+			return true
+		}
+	}
+	return false
+}
+
 func initModels() error {
 	if err := dropLegacyResellerInboundUniqueIndex(); err != nil {
 		return err
@@ -105,13 +151,26 @@ func initModels() error {
 		&model.ResellerNotification{},
 	}
 	for _, mdl := range models {
-		if err := db.AutoMigrate(mdl); err != nil {
-			if isIgnorableDuplicateColumnErr(err, mdl) {
-				log.Printf("Ignoring duplicate column during auto migration for %T: %v", mdl, err)
+		var migrateErr error
+		for attempt := 0; ; attempt++ {
+			migrateErr = db.AutoMigrate(mdl)
+			if migrateErr == nil {
+				break
+			}
+			if isIgnorableDuplicateColumnErr(migrateErr, mdl) {
+				log.Printf("Ignoring duplicate column during auto migration for %T: %v", mdl, migrateErr)
+				migrateErr = nil
+				break
+			}
+			if isConcurrentSchemaChangeErr(migrateErr) && attempt < 3 {
+				time.Sleep(time.Duration(attempt+1) * 200 * time.Millisecond)
 				continue
 			}
-			log.Printf("Error auto migrating model: %v", err)
-			return err
+			log.Printf("Error auto migrating model %T: %v", mdl, migrateErr)
+			return migrateErr
+		}
+		if migrateErr != nil {
+			return migrateErr
 		}
 	}
 	if err := dropLegacyForeignKeys(); err != nil {
@@ -824,19 +883,23 @@ func InitDB(dbPath string) error {
 	sqlDB.SetConnMaxLifetime(time.Hour)
 	sqlDB.SetConnMaxIdleTime(30 * time.Minute)
 
-	if err := initModels(); err != nil {
-		return err
+	bootstrap := func() error {
+		if err := initModels(); err != nil {
+			return err
+		}
+		usersEmpty, err := isTableEmpty("users")
+		if err != nil {
+			return err
+		}
+		if err := initUser(); err != nil {
+			return err
+		}
+		return runSeeders(usersEmpty)
 	}
-
-	isUsersEmpty, err := isTableEmpty("users")
-	if err != nil {
-		return err
+	if IsPostgres() {
+		return withPostgresSchemaMigrationLock(sqlDB, bootstrap)
 	}
-
-	if err := initUser(); err != nil {
-		return err
-	}
-	return runSeeders(isUsersEmpty)
+	return bootstrap()
 }
 
 func envInt(key string, def int) int {
