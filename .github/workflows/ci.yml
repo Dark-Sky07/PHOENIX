@@ -136,7 +136,7 @@ jobs:
         run: |
           set -o pipefail
           go test -c -o /tmp/phoenix-openvpn-live.test ./internal/openvpn
-          if sudo env PATH="$PATH" PHOENIX_TEST_OPENVPN_LIVE_BINARY=/usr/sbin/openvpn /tmp/phoenix-openvpn-live.test -test.run '^TestRealOpenVPN(PreviouslyIssuedProfileStillConnects|ExperimentalFingerprintAdmission|ShortSessionBetweenPolls|ProductionSessionEvidence|ProductionRevocationTerminatesSession|ProductionConcurrentAdmissionEvidence|ProductionDCOEvidence)$' -test.v 2>&1 | tee /tmp/openvpn-live.log; then exit 0; fi
+          if sudo env PATH="$PATH" PHOENIX_REQUIRE_DCO=1 PHOENIX_TEST_OPENVPN_LIVE_BINARY=/usr/sbin/openvpn /tmp/phoenix-openvpn-live.test -test.run '^TestRealOpenVPN(PreviouslyIssuedProfileStillConnects|ExperimentalFingerprintAdmission|ShortSessionBetweenPolls|ProductionSessionEvidence|ProductionRevocationTerminatesSession|ProductionConcurrentAdmissionEvidence|ProductionDCOEvidence)$' -test.v 2>&1 | tee /tmp/openvpn-live.log; then exit 0; fi
           python3 - <<'PYLOG'
           from pathlib import Path
           output = Path('/tmp/openvpn-live.log').read_text(errors='replace')[-14000:]

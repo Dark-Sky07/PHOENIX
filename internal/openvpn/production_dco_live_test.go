@@ -19,12 +19,20 @@ func TestRealOpenVPNProductionDCOEvidence(t *testing.T) {
 	if binary == "" {
 		t.Skip("PHOENIX_TEST_OPENVPN_LIVE_BINARY not configured")
 	}
+	requireDCO := os.Getenv("PHOENIX_REQUIRE_DCO") == "1"
+	skipDCO := func(reason string) {
+		t.Helper()
+		if requireDCO {
+			t.Fatalf("required DCO path unavailable: %s", reason)
+		}
+		t.Skip(reason)
+	}
 	version, err := exec.Command(binary, "--version").CombinedOutput()
 	if err != nil && !strings.Contains(string(version), "OpenVPN") {
 		t.Fatalf("read OpenVPN version: %v\n%s", err, version)
 	}
 	if strings.Contains(string(version), "OpenVPN 2.4.") {
-		t.Skip("OpenVPN 2.4 has no DCO data channel")
+		skipDCO("OpenVPN 2.4 has no DCO data channel")
 	}
 	serverNS, clientNS := setupOpenVPNLiveNamespaces(t)
 	t.Setenv("XUI_BIN_FOLDER", t.TempDir())
@@ -76,7 +84,7 @@ func TestRealOpenVPNProductionDCOEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(serverLog), "DCO device") && !strings.Contains(string(serverLog), "ovpn-dco device") {
-		t.Skip("server did not open an ovpn-dco device on this kernel")
+		skipDCO("server did not open an ovpn-dco device on this kernel")
 	}
 
 	clientLog := filepath.Join(t.TempDir(), "client.log")
@@ -97,7 +105,7 @@ func TestRealOpenVPNProductionDCOEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(data), "DCO device") && !strings.Contains(string(data), "ovpn-dco device") {
-		t.Skip("client did not open an ovpn-dco device on this kernel")
+		skipDCO("client did not open an ovpn-dco device on this kernel")
 	}
 	out, err := exec.Command("ip", "netns", "exec", clientNS, "ping", "-n", "-c", "6", "-W", "3", "10.125.0.1").CombinedOutput()
 	if err != nil {
