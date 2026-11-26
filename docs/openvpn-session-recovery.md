@@ -98,6 +98,5 @@ restricted.
   and a session that ends before any hook runs cannot be recovered here.
 - The daemon generation binds evidence to an epoch but is not cryptographic
   attestation; the allowlist is a separate fail-closed authentication control.
-- OpenVPN versions, DCO and cross-host/multi-panel scenarios need separate
-  validation before production sign-off. Keep PRs in draft until those tests
-  and a security review are complete.
+- Version-matrix and required-DCO live coverage run in CI; cross-host,
+  multi-panel and privileged-writer scenarios still need operator sign-off.

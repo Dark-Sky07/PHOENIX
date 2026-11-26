@@ -26,6 +26,10 @@ func setupEvidenceTest(t *testing.T, id int, email string) (string, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A real writeConfig persists the generation before installing hooks.
+	if err := os.WriteFile(filepath.Join(dir, "daemon-generation"), []byte(generation+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	inst := Instance{Id: id, Port: 1194, Clients: []string{email}}
 	if err := writeClientAllowlist(dir, inst.Clients); err != nil {
 		t.Fatal(err)
@@ -377,5 +381,40 @@ func TestSessionEvidenceStagingAndRevocationFaultsFailClosed(t *testing.T) {
 	}
 	if err := CheckSessionEvidenceIncidents(); err == nil {
 		t.Fatal("malformed revocation state was treated as clear")
+	}
+}
+
+// An inbound rendered by an older release has a config but none of the new
+// hook files. That must not fence the first evidence check, otherwise the
+// accounting job never reaches reconciliation and can never upgrade the
+// directory. Once the new render has created the generation marker, missing
+// hooks are again a fail-closed incident.
+func TestLegacyOpenVPNConfigDoesNotFenceUpgrade(t *testing.T) {
+	t.Setenv("XUI_BIN_FOLDER", t.TempDir())
+	dir := dataDirForID(750)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(confPathForID(750), []byte("port 1194\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckSessionEvidenceIncidents(); err != nil {
+		t.Fatalf("legacy config blocked the upgrade: %v", err)
+	}
+	if err := CheckClientSessionEvidence([]string{"legacy@example.test"}); err != nil {
+		t.Fatalf("legacy config fenced a client: %v", err)
+	}
+	if sessions, err := CollectSessionEvidence(); err != nil || len(sessions) != 0 {
+		t.Fatalf("legacy config invented evidence: %v %v", sessions, err)
+	}
+	generation, err := newDaemonGeneration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "daemon-generation"), []byte(generation+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckSessionEvidenceIncidents(); err == nil {
+		t.Fatal("upgraded directory with missing hooks was treated as clear")
 	}
 }
