@@ -130,6 +130,7 @@ func initModels() error {
 		&model.Reseller{},
 		&model.ResellerInbound{},
 		&model.ResellerClient{},
+		&model.ResellerClientMappingArchive{},
 		&model.ResellerTransaction{},
 		&model.ResellerSale{},
 		&model.ResellerCreationIntent{},

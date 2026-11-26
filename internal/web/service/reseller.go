@@ -52,6 +52,22 @@ type ResellerStat struct {
 	Expired            bool            `json:"expired"`
 	OverQuota          bool            `json:"overQuota"` // Any quota exceeded
 	Disabled           bool            `json:"disabled"`  // Auto-disabled because a quota ran out
+	// Warnings is populated only for read-only degraded snapshots. Mutations
+	// remain fail-closed and never rely on these numbers to release quota.
+	Warnings []string `json:"warnings,omitempty"`
+}
+
+// addWarning records a degraded-read warning once, preserving a stable order.
+func (s *ResellerStat) addWarning(message string) {
+	if s == nil || message == "" {
+		return
+	}
+	for _, existing := range s.Warnings {
+		if existing == message {
+			return
+		}
+	}
+	s.Warnings = append(s.Warnings, message)
 }
 
 // ResellerClientRow is a single client inside a reseller report.
@@ -152,7 +168,7 @@ func (s *ResellerService) List() ([]*ResellerStat, error) {
 	}
 	out := make([]*ResellerStat, 0, len(resellers))
 	for _, r := range resellers {
-		stat, err := s.Stat(r)
+		stat, err := s.stat(r, true)
 		if err != nil {
 			return nil, err
 		}
@@ -193,7 +209,7 @@ func (s *ResellerService) StatFor(id int) (*ResellerStat, error) {
 	if err != nil {
 		return nil, err
 	}
-	return s.Stat(reseller)
+	return s.stat(reseller, true)
 }
 
 // Add creates a reseller. The password is stored as a bcrypt hash.
@@ -1328,16 +1344,31 @@ func (s *ResellerService) ClientUsage(emails []string) (map[string]*xray.ClientT
 	return usage, nil
 }
 
-// Stat builds the live usage snapshot of one reseller.
+// Stat builds the live usage snapshot with strict reconciliation checks.
+// Callers that release quota or mutate runtime state must use this form.
 func (s *ResellerService) Stat(reseller *model.Reseller) (*ResellerStat, error) {
+	return s.stat(reseller, false)
+}
+
+// stat builds a reseller snapshot. Degraded snapshots are for read-only views:
+// known reconciliation blockers become warnings instead of hiding every
+// reseller, while all mutation paths still use the strict Stat above.
+func (s *ResellerService) stat(reseller *model.Reseller, degraded bool) (*ResellerStat, error) {
 	if reseller == nil {
 		return nil, errors.New("reseller is required")
 	}
 	db := database.GetDB()
+	baselineDegraded := false
 	if err := validateResellerNodeBaselines(db, reseller.Id); err != nil {
-		return nil, err
+		if !degraded || !isResellerReconciliationError(err) {
+			return nil, err
+		}
+		baselineDegraded = true
 	}
 	stat := &ResellerStat{Reseller: reseller, Currency: "USD"}
+	if baselineDegraded {
+		stat.addWarning("Traffic accounting needs administrator review; shown numbers may be incomplete.")
+	}
 	if err := db.Model(&model.ResellerCreationIntent{}).Where("reseller_id = ?", reseller.Id).Count(&stat.PendingCreations).Error; err != nil {
 		return nil, err
 	}
@@ -1415,7 +1446,11 @@ func (s *ResellerService) Stat(reseller *model.Reseller) (*ResellerStat, error) 
 	// treat it as free capacity until an administrator reconciles the record.
 	for _, key := range clientKeys {
 		if !seenClients[key] {
-			return nil, errors.New("reseller client mapping has no client record; reconciliation required")
+			if !degraded {
+				return nil, errors.New("reseller client mapping has no client record; reconciliation required")
+			}
+			stat.addWarning("Some reseller client mappings have no client record; their usage is excluded.")
+			break
 		}
 	}
 
@@ -1506,7 +1541,7 @@ func (s *ResellerService) Report(resellerId int) (*ResellerReport, error) {
 	if err != nil {
 		return nil, err
 	}
-	stat, err := s.Stat(reseller)
+	stat, err := s.stat(reseller, true)
 	if err != nil {
 		return nil, err
 	}

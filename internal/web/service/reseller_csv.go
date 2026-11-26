@@ -140,8 +140,19 @@ func RenderResellerSalesCSV(report *ResellerSalesReport) []byte {
 // reseller with live usage numbers. Empty limit fields mean "unlimited".
 func RenderResellerListCSV(stats []*ResellerStat) []byte {
 	w := &csvRowBuilder{}
-	w.row("id", "username", "name", "comment", "enabled", "clients", "client_limit", "online",
-		"used_gb", "allocated_gb", "traffic_limit_gb", "currency", "balance", "price_per_gb", "expiry")
+	hasWarnings := false
+	for _, stat := range stats {
+		if stat != nil && len(stat.Warnings) > 0 {
+			hasWarnings = true
+			break
+		}
+	}
+	header := []string{"id", "username", "name", "comment", "enabled", "clients", "client_limit", "online",
+		"used_gb", "allocated_gb", "traffic_limit_gb", "currency", "balance", "price_per_gb", "expiry"}
+	if hasWarnings {
+		header = append(header, "warnings")
+	}
+	w.row(header...)
 	for _, stat := range stats {
 		if stat == nil || stat.Reseller == nil {
 			continue
@@ -160,7 +171,7 @@ func RenderResellerListCSV(stats []*ResellerStat) []byte {
 		if r.TrafficLimit > 0 {
 			trafficLimit = csvGB(r.TrafficLimit)
 		}
-		w.row(
+		row := []string{
 			strconv.Itoa(r.Id),
 			csvEscape(r.Username),
 			csvEscape(r.Name),
@@ -176,7 +187,11 @@ func RenderResellerListCSV(stats []*ResellerStat) []byte {
 			strconv.FormatFloat(RoundMoney(r.Deposit-stat.Cost, currencyCode), 'f', fractionDigits, 64),
 			strconv.FormatFloat(r.PricePerGB, 'f', fractionDigits, 64),
 			csvDate(r.ExpiryTime),
-		)
+		}
+		if hasWarnings {
+			row = append(row, csvEscape(strings.Join(stat.Warnings, ";")))
+		}
+		w.row(row...)
 	}
 	return w.bytes()
 }

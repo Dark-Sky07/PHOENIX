@@ -1494,9 +1494,25 @@ export const sections: readonly Section[] = [
         method: 'GET',
         path: '/panel/api/resellers/list',
         summary:
-          'Every reseller with its live usage snapshot: inbound/client counts, allocated and consumed traffic and quota flags.',
+          'Every reseller with its live usage snapshot: inbound/client counts, allocated and consumed traffic and quota flags. Read-only views include a warnings array when reconciliation is needed; quota decisions still fail closed.',
         response:
           '{\n  "success": true,\n  "obj": [\n    {\n      "reseller": { "id": 1, "username": "reseller1", "trafficLimit": 1099511627776, "clientLimit": 100, "clientLimit": 100 },\n      "inboundCount": 2,\n      "clientCount": 12,\n      "usedTraffic": 10737418240,\n      "allocatedTraffic": 549755813888\n    }\n  ]\n}',
+      },
+      {
+        method: 'GET',
+        path: '/panel/api/resellers/reconciliation',
+        summary:
+          'Admin-only operational snapshot: counter incidents, in-flight poll markers, fallback files, traffic journals, dangling reseller client mappings and Xray API reachability. Read-only; never clears evidence.',
+        response:
+          '{\n  "success": true,\n  "obj": {\n    "available": true,\n    "danglingMappings": [],\n    "dbIncidents": [],\n    "inFlightPolls": [],\n    "fallbackFiles": [],\n    "xrayApi": { "port": 62789, "reachable": true },\n    "warnings": []\n  }\n}',
+      },
+      {
+        method: 'POST',
+        path: '/panel/api/resellers/reconciliation/repair',
+        summary:
+          'Superadmin-only, backup-first repair. Dry-run by default; body { "confirm": "RECONCILE_COUNTER_INCIDENTS", "dryRun": false } archives dangling mappings and marker files before deleting them. Traffic journals are never cleared and no service is stopped or restarted.',
+        response:
+          '{\n  "success": true,\n  "obj": { "dryRun": false, "backupDir": "/etc/x-ui/reconciliation-backups/20261126-220000.000", "archivedMappings": 1, "clearedIncidents": 1, "clearedPolls": 0, "movedFallbackFiles": 1 }\n}',
       },
       {
         method: 'GET',

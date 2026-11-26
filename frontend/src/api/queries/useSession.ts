@@ -45,6 +45,8 @@ export interface ResellerStat {
   expired: boolean;
   overQuota: boolean;
   disabled: boolean;
+  /** Present only on read-only degraded views when reconciliation is needed. */
+  warnings?: string[];
 }
 
 export interface ResellerClientRow {

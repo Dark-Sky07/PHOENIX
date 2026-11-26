@@ -51,6 +51,8 @@ jobs:
       - uses: actions/checkout@v6
       - name: Verify transactional update rollback guards
         run: bash scripts/update-transaction-test.sh
+      - name: Verify backup-first counter-incident reconciliation guards
+        run: bash scripts/reconcile-counter-incident-test.sh
       - name: Verify paired installer and management scripts
         run: cmp -s install.sh install-phoenix.sh && cmp -s phoenix.sh x-ui.sh
 
