@@ -9,12 +9,12 @@ package l2tp
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
@@ -74,24 +74,17 @@ type Instance struct {
 func (inst Instance) fingerprint() string {
 	creds := make([]string, 0, len(inst.Credentials))
 	for _, c := range inst.Credentials {
-		creds = append(creds, c.Email+"\x00"+c.Password)
+		encoded, _ := json.Marshal(c)
+		creds = append(creds, string(encoded))
 	}
 	sort.Strings(creds)
-	return strings.Join([]string{
-		strconv.Itoa(inst.Id),
-		inst.Listen,
-		strconv.Itoa(inst.Port),
-		inst.PSK,
-		inst.PoolCIDR,
-		inst.LocalIP,
-		inst.PoolStart,
-		inst.PoolEnd,
-		inst.DNS1,
-		inst.DNS2,
-		inst.OutboundInterface,
-		strconv.FormatBool(inst.RedirectGateway),
-		strings.Join(creds, "\x01"),
-	}, "|")
+	encoded, _ := json.Marshal(struct {
+		ID, Port                                                                          int
+		Listen, PSK, PoolCIDR, LocalIP, PoolStart, PoolEnd, DNS1, DNS2, OutboundInterface string
+		RedirectGateway                                                                   bool
+		Credentials                                                                       []string
+	}{inst.Id, inst.Port, inst.Listen, inst.PSK, inst.PoolCIDR, inst.LocalIP, inst.PoolStart, inst.PoolEnd, inst.DNS1, inst.DNS2, inst.OutboundInterface, inst.RedirectGateway, creds})
+	return fmt.Sprintf("%x", sha256.Sum256(encoded))
 }
 
 func (inst Instance) listenFor() string {

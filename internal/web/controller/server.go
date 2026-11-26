@@ -238,9 +238,19 @@ func (a *ServerController) updateGeofile(c *gin.Context) {
 	jsonMsg(c, I18nWeb(c, "pages.index.geofileUpdatePopover"), err)
 }
 
+// flushBeforeXrayAction refuses a dashboard stop/restart if its final
+// best-effort poll cannot be persisted. It does not fence runtime traffic
+// arriving after the poll or other service-level restart paths.
+func flushBeforeXrayAction(flush, action func() error) error {
+	if err := flush(); err != nil {
+		return fmt.Errorf("Xray traffic could not be flushed before this action: %w", err)
+	}
+	return action()
+}
+
 // stopXrayService stops the Xray service.
 func (a *ServerController) stopXrayService(c *gin.Context) {
-	err := a.serverService.StopXrayService()
+	err := flushBeforeXrayAction(job.SharedXrayTrafficJob().FlushBeforeStop, a.serverService.StopXrayService)
 	if err != nil {
 		jsonMsg(c, I18nWeb(c, "pages.xray.stopError"), err)
 		websocket.BroadcastXrayState("error", err.Error())
@@ -257,7 +267,7 @@ func (a *ServerController) stopXrayService(c *gin.Context) {
 
 // restartXrayService restarts the Xray service.
 func (a *ServerController) restartXrayService(c *gin.Context) {
-	err := a.serverService.RestartXrayService()
+	err := flushBeforeXrayAction(job.SharedXrayTrafficJob().FlushBeforeStop, a.serverService.RestartXrayService)
 	if err != nil {
 		jsonMsg(c, I18nWeb(c, "pages.xray.restartError"), err)
 		websocket.BroadcastXrayState("error", err.Error())
@@ -276,30 +286,39 @@ func (a *ServerController) restartXrayService(c *gin.Context) {
 // controls. The reconcile job is explicitly paused on stop; otherwise its
 // normal ten-second loop would start OpenVPN again immediately.
 func (a *ServerController) stopOpenVPNService(c *gin.Context) {
-	openvpn.GetManager().StopManually()
-	jsonMsg(c, "OpenVPN service stopped", nil)
+	if err := openvpn.GetManager().StopManually(); err != nil {
+		jsonMsg(c, "OpenVPN service stop failed", err)
+		return
+	}
+	jsonMsg(c, "OpenVPN stop requested", nil)
 }
 
 func (a *ServerController) startOpenVPNService(c *gin.Context) {
 	openvpn.GetManager().Resume()
 	job.NewOpenvpnJob().Run()
-	jsonMsg(c, "OpenVPN service started", nil)
+	jsonMsg(c, "OpenVPN start requested", nil)
 }
 
 func (a *ServerController) restartOpenVPNService(c *gin.Context) {
-	openvpn.GetManager().Restart()
+	if err := openvpn.GetManager().Restart(); err != nil {
+		jsonMsg(c, "OpenVPN service restart failed", err)
+		return
+	}
 	job.NewOpenvpnJob().Run()
-	jsonMsg(c, "OpenVPN service restarted", nil)
+	jsonMsg(c, "OpenVPN restart requested", nil)
 }
 
 func (a *ServerController) updateOpenVPNService(c *gin.Context) {
 	openvpn.GetManager().Resume()
 	job.NewOpenvpnJob().Run()
-	jsonMsg(c, "OpenVPN service updated", nil)
+	jsonMsg(c, "OpenVPN update requested", nil)
 }
 
 func (a *ServerController) stopL2TPService(c *gin.Context) {
-	l2tp.GetManager().StopManually()
+	if err := l2tp.GetManager().StopManually(); err != nil {
+		jsonMsg(c, "L2TP service stop failed", err)
+		return
+	}
 	jsonMsg(c, "L2TP service stopped", nil)
 }
 
@@ -310,7 +329,10 @@ func (a *ServerController) startL2TPService(c *gin.Context) {
 }
 
 func (a *ServerController) restartL2TPService(c *gin.Context) {
-	l2tp.GetManager().Restart()
+	if err := l2tp.GetManager().Restart(); err != nil {
+		jsonMsg(c, "L2TP service restart failed", err)
+		return
+	}
 	job.NewL2TPJob().Run()
 	jsonMsg(c, "L2TP service restarted", nil)
 }

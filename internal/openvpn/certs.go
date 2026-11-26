@@ -12,10 +12,16 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
 const certValidity = 10 * 365 * 24 * time.Hour
+
+// Profile downloads and daemon reconciliation operate on the same key files.
+// Serialize provisioning, reads and pruning in this process so that a profile
+// cannot mix or expose material produced for another identity.
+var certMu sync.Mutex
 
 func caFiles(dir string) (crt, key string) {
 	return filepath.Join(dir, "ca.crt"), filepath.Join(dir, "ca.key")
@@ -133,9 +139,29 @@ func loadKeyPair(crtPath, keyPath string) (*x509.Certificate, *ecdsa.PrivateKey,
 func ensureCA(dir string) (*x509.Certificate, *ecdsa.PrivateKey, error) {
 	crtPath, keyPath := caFiles(dir)
 	if crt, key, err := loadKeyPair(crtPath, keyPath); err == nil {
-		if time.Now().Before(crt.NotAfter.Add(-24 * time.Hour)) {
-			return crt, key, nil
+		pub, ok := crt.PublicKey.(*ecdsa.PublicKey)
+		if !ok || !pub.Equal(&key.PublicKey) || !crt.IsCA || crt.CheckSignatureFrom(crt) != nil ||
+			time.Now().Before(crt.NotBefore) || !time.Now().Before(crt.NotAfter.Add(-24*time.Hour)) {
+			return nil, nil, fmt.Errorf("openvpn: invalid, mismatched or expiring CA; manual review required")
 		}
+		return crt, key, nil
+	}
+	// Never replace partial, corrupt, or lost CA material while credentials
+	// still exist. Rotation requires explicit operator reconciliation.
+	serverCrt, serverKey := serverFiles(dir)
+	for _, path := range []string{crtPath, keyPath, serverCrt, serverKey} {
+		if _, err := os.Lstat(path); err == nil {
+			return nil, nil, fmt.Errorf("openvpn: missing or invalid CA material with existing evidence; manual review required")
+		} else if !os.IsNotExist(err) {
+			return nil, nil, err
+		}
+	}
+	entries, err := os.ReadDir(filepath.Join(dir, "clients"))
+	if err != nil && !os.IsNotExist(err) {
+		return nil, nil, err
+	}
+	if len(entries) != 0 {
+		return nil, nil, fmt.Errorf("openvpn: missing CA with existing client material; manual review required")
 	}
 	key, err := newKey()
 	if err != nil {
@@ -166,13 +192,31 @@ func ensureCA(dir string) (*x509.Certificate, *ecdsa.PrivateKey, error) {
 
 // ensureServerCert creates (or loads) the server keypair signed by the CA.
 func ensureServerCert(dir string) error {
+	certMu.Lock()
+	defer certMu.Unlock()
+	return ensureServerCertLocked(dir)
+}
+
+func ensureServerCertLocked(dir string) error {
 	crtPath, keyPath := serverFiles(dir)
-	if _, _, err := loadKeyPair(crtPath, keyPath); err == nil {
-		return nil
-	}
 	caCrt, caKey, err := ensureCA(dir)
 	if err != nil {
 		return err
+	}
+	if crt, key, err := loadKeyPair(crtPath, keyPath); err == nil {
+		pub, ok := crt.PublicKey.(*ecdsa.PublicKey)
+		if !ok || !pub.Equal(&key.PublicKey) || crt.CheckSignatureFrom(caCrt) != nil ||
+			time.Now().Before(crt.NotBefore) || !time.Now().Before(crt.NotAfter) {
+			return fmt.Errorf("openvpn: invalid or mismatched server certificate; manual review required")
+		}
+		return nil
+	}
+	for _, path := range []string{crtPath, keyPath} {
+		if _, err := os.Lstat(path); err == nil {
+			return fmt.Errorf("openvpn: incomplete or invalid server certificate material; manual review required")
+		} else if !os.IsNotExist(err) {
+			return err
+		}
 	}
 	key, err := newKey()
 	if err != nil {
@@ -198,9 +242,57 @@ func ensureServerCert(dir string) error {
 	return writePEM(crtPath, "CERTIFICATE", der)
 }
 
+// inspectClientCertLocked never overwrites legacy name collisions, partial
+// keypairs or inconsistent certificate/key pairs.
+func inspectClientCertLocked(dir, email string) (bool, error) {
+	if email == "" {
+		return false, fmt.Errorf("openvpn: client email is empty")
+	}
+	crtPath, keyPath := clientFiles(dir, email)
+	crt, key, err := loadKeyPair(crtPath, keyPath)
+	if err == nil {
+		pub, ok := crt.PublicKey.(*ecdsa.PublicKey)
+		if crt.Subject.CommonName != email || !ok || !pub.Equal(&key.PublicKey) {
+			return false, fmt.Errorf("openvpn: existing client certificate identity or key mismatch; manual review required")
+		}
+		return true, nil
+	}
+	for _, path := range []string{crtPath, keyPath} {
+		if _, statErr := os.Lstat(path); statErr == nil {
+			return false, fmt.Errorf("openvpn: incomplete or invalid client certificate material; manual review required")
+		} else if !os.IsNotExist(statErr) {
+			return false, statErr
+		}
+	}
+	return false, nil
+}
+
+// Fail before stopping an existing daemon if any desired identities alias on
+// disk or conflict with retained certificate evidence.
+func validateClientCertSetLocked(dir string, emails []string) error {
+	names := make(map[string]string, len(emails))
+	for _, email := range emails {
+		name := sanitizeCertName(email)
+		if prior, ok := names[name]; ok && prior != email {
+			return fmt.Errorf("openvpn: client certificate filenames collide; manual review required")
+		}
+		names[name] = email
+		if _, err := inspectClientCertLocked(dir, email); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // ensureClientCert creates (or loads) the client keypair (CN = email) signed
 // by the CA.
 func ensureClientCert(dir, email string) error {
+	certMu.Lock()
+	defer certMu.Unlock()
+	return ensureClientCertLocked(dir, email)
+}
+
+func ensureClientCertLocked(dir, email string) error {
 	if email == "" {
 		return fmt.Errorf("openvpn: client email is empty")
 	}
@@ -208,12 +300,21 @@ func ensureClientCert(dir, email string) error {
 		return err
 	}
 	crtPath, keyPath := clientFiles(dir, email)
-	if _, _, err := loadKeyPair(crtPath, keyPath); err == nil {
-		return nil
+	exists, err := inspectClientCertLocked(dir, email)
+	if err != nil {
+		return err
 	}
 	caCrt, caKey, err := ensureCA(dir)
 	if err != nil {
 		return err
+	}
+	if exists {
+		crt, _, err := loadKeyPair(crtPath, keyPath)
+		if err != nil || crt.CheckSignatureFrom(caCrt) != nil ||
+			time.Now().Before(crt.NotBefore) || !time.Now().Before(crt.NotAfter) {
+			return fmt.Errorf("openvpn: invalid or untrusted client certificate; manual review required")
+		}
+		return nil
 	}
 	key, err := newKey()
 	if err != nil {
@@ -242,6 +343,12 @@ func ensureClientCert(dir, email string) error {
 // pruneClientCerts removes client certs no longer attached to the inbound.
 // `keep` is the current client list; everything else under clients/ goes.
 func pruneClientCerts(dir string, keep []string) error {
+	certMu.Lock()
+	defer certMu.Unlock()
+	return pruneClientCertsLocked(dir, keep)
+}
+
+func pruneClientCertsLocked(dir string, keep []string) error {
 	keepSet := make(map[string]bool, len(keep))
 	for _, email := range keep {
 		keepSet[sanitizeCertName(email)] = true

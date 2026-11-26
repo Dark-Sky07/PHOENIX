@@ -2,6 +2,7 @@ package tuic
 
 import (
 	"fmt"
+	"math"
 	"sync"
 	"time"
 
@@ -15,11 +16,18 @@ type managed struct {
 	usersFP      string
 }
 
+type pendingTrafficKey struct {
+	trafficID int
+	inboundID int
+	uuid      string
+	email     string
+}
+
 type Manager struct {
 	mu             sync.Mutex
 	servers        map[int]*managed
 	lastStartErr   map[int]string
-	pendingTraffic map[string]ClientTrafficDelta
+	pendingTraffic map[pendingTrafficKey]ClientTrafficDelta
 }
 
 var (
@@ -32,7 +40,7 @@ func GetManager() *Manager {
 		managerInstance = &Manager{
 			servers:        make(map[int]*managed),
 			lastStartErr:   make(map[int]string),
-			pendingTraffic: make(map[string]ClientTrafficDelta),
+			pendingTraffic: make(map[pendingTrafficKey]ClientTrafficDelta),
 		}
 	})
 	return managerInstance
@@ -125,25 +133,31 @@ func (m *Manager) stopAndDrainLocked(mg *managed) {
 	m.appendPendingTrafficLocked(mg.server.CollectClientTraffic())
 }
 
+func addPendingTrafficBytes(current, delta int64) int64 {
+	if current < 0 || delta < 0 {
+		return -1 // Preserve invalid evidence for accounting to reject.
+	}
+	if current > math.MaxInt64-delta {
+		return math.MaxInt64
+	}
+	return current + delta
+}
+
 func (m *Manager) appendPendingTrafficLocked(deltas []ClientTrafficDelta) {
 	if m.pendingTraffic == nil {
-		m.pendingTraffic = make(map[string]ClientTrafficDelta)
+		m.pendingTraffic = make(map[pendingTrafficKey]ClientTrafficDelta)
 	}
 	for _, delta := range deltas {
-		key := delta.Email
-		if delta.TrafficID > 0 {
-			key = fmt.Sprintf("traffic:%d", delta.TrafficID)
-		}
-		if delta.TrafficID == 0 && delta.InboundID > 0 && delta.UUID != "" {
-			key = fmt.Sprintf("%d:%s", delta.InboundID, delta.UUID)
-		}
+		// Preserve every identity component when users change between drains.
+		// Merging by traffic ID alone overwrote the older source's evidence.
+		key := pendingTrafficKey{trafficID: delta.TrafficID, inboundID: delta.InboundID, uuid: delta.UUID, email: delta.Email}
 		current := m.pendingTraffic[key]
 		current.Email = delta.Email
 		current.UUID = delta.UUID
 		current.InboundID = delta.InboundID
 		current.TrafficID = delta.TrafficID
-		current.Up += delta.Up
-		current.Down += delta.Down
+		current.Up = addPendingTrafficBytes(current.Up, delta.Up)
+		current.Down = addPendingTrafficBytes(current.Down, delta.Down)
 		m.pendingTraffic[key] = current
 	}
 }

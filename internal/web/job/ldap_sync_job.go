@@ -223,15 +223,14 @@ func (j *LdapSyncJob) batchSetEnable(ib *model.Inbound, emails []string, enable 
 	changed := 0
 	for _, email := range emails {
 		ok, needRestart, err := j.clientService.SetClientEnableByEmail(&j.inboundService, email, enable)
+		// Runtime may have changed even when the database update failed.
+		restartNeeded = restartNeeded || needRestart
 		if err != nil {
 			logger.Warningf("Batch set enable failed for %s in inbound %s: %v", email, ib.Tag, err)
 			continue
 		}
 		if ok {
 			changed++
-		}
-		if needRestart {
-			restartNeeded = true
 		}
 	}
 	if changed > 0 {

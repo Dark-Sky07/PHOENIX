@@ -1,0 +1,402 @@
+package xray
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
+	"io"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	statsService "github.com/xtls/xray-core/app/stats/command"
+)
+
+// This characterizes the pinned core, not a quiescence implementation. It is
+// intentionally tied to a real VLESS TCP stream; no result here certifies the
+// behavior of other protocols, binaries, remote hosts, or concurrent writers.
+func TestXrayRemoveUserDoesNotDrainEstablishedVLESS(t *testing.T) {
+	bin := os.Getenv("XRAY_E2E_BINARY")
+	if bin == "" {
+		t.Skip("set XRAY_E2E_BINARY to the pinned Xray binary")
+	}
+	echo, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer echo.Close()
+	go func() {
+		for {
+			conn, err := echo.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				buf := make([]byte, 4096)
+				for {
+					n, err := conn.Read(buf)
+					if n > 0 {
+						if _, writeErr := conn.Write(buf[:n]); writeErr != nil {
+							return
+						}
+					}
+					if err != nil {
+						return
+					}
+				}
+			}()
+		}
+	}()
+	apiPort, userPort := freePort(t), freePort(t)
+	for userPort == apiPort {
+		userPort = freePort(t)
+	}
+	userID := uuid.MustParse("a17e367c-2074-4d3e-aaeb-fbef5dfde7e7")
+	otherID := uuid.MustParse("9b7e367c-2074-4d3e-aaeb-fbef5dfde7e7")
+	cfg := map[string]any{
+		"log": map[string]any{"loglevel": "warning"},
+		"api": map[string]any{"services": []string{"HandlerService", "StatsService"}, "tag": "api"},
+		"inbounds": []any{
+			map[string]any{"listen": "127.0.0.1", "port": apiPort, "protocol": "tunnel", "settings": map[string]any{"rewriteAddress": "127.0.0.1"}, "tag": "api"},
+			map[string]any{"listen": "127.0.0.1", "port": userPort, "protocol": "vless", "settings": map[string]any{"clients": []any{map[string]any{"id": userID.String(), "email": "quiescence@example.test"}, map[string]any{"id": otherID.String(), "email": "other@example.test"}}, "decryption": "none"}, "tag": "user-in"},
+		},
+		// The pinned Xray core blocks private destinations by default for
+		// VLESS. Allow only the local test echo port, not general private access.
+		"outbounds": []any{map[string]any{"protocol": "freedom", "settings": map[string]any{"finalRules": []any{map[string]any{"action": "allow", "network": "tcp", "ip": []string{"127.0.0.1/32"}, "port": strconv.Itoa(echo.Addr().(*net.TCPAddr).Port)}}}, "tag": "direct"}},
+		"routing":   map[string]any{"rules": []any{map[string]any{"type": "field", "inboundTag": []string{"api"}, "outboundTag": "api"}}},
+		"policy":    map[string]any{"levels": map[string]any{"0": map[string]any{"statsUserOnline": true, "statsUserUplink": true, "statsUserDownlink": true}}}, "stats": map[string]any{},
+	}
+	body, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(t.TempDir(), "xray.json")
+	if err := os.WriteFile(config, body, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bin, "-c", config)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() }()
+	waitForPort(t, apiPort)
+	waitForPort(t, userPort)
+	api := XrayAPI{}
+	if err := api.Init(apiPort); err != nil {
+		t.Fatal(err)
+	}
+	defer api.Close()
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(userPort)), 3*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	echoPort := echo.Addr().(*net.TCPAddr).Port
+	// VLESS: version, UUID, addon length, TCP command, port, IPv4 address.
+	header := append([]byte{0}, userID[:]...)
+	header = append(header, 0, 1, byte(echoPort>>8), byte(echoPort), 1, 127, 0, 0, 1)
+	if _, err := conn.Write(append(header, []byte("before")...)); err != nil {
+		t.Fatal(err)
+	}
+	response := make([]byte, 2+len("before"))
+	if _, err := io.ReadFull(conn, response); err != nil {
+		t.Fatal(err)
+	}
+	if binary.BigEndian.Uint16(response[:2]) != 0 || string(response[2:]) != "before" {
+		t.Fatalf("unexpected VLESS response %x", response)
+	}
+	// A second user's live stream must survive removing the first user.
+	other, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(userPort)), 3*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	if err := other.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	otherHeader := append([]byte{0}, otherID[:]...)
+	otherHeader = append(otherHeader, 0, 1, byte(echoPort>>8), byte(echoPort), 1, 127, 0, 0, 1)
+	if _, err := other.Write(append(otherHeader, []byte("other")...)); err != nil {
+		t.Fatal(err)
+	}
+	otherResp := make([]byte, 2+len("other"))
+	if _, err := io.ReadFull(other, otherResp); err != nil || string(otherResp[2:]) != "other" {
+		t.Fatalf("second stream failed: %x %v", otherResp, err)
+	}
+	// This bounded experiment checks that traffic sent after an initial poll
+	// remains queryable after removal; it does not prove all writers stopped.
+	var beforePoll map[string]int64
+	if os.Getenv("XRAY_EXPECT_EXPERIMENTAL_DRAIN") == "1" {
+		beforePoll = rawTestUserCounters(t, &api, "quiescence@example.test")
+		if _, err := conn.Write([]byte("unpolled")); err != nil {
+			t.Fatal(err)
+		}
+		echoed := make([]byte, len("unpolled"))
+		if _, err := io.ReadFull(conn, echoed); err != nil || string(echoed) != "unpolled" {
+			t.Fatalf("unpolled echo %q: %v", echoed, err)
+		}
+	}
+	if err := api.RemoveUser("user-in", "quiescence@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := other.Write([]byte("alive")); err != nil {
+		t.Fatal(err)
+	}
+	alive := make([]byte, len("alive"))
+	if _, err := io.ReadFull(other, alive); err != nil || string(alive) != "alive" {
+		t.Fatalf("unrelated user disconnected: %q %v", alive, err)
+	}
+	if os.Getenv("XRAY_EXPECT_EXPERIMENTAL_DRAIN") == "1" {
+		afterPoll := rawTestUserCounters(t, &api, "quiescence@example.test")
+		for _, dir := range []string{"uplink", "downlink"} {
+			if afterPoll[dir]-beforePoll[dir] < int64(len("unpolled")) {
+				t.Fatalf("%s counter lost unpolled traffic: before=%d after=%d", dir, beforePoll[dir], afterPoll[dir])
+			}
+		}
+		if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		var b [1]byte
+		_, err := conn.Read(b[:])
+		if err == nil {
+			t.Fatal("experimental core did not close the deleted user's connection")
+		}
+		if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
+			t.Fatalf("experimental core left the deleted user's connection open: %v", err)
+		}
+		// A fresh connection using the removed credential must not receive an echo.
+		retry, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(userPort)), 3*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer retry.Close()
+		if err := retry.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := retry.Write(append(header, []byte("retry")...)); err != nil {
+			return
+		}
+		if _, err := retry.Read(b[:]); err == nil {
+			t.Fatal("removed credential received data on a new connection")
+		} else if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
+			t.Fatalf("removed credential connection did not terminate: %v", err)
+		}
+		return
+	}
+	if _, err := conn.Write([]byte("after")); err != nil {
+		t.Fatal(err)
+	}
+	after := make([]byte, len("after"))
+	if _, err := io.ReadFull(conn, after); err != nil {
+		t.Fatalf("pinned core changed existing-session behavior: %v", err)
+	}
+	if string(after) != "after" {
+		t.Fatalf("unexpected response %q", after)
+	}
+}
+
+func TestXrayRemoveUserDoesNotDrainEstablishedTrojan(t *testing.T) {
+	bin := os.Getenv("XRAY_E2E_BINARY")
+	if bin == "" {
+		t.Skip("set XRAY_E2E_BINARY to the pinned Xray binary")
+	}
+	echo, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer echo.Close()
+	go func() {
+		for {
+			conn, err := echo.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				buf := make([]byte, 4096)
+				for {
+					n, err := conn.Read(buf)
+					if n > 0 {
+						if _, writeErr := conn.Write(buf[:n]); writeErr != nil {
+							return
+						}
+					}
+					if err != nil {
+						return
+					}
+				}
+			}()
+		}
+	}()
+	apiPort, userPort := freePort(t), freePort(t)
+	for userPort == apiPort {
+		userPort = freePort(t)
+	}
+	userPassword, otherPassword := "first-password", "second-password"
+	cfg := map[string]any{
+		"log": map[string]any{"loglevel": "warning"},
+		"api": map[string]any{"services": []string{"HandlerService", "StatsService"}, "tag": "api"},
+		"inbounds": []any{
+			map[string]any{"listen": "127.0.0.1", "port": apiPort, "protocol": "tunnel", "settings": map[string]any{"rewriteAddress": "127.0.0.1"}, "tag": "api"},
+			map[string]any{"listen": "127.0.0.1", "port": userPort, "protocol": "trojan", "settings": map[string]any{"clients": []any{map[string]any{"password": userPassword, "email": "quiescence@example.test"}, map[string]any{"password": otherPassword, "email": "other@example.test"}}}, "tag": "user-in"},
+		},
+		// The pinned Xray core blocks private destinations by default for
+		// VLESS. Allow only the local test echo port, not general private access.
+		"outbounds": []any{map[string]any{"protocol": "freedom", "settings": map[string]any{"finalRules": []any{map[string]any{"action": "allow", "network": "tcp", "ip": []string{"127.0.0.1/32"}, "port": strconv.Itoa(echo.Addr().(*net.TCPAddr).Port)}}}, "tag": "direct"}},
+		"routing":   map[string]any{"rules": []any{map[string]any{"type": "field", "inboundTag": []string{"api"}, "outboundTag": "api"}}},
+		"policy":    map[string]any{"levels": map[string]any{"0": map[string]any{"statsUserOnline": true}}}, "stats": map[string]any{},
+	}
+	body, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(t.TempDir(), "xray.json")
+	if err := os.WriteFile(config, body, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bin, "-c", config)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() }()
+	waitForPort(t, apiPort)
+	waitForPort(t, userPort)
+	api := XrayAPI{}
+	if err := api.Init(apiPort); err != nil {
+		t.Fatal(err)
+	}
+	defer api.Close()
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(userPort)), 3*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	echoPort := echo.Addr().(*net.TCPAddr).Port
+	// Trojan: hex SHA-224 password, CRLF, TCP, IPv4 address, port, CRLF.
+	header := trojanTestHeader(userPassword, echoPort)
+	if _, err := conn.Write(append(header, []byte("before")...)); err != nil {
+		t.Fatal(err)
+	}
+	response := make([]byte, len("before"))
+	if _, err := io.ReadFull(conn, response); err != nil {
+		t.Fatal(err)
+	}
+	if string(response) != "before" {
+		t.Fatalf("unexpected Trojan response %x", response)
+	}
+	// A second user's live stream must survive removing the first user.
+	other, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(userPort)), 3*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	if err := other.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	otherHeader := trojanTestHeader(otherPassword, echoPort)
+	if _, err := other.Write(append(otherHeader, []byte("other")...)); err != nil {
+		t.Fatal(err)
+	}
+	otherResp := make([]byte, len("other"))
+	if _, err := io.ReadFull(other, otherResp); err != nil || string(otherResp) != "other" {
+		t.Fatalf("second stream failed: %x %v", otherResp, err)
+	}
+	if err := api.RemoveUser("user-in", "quiescence@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := other.Write([]byte("alive")); err != nil {
+		t.Fatal(err)
+	}
+	alive := make([]byte, len("alive"))
+	if _, err := io.ReadFull(other, alive); err != nil || string(alive) != "alive" {
+		t.Fatalf("unrelated user disconnected: %q %v", alive, err)
+	}
+	if os.Getenv("XRAY_EXPECT_EXPERIMENTAL_DRAIN") == "1" {
+		if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		var b [1]byte
+		_, err := conn.Read(b[:])
+		if err == nil {
+			t.Fatal("experimental core did not close the deleted user's connection")
+		}
+		if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
+			t.Fatalf("experimental core left the deleted user's connection open: %v", err)
+		}
+		// A fresh connection using the removed credential must not receive an echo.
+		retry, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(userPort)), 3*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer retry.Close()
+		if err := retry.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := retry.Write(append(header, []byte("retry")...)); err != nil {
+			return
+		}
+		if _, err := retry.Read(b[:]); err == nil {
+			t.Fatal("removed credential received data on a new connection")
+		} else if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
+			t.Fatalf("removed credential connection did not terminate: %v", err)
+		}
+		return
+	}
+	if _, err := conn.Write([]byte("after")); err != nil {
+		t.Fatal(err)
+	}
+	after := make([]byte, len("after"))
+	if _, err := io.ReadFull(conn, after); err != nil {
+		t.Fatalf("pinned core changed existing-session behavior: %v", err)
+	}
+	if string(after) != "after" {
+		t.Fatalf("unexpected response %q", after)
+	}
+}
+
+func trojanTestHeader(password string, port int) []byte {
+	key := sha256.Sum224([]byte(password))
+	header := []byte(hex.EncodeToString(key[:]))
+	return append(header, '\r', '\n', 1, 1, 127, 0, 0, 1, byte(port>>8), byte(port), '\r', '\n')
+}
+
+// Query raw counters without resetting or advancing PHOENIX's baseline.
+func rawTestUserCounters(t *testing.T, api *XrayAPI, email string) map[string]int64 {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resp, err := (*api.StatsServiceClient).QueryStats(ctx, &statsService.QueryStatsRequest{Reset_: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := make(map[string]int64)
+	for _, stat := range resp.GetStat() {
+		for _, dir := range []string{"uplink", "downlink"} {
+			if stat.GetName() == "user>>>"+email+">>>traffic>>>"+dir {
+				values[dir] = stat.GetValue()
+			}
+		}
+	}
+	if len(values) != 2 {
+		t.Fatalf("missing user counters: %v", values)
+	}
+	return values
+}

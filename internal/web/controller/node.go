@@ -4,13 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"strconv"
 	"time"
 
+	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
 	"github.com/Dark-Sky07/phoenix/internal/web/middleware"
 	"github.com/Dark-Sky07/phoenix/internal/web/service"
+	"github.com/Dark-Sky07/phoenix/internal/web/service/panel"
+	"github.com/Dark-Sky07/phoenix/internal/web/session"
 
 	"github.com/gin-gonic/gin"
 )
@@ -39,8 +43,177 @@ func (a *NodeController) initRouter(g *gin.RouterGroup) {
 	g.POST("/certFingerprint", a.certFingerprint)
 	g.POST("/inbounds", a.inbounds)
 	g.POST("/probe/:id", a.probe)
+	g.POST("/trafficSnapshot/receiver", a.registerTrafficReceiver)
+	g.POST("/nodeSnapshot/producer", a.registerNodeSnapshotProducer)
+	g.GET("/nodeSnapshot/producer/:tokenId", a.getNodeSnapshotProducer)
+	g.POST("/nodeSnapshot/receiver/:id", a.registerNodeSnapshotReceiver)
+	g.POST("/trafficSnapshot/sender/:id", a.registerTrafficSender)
+	g.POST("/trafficSnapshot/sender/:id/activate", a.activateTrafficSender)
+	g.GET("/trafficSnapshot/sender/:id", a.getTrafficSender)
 	g.POST("/updatePanel", a.updatePanel)
 	g.GET("/history/:id/:metric/:bucket", a.history)
+}
+
+// Provisioning changes accounting trust and must require an interactive
+// superadmin session, never an API token or reseller session.
+func canProvisionTrafficPeers(c *gin.Context) bool {
+	if c.GetBool("api_authed") || !panel.IsSuperAdmin(session.GetLoginUser(c)) {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"success": false, "msg": "superadmin session required"})
+		return false
+	}
+	return true
+}
+
+func (a *NodeController) registerNodeSnapshotProducer(c *gin.Context) {
+	if !canProvisionTrafficPeers(c) {
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 4096)
+	var req struct {
+		TokenID    int  `json:"tokenId"`
+		Reconciled bool `json:"reconciled"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		jsonMsg(c, "invalid node snapshot producer", err)
+		return
+	}
+	state, err := service.RegisterNodeSnapshotProducer(req.TokenID, req.Reconciled)
+	if err != nil {
+		jsonMsg(c, "node snapshot producer registration failed", err)
+		return
+	}
+	jsonObj(c, gin.H{"sender": state.Sender, "generation": state.Generation, "lastSequence": state.LastSequence}, nil)
+}
+
+func (a *NodeController) getNodeSnapshotProducer(c *gin.Context) {
+	if !canProvisionTrafficPeers(c) {
+		return
+	}
+	id, err := strconv.Atoi(c.Param("tokenId"))
+	if err != nil || id <= 0 {
+		c.AbortWithStatus(http.StatusBadRequest)
+		return
+	}
+	var state model.TrafficSnapshotSender
+	if err := database.GetDB().First(&state, "id = ?", fmt.Sprintf("node-snapshot:api-token:%d", id)).Error; err != nil {
+		jsonMsg(c, "node snapshot producer not available", err)
+		return
+	}
+	jsonObj(c, gin.H{"sender": state.Sender, "generation": state.Generation, "lastSequence": state.LastSequence}, nil)
+}
+
+func (a *NodeController) registerNodeSnapshotReceiver(c *gin.Context) {
+	if !canProvisionTrafficPeers(c) {
+		return
+	}
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		c.AbortWithStatus(http.StatusBadRequest)
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 4096)
+	var req struct {
+		Sender     string `json:"sender"`
+		Generation string `json:"generation"`
+		Reconciled bool   `json:"reconciled"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		jsonMsg(c, "invalid node snapshot receiver", err)
+		return
+	}
+	if err := service.RegisterNodeSnapshotReceiver(c.Request.Context(), id, req.Sender, req.Generation, req.Reconciled); err != nil {
+		jsonMsg(c, "node snapshot receiver registration failed", err)
+		return
+	}
+	jsonMsg(c, "node snapshot receiver registered; legacy sync disabled", nil)
+}
+
+func (a *NodeController) registerTrafficReceiver(c *gin.Context) {
+	if !canProvisionTrafficPeers(c) {
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 4096)
+	var req struct {
+		TokenID    int    `json:"tokenId"`
+		Sender     string `json:"sender"`
+		Generation string `json:"generation"`
+		Reconciled bool   `json:"reconciled"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		jsonMsg(c, "invalid verified traffic receiver", err)
+		return
+	}
+	if err := service.RegisterVerifiedTrafficReceiver(req.TokenID, req.Sender, req.Generation, req.Reconciled); err != nil {
+		jsonMsg(c, "verified traffic receiver registration failed", err)
+		return
+	}
+	jsonMsg(c, "verified traffic receiver registered", nil)
+}
+
+func (a *NodeController) registerTrafficSender(c *gin.Context) {
+	if !canProvisionTrafficPeers(c) {
+		return
+	}
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		jsonMsg(c, "invalid node", err)
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 4096)
+	var req struct {
+		Reconciled bool `json:"reconciled"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		jsonMsg(c, "invalid verified traffic sender", err)
+		return
+	}
+	state, err := service.RegisterVerifiedTrafficSender(id, req.Reconciled)
+	if err != nil {
+		jsonMsg(c, "verified traffic sender registration failed", err)
+		return
+	}
+	jsonObj(c, gin.H{"sender": state.Sender, "generation": state.Generation, "lastSequence": state.LastSequence}, nil)
+}
+
+func (a *NodeController) activateTrafficSender(c *gin.Context) {
+	if !canProvisionTrafficPeers(c) {
+		return
+	}
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		c.AbortWithStatus(http.StatusBadRequest)
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 4096)
+	var req struct {
+		Reconciled bool `json:"reconciled"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		jsonMsg(c, "invalid sender activation", err)
+		return
+	}
+	if err := service.ActivateVerifiedTrafficSender(c.Request.Context(), id, req.Reconciled); err != nil {
+		jsonMsg(c, "verified traffic activation failed", err)
+		return
+	}
+	jsonMsg(c, "verified traffic sender activated", nil)
+}
+
+func (a *NodeController) getTrafficSender(c *gin.Context) {
+	if !canProvisionTrafficPeers(c) {
+		return
+	}
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		c.AbortWithStatus(http.StatusBadRequest)
+		return
+	}
+	var state model.TrafficSnapshotSender
+	if err := database.GetDB().First(&state, "id = ?", fmt.Sprintf("node:%d", id)).Error; err != nil {
+		jsonMsg(c, "verified traffic sender not available", err)
+		return
+	}
+	jsonObj(c, gin.H{"sender": state.Sender, "generation": state.Generation, "lastSequence": state.LastSequence}, nil)
 }
 
 func (a *NodeController) list(c *gin.Context) {

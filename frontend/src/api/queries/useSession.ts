@@ -32,6 +32,9 @@ export interface ResellerStat {
   inboundCount: number;
   clientCount: number;
   onlineCount: number;
+  pendingCreations?: number;
+  processingRenewals?: number;
+  hasUnlimitedClient?: boolean;
   usedTraffic: number;
   allocatedTraffic: number;
   remainingTraffic: number;
@@ -69,10 +72,23 @@ export interface ResellerTransaction {
   createdAt: number;
 }
 
+export interface ResellerTrafficArchive {
+  id: number;
+  clientRecordId: number;
+  email: string;
+  consumedBytes: number;
+  priorConsumedBytes: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface ResellerReport {
   stat: ResellerStat;
   clients: ResellerClientRow[];
   transactions: ResellerTransaction[];
+  trafficArchives?: ResellerTrafficArchive[];
+  creationIssues?: { id: string; operation: string; email: string; createdAt: number }[];
+  renewalIssues?: { orderId: string; targetRef: string; createdAt: number }[];
 }
 
 export interface SessionInfo {

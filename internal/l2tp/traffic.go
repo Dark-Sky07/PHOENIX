@@ -1,7 +1,8 @@
 package l2tp
 
 import (
-	"bufio"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -25,6 +26,82 @@ type ClientTrafficDelta struct {
 	Email     string
 	Up        int64
 	Down      int64
+}
+
+// CounterDecrease is an uncertain accounting interval, not a new session or
+// an estimate of missing bytes. Callers must retain and reconcile evidence.
+type CounterDecrease struct {
+	InboundID                                      int
+	Interface, Email                               string
+	PreviousRx, PreviousTx, ObservedRx, ObservedTx int64
+}
+
+func (e *CounterDecrease) Error() string {
+	return fmt.Sprintf("l2tp: counter decreased for inbound %d interface %q client %q (rx %d to %d, tx %d to %d); reconciliation required", e.InboundID, e.Interface, e.Email, e.PreviousRx, e.ObservedRx, e.PreviousTx, e.ObservedTx)
+}
+
+// SessionReadFailure records an unreadable or malformed L2TP observation.
+// Previous baselines remain unchanged and no missing usage is estimated.
+type SessionReadFailure struct {
+	InboundID int
+	Cause     string
+	Previous  []SessionObservation
+}
+
+func (e *SessionReadFailure) Error() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "l2tp: failed to read session counters for inbound %d: %s", e.InboundID, e.Cause)
+	for _, observation := range e.Previous {
+		fmt.Fprintf(&b, "; last sampled interface %q client %q rx %d tx %d", observation.Interface, observation.Email, observation.PreviousRx, observation.PreviousTx)
+	}
+	b.WriteString("; reconciliation required")
+	return b.String()
+}
+
+// SessionDisappeared reports a missing sampled session or a session marker
+// whose interface vanished before any sample. It does not estimate missing
+// traffic or prove the session has terminated.
+type SessionDisappeared struct {
+	InboundID              int
+	Interface, Email       string
+	PreviousRx, PreviousTx int64
+	NoBaseline             bool
+	Cause                  string
+	Additional             []SessionObservation
+	Retained               []SessionObservation
+	New                    []SessionObservation
+}
+
+// SessionObservation preserves another affected baseline from the same poll.
+type SessionObservation struct {
+	Interface, Email       string
+	PreviousRx, PreviousTx int64
+	ObservedRx, ObservedTx int64 // meaningful for Retained and New observations only
+	NoBaseline             bool
+}
+
+func (e *SessionDisappeared) Error() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "l2tp: session accounting uncertain for inbound %d (%s)", e.InboundID, e.Cause)
+	writeMissing := func(iface, email string, rx, tx int64, noBaseline bool) {
+		if noBaseline {
+			fmt.Fprintf(&b, "; missing interface %q client %q with no prior sample", iface, email)
+		} else {
+			fmt.Fprintf(&b, "; missing interface %q client %q last sampled rx %d tx %d", iface, email, rx, tx)
+		}
+	}
+	writeMissing(e.Interface, e.Email, e.PreviousRx, e.PreviousTx, e.NoBaseline)
+	for _, observation := range e.Additional {
+		writeMissing(observation.Interface, observation.Email, observation.PreviousRx, observation.PreviousTx, observation.NoBaseline)
+	}
+	for _, observation := range e.Retained {
+		fmt.Fprintf(&b, "; currently present: interface %q client %q previous rx %d tx %d observed rx %d tx %d", observation.Interface, observation.Email, observation.PreviousRx, observation.PreviousTx, observation.ObservedRx, observation.ObservedTx)
+	}
+	for _, observation := range e.New {
+		fmt.Fprintf(&b, "; no prior baseline: interface %q client %q observed rx %d tx %d", observation.Interface, observation.Email, observation.ObservedRx, observation.ObservedTx)
+	}
+	b.WriteString("; final usage requires reconciliation")
+	return b.String()
 }
 
 type interfaceCounter struct {
@@ -65,11 +142,10 @@ func readCounter(path string) (int64, bool) {
 	if parseErr != nil {
 		return 0, false
 	}
-	// Linux exposes unsigned 64-bit counters while the panel traffic model is
-	// signed. Saturating at MaxInt64 is safer than wrapping into a negative
-	// value and lets the next lower counter be treated as a reset.
+	// Saturation would silently discard subsequent usage while the unsigned
+	// kernel counter continues to grow. An unrepresentable sample is unsafe.
 	if value > uint64(maxInterfaceCounter) {
-		return maxInterfaceCounter, true
+		return 0, false
 	}
 	return int64(value), true
 }
@@ -81,47 +157,61 @@ func readInterfaceCounter(iface string) (interfaceCounter, bool) {
 	return interfaceCounter{rx: rx, tx: tx}, rxOK && txOK
 }
 
-func readSessions(id int) (map[string]interfaceCounter, bool) {
-	entries, err := os.ReadDir(sessionDirForID(id))
-	if err != nil {
-		if os.IsNotExist(err) {
-			// No marker directory is the normal no-active-session state.
-			return map[string]interfaceCounter{}, true
+func readSessions(id int) (map[string]interfaceCounter, []string, error) {
+	if err := CheckHookIncidents(); err != nil {
+		return nil, nil, err
+	}
+	root, err := os.OpenRoot(l2tpRoot())
+	if errors.Is(err, os.ErrNotExist) {
+		if err := CheckHookIncidents(); err != nil {
+			return nil, nil, err
 		}
-		return nil, false
+		return map[string]interfaceCounter{}, nil, nil
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("open L2TP runtime root: %w", err)
+	}
+	defer root.Close()
+	dir := filepath.Join(strconv.Itoa(id), "sessions")
+	entries, err := readEvidenceDir(root, dir)
+	if errors.Is(err, os.ErrNotExist) {
+		if err := CheckHookIncidents(); err != nil {
+			return nil, nil, err
+		}
+		return map[string]interfaceCounter{}, nil, nil
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("read L2TP session directory: %w", err)
 	}
 	out := make(map[string]interfaceCounter, len(entries))
+	var stale []string
 	for _, entry := range entries {
 		if entry.IsDir() || !validInterfaceName(entry.Name()) {
-			continue
+			return nil, nil, fmt.Errorf("invalid L2TP session marker %q", entry.Name())
 		}
-		path := filepath.Join(sessionDirForID(id), entry.Name())
-		file, err := os.Open(path)
+		email, err := readEvidenceEmail(root, filepath.Join(dir, entry.Name()))
 		if err != nil {
-			continue
+			return nil, nil, err
 		}
-		line, readErr := bufio.NewReader(file).ReadString('\n')
-		_ = file.Close()
-		if readErr != nil && len(line) == 0 {
-			continue
-		}
-		email := strings.TrimSpace(line)
-		if email == "" || strings.ContainsAny(email, "\r\n") {
-			continue
-		}
-		// A stale ip-up file must not make an offline client appear online.
+		// An absent interface is not proof of zero final usage. Retain the
+		// marker identity even when this session was never sampled.
 		if _, err := os.Stat(filepath.Join(l2tpSysClassNetRoot, entry.Name())); err != nil {
-			continue
+			if os.IsNotExist(err) {
+				stale = append(stale, entry.Name()+"\x00"+email)
+				continue
+			}
+			return nil, nil, fmt.Errorf("inspect L2TP interface %q: %w", entry.Name(), err)
 		}
 		counter, ok := readInterfaceCounter(entry.Name())
 		if !ok {
-			// Do not turn a temporarily unreadable counter into a zero delta;
-			// that would discard the baseline and double-count the next poll.
-			return nil, false
+			return nil, nil, fmt.Errorf("read L2TP counters for interface %q", entry.Name())
 		}
 		out[entry.Name()+"\x00"+email] = counter
 	}
-	return out, true
+	if err := CheckHookIncidents(); err != nil {
+		return nil, nil, err
+	}
+	return out, stale, nil
 }
 
 func saturatingCounterAdd(current, delta int64) int64 {

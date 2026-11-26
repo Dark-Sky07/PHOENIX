@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"strings"
 
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
 	"github.com/Dark-Sky07/phoenix/internal/logger"
@@ -99,11 +98,15 @@ func (s *InboundService) applyTrafficMutationBatch(b *trafficMutationBatch) bool
 			continue
 		}
 		if plan.inbound.Protocol == model.AmneziaWG {
-			s.applyLocalAmneziaWG(plan.inbound.Id)
+			if s.applyLocalAmneziaWG(plan.inbound.Id) != nil {
+				needRestart = true
+			}
 			continue
 		}
 		if plan.inbound.Protocol == model.TUIC {
-			s.applyLocalTuic(plan.inbound.Id)
+			if s.applyLocalTuic(plan.inbound.Id) != nil {
+				needRestart = true
+			}
 			continue
 		}
 		rt, err := s.runtimeFor(&plan.inbound)
@@ -113,9 +116,6 @@ func (s *InboundService) applyTrafficMutationBatch(b *trafficMutationBatch) bool
 				err = rt.AddUser(context.Background(), &plan.inbound, plan.client)
 			case trafficRemoveUser:
 				err = rt.RemoveUser(context.Background(), &plan.inbound, plan.email)
-				if err != nil && strings.Contains(err.Error(), "not found") {
-					err = nil
-				}
 			case trafficDisableInbound:
 				err = rt.DelInbound(context.Background(), &plan.inbound)
 				if xray.IsMissingHandlerErr(err) {

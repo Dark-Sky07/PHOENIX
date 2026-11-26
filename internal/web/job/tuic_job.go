@@ -1,7 +1,9 @@
 package job
 
 import (
+	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 
@@ -10,6 +12,7 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/web/service"
 	"github.com/Dark-Sky07/phoenix/internal/web/websocket"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
+	"github.com/google/uuid"
 )
 
 const defaultTuicSpeedSampleInterval = 10 * time.Second
@@ -29,52 +32,66 @@ func (j *TuicJob) Run() {
 	defer j.runMu.Unlock()
 
 	tuicJournalMu.Lock()
-	journalErr := j.replayTuicJournal()
-	tuicJournalMu.Unlock()
-	if journalErr != nil {
-		logger.Warning("tuic job: recover traffic journal failed:", journalErr)
+	if sharedTuicPoll.batch == nil {
+		if err := j.replayTuicJournal(); err != nil {
+			tuicJournalMu.Unlock()
+			logger.Warning("tuic job: recover traffic journal failed; reconciliation deferred:", err)
+			return
+		}
 	}
-
-	desired, err := j.inboundService.DesiredTuicInstances()
-	if err != nil {
-		logger.Warning("tuic job: get desired instances failed:", err)
+	mgr := tuic.GetManager()
+	clientDeltas, _, clientsDisabled, pollErr := collectAndCommitTuic(&sharedTuicPoll, func() []tuic.ClientTrafficDelta {
+		_, deltas := mgr.CollectAllTraffic()
+		return deltas
+	}, &j.inboundService)
+	if pollErr != nil {
+		tuicJournalMu.Unlock()
+		logger.Warning("tuic job: poll or accounting failed; retaining fence:", pollErr)
 		return
 	}
-
+	if clientsDisabled {
+		websocket.BroadcastInvalidate(websocket.MessageTypeInbounds)
+	}
+	// Reconciliation can stop a daemon and drain final counters into the
+	// manager. Put a second shared marker around the actual runtime mutation
+	// and its immediate drain, not just around the preceding periodic sample.
+	// Re-read desired state while the allocation lock is held.
+	var desired []tuic.Instance
+	var desiredErr error
+	reconciledDeltas, _, reconcileDisabled, reconcileErr := collectAndCommitTuic(&sharedTuicPoll, func() []tuic.ClientTrafficDelta {
+		desired, desiredErr = j.inboundService.DesiredTuicInstances()
+		if desiredErr == nil {
+			mgr.Reconcile(desired)
+		}
+		_, deltas := mgr.CollectAllTraffic()
+		return deltas
+	}, &j.inboundService)
+	tuicJournalMu.Unlock()
+	if reconcileErr != nil {
+		logger.Warning("tuic job: reconcile accounting failed; retaining fence:", reconcileErr)
+		return
+	}
+	if reconcileDisabled {
+		websocket.BroadcastInvalidate(websocket.MessageTypeInbounds)
+	}
+	if desiredErr != nil {
+		logger.Warning("tuic job: get desired instances failed:", desiredErr)
+		return
+	}
+	clientDeltas = append(clientDeltas, reconciledDeltas...)
 	activeTags := make([]string, 0, len(desired))
 	for _, inst := range desired {
 		activeTags = append(activeTags, inst.Tag)
 	}
-
-	mgr := tuic.GetManager()
-	mgr.Reconcile(desired)
-
-	_, clientDeltas := mgr.CollectAllTraffic()
 	onlineEmails, _ := mgr.GetActiveClients(30 * time.Second)
 
 	clientTraffics := aggregateTuicClientTraffic(clientDeltas, onlineEmails)
 	sampledAt := time.Now()
 	sampleInterval := tuicSpeedSampleInterval(j.lastSpeedSample, sampledAt)
-
-	// Inbound total traffic is already metered through the loopback SOCKS relay
-	// by xray_traffic_job (matching mtproto); only per-client deltas are submitted here.
-	persisted := true
-	if len(clientTraffics) > 0 {
-		needRestart, _, err := j.inboundService.AddTraffic(nil, clientTraffics)
-		if err != nil {
-			logger.Warning("tuic job: add traffic failed:", err)
-			mgr.RequeueClientTraffic(clientDeltas)
-			persisted = false
-		} else if needRestart {
-			if desired, err := j.inboundService.DesiredTuicInstances(); err == nil {
-				mgr.Reconcile(desired)
-			}
-		}
-	}
-	if persisted {
-		websocket.BroadcastTraffic(tuicSpeedPayload(clientTraffics, sampleInterval))
-		j.lastSpeedSample = sampledAt
-	}
+	// Inbound totals are metered through the Xray relay; this is only client
+	// traffic, now committed before periodic daemon reconciliation.
+	websocket.BroadcastTraffic(tuicSpeedPayload(clientTraffics, sampleInterval))
+	j.lastSpeedSample = sampledAt
 
 	if len(onlineEmails) > 0 {
 		if err := j.inboundService.BumpClientsLastOnline(onlineEmails); err != nil {
@@ -104,11 +121,73 @@ func tuicSpeedPayload(clientTraffics []*xray.ClientTraffic, sampleInterval time.
 	}
 }
 
+// StopAndFlushTraffic fences the shutdown mutation before stopping listeners.
+// Even if accounting cannot proceed, shutdown must still close listeners. It
+// preserves a separate manual-review journal where possible, without assuming
+// an ownership snapshot. A marker is not proof of a complete final drain.
+func (j *TuicJob) StopAndFlushTraffic() (resultErr error) {
+	tuicJournalMu.Lock()
+	defer tuicJournalMu.Unlock()
+	mgr := tuic.GetManager()
+	stopped := false
+	defer func() {
+		if stopped {
+			return
+		}
+		mgr.StopAll()
+		_, deltas := mgr.CollectAllTraffic()
+		if len(deltas) == 0 {
+			return
+		}
+		batch := tuicTrafficBatch{ID: uuid.NewString(), Deltas: deltas, ManualReview: true}
+		path, err := storeTuicBatch(batch)
+		if err != nil {
+			if path == "" {
+				mgr.RequeueClientTraffic(deltas)
+			}
+			resultErr = errors.Join(resultErr, fmt.Errorf("preserve TUIC shutdown evidence: %w", err))
+		}
+	}()
+	if sharedTuicPoll.batch != nil {
+		if _, _, _, err := collectAndCommitTuic(&sharedTuicPoll, nil, &j.inboundService); err != nil {
+			return fmt.Errorf("finish pending TUIC poll before shutdown: %w", err)
+		}
+	}
+	if err := j.replayTuicJournal(); err != nil {
+		return fmt.Errorf("recover TUIC journal before shutdown: %w", err)
+	}
+	_, _, disabled, err := collectAndCommitTuic(&sharedTuicPoll, func() []tuic.ClientTrafficDelta {
+		mgr.StopAll()
+		stopped = true
+		_, deltas := mgr.CollectAllTraffic()
+		return deltas
+	}, &j.inboundService)
+	if disabled {
+		websocket.BroadcastInvalidate(websocket.MessageTypeInbounds)
+	}
+	if err != nil {
+		return fmt.Errorf("account TUIC shutdown: %w", err)
+	}
+	return nil
+}
+
 // FlushStoppedTraffic persists counters drained when the TUIC manager stops its
 // listeners. Call it after scheduled jobs have stopped and before the traffic
 // writer shuts down.
 func (j *TuicJob) FlushStoppedTraffic() error {
 	return j.flushTuicJournal()
+}
+
+// Saturate counters rather than wrap a large valid total into a small delta.
+// A negative input remains negative so accounting rejects the batch.
+func addTuicTrafficBytes(current, delta int64) int64 {
+	if current < 0 || delta < 0 {
+		return -1
+	}
+	if current > math.MaxInt64-delta {
+		return math.MaxInt64
+	}
+	return current + delta
 }
 
 func aggregateTuicClientTraffic(clientDeltas []tuic.ClientTrafficDelta, onlineEmails []string) []*xray.ClientTraffic {
@@ -126,8 +205,8 @@ func aggregateTuicClientTraffic(clientDeltas []tuic.ClientTrafficDelta, onlineEm
 			traffic = &xray.ClientTraffic{Email: cd.Email, TuicTrafficID: cd.TrafficID, TuicUUID: cd.UUID, TuicInboundId: cd.InboundID}
 			clientTrafficMap[key] = traffic
 		}
-		traffic.Up += cd.Up
-		traffic.Down += cd.Down
+		traffic.Up = addTuicTrafficBytes(traffic.Up, cd.Up)
+		traffic.Down = addTuicTrafficBytes(traffic.Down, cd.Down)
 	}
 	for _, email := range onlineEmails {
 		if _, exists := clientTrafficMap[email]; !exists {

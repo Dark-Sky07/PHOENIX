@@ -1,14 +1,18 @@
 package pppvpn
 
 import (
-	"bufio"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/Dark-Sky07/phoenix/internal/xray"
 )
@@ -20,7 +24,58 @@ type TrafficBatch struct {
 	Clients          []*xray.ClientTraffic
 	ClosedSessionIDs []string
 	Token            uint64
-	closed           []string
+	closed           []closedSample
+}
+
+type closedSample struct {
+	path    string
+	session pppSession
+}
+
+// HookIncidentError reports a durable warning emitted by the hook. Its removal
+// alone is not proof that counters or session ownership were reconciled.
+type HookIncidentError struct{ Path string }
+
+func (e *HookIncidentError) Error() string {
+	return fmt.Sprintf("pppvpn: hook incident %q requires manual review", e.Path)
+}
+
+// HookPendingError may be a live hook or one interrupted before completion.
+// It must not be treated as either success or proof of failure.
+type HookPendingError struct{ Path string }
+
+func (e *HookPendingError) Error() string {
+	return fmt.Sprintf("pppvpn: hook operation pending at %q", e.Path)
+}
+
+// ClaimPendingError can be a live acknowledgement or an interrupted claim.
+// It fences decisions while observed but does not itself prove an incident.
+type ClaimPendingError struct{ Path string }
+
+func (e *ClaimPendingError) Error() string {
+	return fmt.Sprintf("pppvpn: empty session claim or claim in transition %q requires reconciliation if it persists", e.Path)
+}
+
+// CheckHookIncidents observes visible hook warnings without touching them.
+func CheckHookIncidents() error {
+	paths, err := readSessionPaths()
+	if err != nil {
+		return err
+	}
+	var pending string
+	for _, path := range paths {
+		name := filepath.Base(path)
+		if strings.HasPrefix(name, "hook-error.") {
+			return &HookIncidentError{Path: path}
+		}
+		if strings.HasPrefix(name, "hook-pending.") {
+			pending = path
+		}
+	}
+	if pending != "" {
+		return &HookPendingError{Path: pending}
+	}
+	return nil
 }
 
 type pppSession struct {
@@ -30,6 +85,8 @@ type pppSession struct {
 	tx        uint64
 	sessionID string
 	inboundID int
+	owner     string
+	ifindex   uint64
 	closed    bool
 }
 
@@ -48,27 +105,55 @@ var trafficCollector pppTrafficCollector
 func CollectTraffic() (*TrafficBatch, error) {
 	trafficCollector.mu.Lock()
 	defer trafficCollector.mu.Unlock()
+	if err := GetManager().CheckUntrackedRuntime(); err != nil {
+		return nil, err
+	}
+	if err := CheckHookIncidents(); err != nil {
+		return nil, err
+	}
 	if trafficCollector.pending != nil {
 		return cloneTrafficBatch(trafficCollector.pending), nil
 	}
 
-	files, err := filepath.Glob(filepath.Join(rootDir(), "sessions", "*", "*"))
+	files, err := readSessionPaths()
 	if err != nil {
 		return nil, err
 	}
 	batch := &TrafficBatch{}
+	seenSessions := make(map[string]string, len(files))
 	for _, path := range files {
-		if strings.HasPrefix(filepath.Base(path), ".") {
-			continue
+		name := filepath.Base(path)
+		if strings.HasPrefix(name, "hook-error.") {
+			return nil, &HookIncidentError{Path: path}
+		}
+		if strings.HasPrefix(name, "hook-pending.") {
+			return nil, &HookPendingError{Path: path}
+		}
+		// Only the lock directory is excluded by readSessionPaths. Unexpected
+		// hidden files may contain accounting evidence and must not be ignored.
+		// ip-up/down creates <session>.tmp.<pid> before an atomic rename.
+		// Never acknowledge a temporary file before the hook can rename it.
+		if _, suffix, ok := strings.Cut(name, ".tmp."); ok {
+			if _, err := strconv.ParseUint(suffix, 10, 64); err == nil {
+				return nil, fmt.Errorf("pppvpn: unfinished session hook file %q", path)
+			}
 		}
 		session, readErr := readPPPSession(path)
 		if readErr != nil {
-			continue // Never delete an unreadable record that may hold final counters.
+			return nil, fmt.Errorf("pppvpn: cannot read session record %q: %w", path, readErr)
+		}
+		if previous, exists := seenSessions[session.sessionID]; exists {
+			return nil, fmt.Errorf("pppvpn: duplicate session identity %q in %q and %q requires manual review", session.sessionID, previous, path)
+		}
+		seenSessions[session.sessionID] = path
+		stagedRoot := filepath.Join(rootDir(), "sessions-staged") + string(os.PathSeparator)
+		if strings.HasPrefix(path, stagedRoot) && !session.closed {
+			return nil, fmt.Errorf("pppvpn: active session in claim %q requires manual review", path)
 		}
 		if !session.closed {
-			session.rx, session.tx, err = readInterfaceBytes(session.iface)
+			session.rx, session.tx, err = readInterfaceBytes(session.iface, session.ifindex)
 			if err != nil {
-				continue // interface is temporarily absent; retry on the next poll
+				return nil, fmt.Errorf("pppvpn: cannot read active interface %q: %w", session.iface, err)
 			}
 		}
 		if session.rx > uint64(^uint64(0)>>1) || session.tx > uint64(^uint64(0)>>1) {
@@ -83,7 +168,7 @@ func CollectTraffic() (*TrafficBatch, error) {
 			PPPTxBytes:   int64(session.tx),
 		})
 		if session.closed {
-			batch.closed = append(batch.closed, path)
+			batch.closed = append(batch.closed, closedSample{path: path, session: session})
 			batch.ClosedSessionIDs = append(batch.ClosedSessionIDs, session.sessionID)
 		}
 	}
@@ -91,6 +176,97 @@ func CollectTraffic() (*TrafficBatch, error) {
 	batch.Token = trafficCollector.token
 	trafficCollector.pending = batch
 	return cloneTrafficBatch(batch), nil
+}
+
+// Unlike filepath.Glob, explicit directory reads report permission and I/O
+// errors instead of silently treating an inaccessible spool as empty.
+func readSessionPaths() ([]string, error) {
+	root, err := os.OpenRoot(rootDir())
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("pppvpn: open session root: %w", err)
+	}
+	defer root.Close()
+	groups, err := readPPPDir(root, "sessions")
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("pppvpn: read session directory: %w", err)
+	}
+	var paths []string
+	for _, group := range groups {
+		if !group.IsDir() {
+			return nil, fmt.Errorf("pppvpn: unexpected session group %q", group.Name())
+		}
+		if _, err := parseSessionGroup(group.Name()); err != nil {
+			return nil, err
+		}
+		dir := filepath.Join("sessions", group.Name())
+		entries, err := readPPPDir(root, dir)
+		if err != nil {
+			return nil, fmt.Errorf("pppvpn: read session group %q: %w", group.Name(), err)
+		}
+		for _, entry := range entries {
+			// Hook lock files persist so concurrent hooks never lock different
+			// inodes. The private directory is not an accounting spool.
+			if entry.Name() == ".hook-locks" {
+				if !entry.IsDir() {
+					return nil, fmt.Errorf("pppvpn: invalid hook lock directory %q", dir)
+				}
+				continue
+			}
+			if entry.IsDir() {
+				return nil, fmt.Errorf("pppvpn: unexpected session directory %q", entry.Name())
+			}
+			paths = append(paths, filepath.Join(rootDir(), dir, entry.Name()))
+		}
+	}
+	// Claimed records are kept outside hook-controlled session directories.
+	// A crash or mismatch leaves them visible for a later idempotent poll.
+	staged := "sessions-staged"
+	claims, err := readPPPDir(root, staged)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("pppvpn: read staged sessions: %w", err)
+	}
+	for _, claim := range claims {
+		if !claim.IsDir() {
+			return nil, fmt.Errorf("pppvpn: invalid staged session %q", claim.Name())
+		}
+		dir := filepath.Join(staged, claim.Name())
+		entries, err := readPPPDir(root, dir)
+		if errors.Is(err, os.ErrNotExist) {
+			// A concurrent acknowledgement may have removed the claim after
+			// ReadDir. Do not permanently classify this overlap as an incident.
+			return nil, &ClaimPendingError{Path: dir}
+		}
+		if err != nil {
+			return nil, fmt.Errorf("pppvpn: read session claim: %w", err)
+		}
+		// Before/after a rename or deletion a claim may contain no record.
+		// An origin alone cannot prove whether a record survived a crash.
+		hasRecord, hasOrigin := false, false
+		for _, entry := range entries {
+			if entry.IsDir() {
+				return nil, fmt.Errorf("pppvpn: invalid session claim entry %q", entry.Name())
+			}
+			switch entry.Name() {
+			case "record":
+				hasRecord = true
+			case "origin":
+				hasOrigin = true
+			default:
+				return nil, fmt.Errorf("pppvpn: invalid session claim entry %q", entry.Name())
+			}
+		}
+		if !hasRecord {
+			return nil, &ClaimPendingError{Path: dir}
+		}
+		if !hasOrigin {
+			return nil, fmt.Errorf("pppvpn: session claim %q lacks origin; manual review required", dir)
+		}
+		paths = append(paths, filepath.Join(rootDir(), dir, "record"))
+	}
+	return paths, nil
 }
 
 // AckTraffic removes closed-session spool files only after the DB transaction
@@ -102,23 +278,177 @@ func AckTraffic(token uint64) error {
 		return errors.New("pppvpn: stale traffic batch acknowledgement")
 	}
 	var ackErr error
-	for _, path := range trafficCollector.pending.closed {
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) && ackErr == nil {
-			ackErr = fmt.Errorf("pppvpn: remove completed session record: %w", err)
+	for _, sample := range trafficCollector.pending.closed {
+		if err := acknowledgeClosedSample(sample); err != nil {
+			ackErr = errors.Join(ackErr, err)
 		}
 	}
-	// DB persistence succeeded before AckTraffic. If cleanup fails, the same
-	// absolute counters are safe to submit again because their DB checkpoints
-	// were committed atomically with the last usage update.
+	// Failed or changed records remain visible for the next idempotent poll.
 	trafficCollector.pending = nil
 	return ackErr
+}
+
+// Move a path into a private claim before comparing it to the committed sample.
+// Hooks only write in sessions/<group>, never under sessions-staged. This avoids
+// a check-then-unlink race with an atomic hook replacement at the original path.
+// The claim is retained on any error, including a different or malformed record.
+func acknowledgeClosedSample(sample closedSample) error {
+	root, err := os.OpenRoot(rootDir())
+	if err != nil {
+		return fmt.Errorf("pppvpn: open spool root: %w", err)
+	}
+	defer root.Close()
+	source, err := pppRelativePath(sample.path)
+	if err != nil {
+		return err
+	}
+	origin, err := sessionOrigin(root, source, sample.session)
+	if err != nil {
+		return fmt.Errorf("pppvpn: verify claim source: %w", err)
+	}
+	staged := "sessions-staged"
+	if err := root.MkdirAll(staged, 0700); err != nil {
+		return fmt.Errorf("pppvpn: create claim directory: %w", err)
+	}
+	if err := syncPPPDirectory(root, "."); err != nil {
+		return err
+	}
+	var dir string
+	for attempt := 0; attempt < 10; attempt++ {
+		var token [16]byte
+		if _, err := rand.Read(token[:]); err != nil {
+			return err
+		}
+		dir = filepath.Join(staged, "claim-"+hex.EncodeToString(token[:]))
+		err = root.Mkdir(dir, 0700)
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("pppvpn: create session claim: %w", err)
+		}
+		break
+	}
+	if err != nil {
+		return fmt.Errorf("pppvpn: cannot allocate session claim: %w", err)
+	}
+	if err := syncPPPDirectory(root, staged); err != nil {
+		return err
+	}
+	// Persist the original hook-controlled location before moving the record.
+	// A crash at any later phase leaves either validated provenance or a claim
+	// that blocks for manual investigation.
+	originFile, err := root.OpenFile(filepath.Join(dir, "origin"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return fmt.Errorf("pppvpn: create claim origin: %w", err)
+	}
+	_, writeErr := io.WriteString(originFile, filepath.ToSlash(origin)+"\n")
+	var syncErr error
+	if writeErr == nil {
+		syncErr = originFile.Sync()
+	}
+	closeErr := originFile.Close()
+	if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
+		return fmt.Errorf("pppvpn: persist claim origin: %w", err)
+	}
+	if err := syncPPPDirectory(root, dir); err != nil {
+		return err
+	}
+	claimed := filepath.Join(dir, "record")
+	if err := root.Rename(source, claimed); err != nil {
+		return fmt.Errorf("pppvpn: claim session record %q: %w", sample.path, err)
+	}
+	if err := syncPPPDirectory(root, dir); err != nil {
+		return err
+	}
+	if err := syncPPPDirectory(root, filepath.Dir(source)); err != nil {
+		return err
+	}
+	// A recovered claim is itself moved into a fresh claim. Remove its now
+	// empty directory only after the destination and source are durable.
+	sourceDir := filepath.Dir(source)
+	if filepath.Dir(sourceDir) == staged && filepath.Base(source) == "record" {
+		if err := root.Remove(filepath.Join(sourceDir, "origin")); err != nil {
+			return fmt.Errorf("pppvpn: remove recovered claim origin: %w", err)
+		}
+		if err := syncPPPDirectory(root, sourceDir); err != nil {
+			return err
+		}
+		if err := root.Remove(sourceDir); err != nil {
+			return fmt.Errorf("pppvpn: remove recovered session claim: %w", err)
+		}
+		if err := syncPPPDirectory(root, staged); err != nil {
+			return err
+		}
+	}
+	current, err := readPPPSessionAt(root, claimed)
+	if err != nil {
+		return fmt.Errorf("pppvpn: inspect claimed session %q: %w", claimed, err)
+	}
+	if current != sample.session {
+		return fmt.Errorf("pppvpn: session changed before acknowledgement; retained %q", claimed)
+	}
+	if err := root.Remove(claimed); err != nil {
+		return fmt.Errorf("pppvpn: remove committed session claim: %w", err)
+	}
+	if err := syncPPPDirectory(root, dir); err != nil {
+		return err
+	}
+	if err := root.Remove(filepath.Join(dir, "origin")); err != nil {
+		return fmt.Errorf("pppvpn: remove committed claim origin: %w", err)
+	}
+	if err := syncPPPDirectory(root, dir); err != nil {
+		return err
+	}
+	if err := root.Remove(dir); err != nil {
+		return fmt.Errorf("pppvpn: remove empty session claim: %w", err)
+	}
+	return syncPPPDirectory(root, staged)
+}
+
+func pppRelativePath(path string) (string, error) {
+	rel, err := filepath.Rel(rootDir(), path)
+	if err != nil || !filepath.IsLocal(rel) || rel == "." {
+		return "", errors.New("pppvpn: path outside session root")
+	}
+	return rel, nil
+}
+
+func readPPPDir(root *os.Root, name string) ([]os.DirEntry, error) {
+	f, err := openPPPDirectory(root, name)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	entries, err := f.ReadDir(-1)
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	return entries, nil
+}
+
+func syncPPPDirectory(root *os.Root, name string) error {
+	f, err := openPPPDirectory(root, name)
+	if err != nil {
+		return fmt.Errorf("pppvpn: open directory for sync: %w", err)
+	}
+	err = f.Sync()
+	closeErr := f.Close()
+	if err != nil {
+		return fmt.Errorf("pppvpn: sync directory: %w", err)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("pppvpn: close directory: %w", closeErr)
+	}
+	return nil
 }
 
 func cloneTrafficBatch(batch *TrafficBatch) *TrafficBatch {
 	if batch == nil {
 		return nil
 	}
-	copyBatch := &TrafficBatch{Token: batch.Token, Clients: make([]*xray.ClientTraffic, 0, len(batch.Clients)), ClosedSessionIDs: append([]string(nil), batch.ClosedSessionIDs...), closed: append([]string(nil), batch.closed...)}
+	copyBatch := &TrafficBatch{Token: batch.Token, Clients: make([]*xray.ClientTraffic, 0, len(batch.Clients)), ClosedSessionIDs: append([]string(nil), batch.ClosedSessionIDs...), closed: append([]closedSample(nil), batch.closed...)}
 	for _, client := range batch.Clients {
 		if client != nil {
 			copyClient := *client
@@ -128,21 +458,118 @@ func cloneTrafficBatch(batch *TrafficBatch) *TrafficBatch {
 	return copyBatch
 }
 
+// parseSessionGroup accepts only directories generated by the managed hooks.
+// Unknown groups, including empty ones, may contain unaccounted evidence.
+func parseSessionGroup(group string) (int, error) {
+	protocol, idText, ok := strings.Cut(group, "-")
+	id, err := strconv.Atoi(idText)
+	if !ok || (protocol != string(PPTP) && protocol != string(SSTP)) || err != nil || id <= 0 || strconv.Itoa(id) != idText {
+		return 0, fmt.Errorf("pppvpn: invalid session group %q requires manual review", group)
+	}
+	return id, nil
+}
+
+// validateSessionPath verifies the original hook-controlled spool location.
+func validateSessionPath(rel string, session pppSession) error {
+	parts := strings.Split(filepath.ToSlash(rel), "/")
+	if !filepath.IsLocal(rel) || filepath.Clean(rel) != rel || len(parts) != 3 || parts[0] != "sessions" {
+		return errors.New("pppvpn: invalid session record location")
+	}
+	id, err := parseSessionGroup(parts[1])
+	if err != nil {
+		return err
+	}
+	if id != session.inboundID {
+		return errors.New("pppvpn: session inbound does not match its spool group")
+	}
+	name := session.iface
+	if session.closed {
+		name += ".closed." + session.sessionID
+	}
+	if parts[2] != name {
+		return errors.New("pppvpn: session identity does not match its spool filename")
+	}
+	return nil
+}
+
+// sessionOrigin resolves a claim's durable, root-relative source path. The
+// private claim directory and its writer must be trusted; this is provenance
+// evidence, not authentication against a privileged or malicious writer.
+func sessionOrigin(root *os.Root, rel string, session pppSession) (string, error) {
+	parts := strings.Split(filepath.ToSlash(rel), "/")
+	if len(parts) != 3 || parts[0] != "sessions-staged" {
+		if err := validateSessionPath(rel, session); err != nil {
+			return "", err
+		}
+		return rel, nil
+	}
+	if !strings.HasPrefix(parts[1], "claim-") || parts[2] != "record" || !session.closed {
+		return "", errors.New("pppvpn: invalid staged session location")
+	}
+	file, err := openPPPRecord(root, filepath.Join(filepath.Dir(rel), "origin"))
+	if err != nil {
+		return "", fmt.Errorf("pppvpn: inspect session claim origin: %w", err)
+	}
+	data, readErr := io.ReadAll(io.LimitReader(file, 4097))
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil {
+		return "", fmt.Errorf("pppvpn: read session claim origin: %w", errors.Join(readErr, closeErr))
+	}
+	if len(data) == 0 || len(data) > 4096 || data[len(data)-1] != '\n' || strings.Count(string(data), "\n") != 1 || !utf8.Valid(data) {
+		return "", errors.New("pppvpn: malformed session claim origin")
+	}
+	origin := filepath.FromSlash(string(data[:len(data)-1]))
+	if err := validateSessionPath(origin, session); err != nil {
+		return "", fmt.Errorf("pppvpn: session claim origin mismatch: %w", err)
+	}
+	return origin, nil
+}
+
 func readPPPSession(path string) (pppSession, error) {
-	file, err := os.Open(path)
+	rel, err := pppRelativePath(path)
+	if err != nil {
+		return pppSession{}, err
+	}
+	root, err := os.OpenRoot(rootDir())
+	if err != nil {
+		return pppSession{}, err
+	}
+	defer root.Close()
+	session, err := readPPPSessionAt(root, rel)
+	if err != nil {
+		return pppSession{}, err
+	}
+	if _, err := sessionOrigin(root, rel, session); err != nil {
+		return pppSession{}, err
+	}
+	return session, nil
+}
+
+func readPPPSessionAt(root *os.Root, rel string) (pppSession, error) {
+	file, err := openPPPRecord(root, rel)
 	if err != nil {
 		return pppSession{}, err
 	}
 	defer file.Close()
-	scanner := bufio.NewScanner(file)
-	if !scanner.Scan() {
-		if scanner.Err() != nil {
-			return pppSession{}, scanner.Err()
-		}
-		return pppSession{}, errors.New("pppvpn: empty session record")
+	// A complete hook record always ends in a newline. Scanner accepts an
+	// unterminated final line, which could turn torn evidence into a seemingly
+	// valid closed session and allow it to be acknowledged and deleted.
+	const maxRecordBytes = 64 * 1024
+	data, err := io.ReadAll(io.LimitReader(file, maxRecordBytes+1))
+	if err != nil {
+		return pppSession{}, err
 	}
-	fields := strings.Split(scanner.Text(), "\t")
-	if len(fields) != 7 || (fields[0] != "active" && fields[0] != "closed") || fields[1] == "" || fields[2] == "" || fields[5] == "" {
+	if len(data) == 0 || len(data) > maxRecordBytes || data[len(data)-1] != '\n' || strings.Count(string(data), "\n") != 1 || !utf8.Valid(data) {
+		return pppSession{}, errors.New("pppvpn: incomplete or malformed session record")
+	}
+	line := string(data[:len(data)-1])
+	for _, r := range line {
+		if (r < 0x20 && r != '\t') || r == 0x7f {
+			return pppSession{}, errors.New("pppvpn: invalid control character in session record")
+		}
+	}
+	fields := strings.Split(line, "\t")
+	if (len(fields) != 7 && len(fields) != 9) || (fields[0] != "active" && fields[0] != "closed") || fields[1] == "" || fields[2] == "" || fields[5] == "" {
 		return pppSession{}, errors.New("pppvpn: malformed session record")
 	}
 	rx, err := strconv.ParseUint(fields[3], 10, 64)
@@ -157,20 +584,52 @@ func readPPPSession(path string) (pppSession, error) {
 	if err != nil || inboundID <= 0 {
 		return pppSession{}, errors.New("pppvpn: invalid inbound id in session record")
 	}
-	return pppSession{iface: fields[1], email: fields[2], rx: rx, tx: tx, sessionID: fields[5], inboundID: inboundID, closed: fields[0] == "closed"}, nil
+	var owner string
+	var ifindex uint64
+	if len(fields) == 9 {
+		owner = fields[7]
+		ifindex, err = strconv.ParseUint(fields[8], 10, 64)
+		if err != nil || ifindex == 0 || owner == "" {
+			return pppSession{}, errors.New("pppvpn: invalid session owner or interface generation")
+		}
+	} else if fields[0] == "active" {
+		return pppSession{}, errors.New("pppvpn: legacy active session has no interface generation; manual review required")
+	}
+	return pppSession{iface: fields[1], email: fields[2], rx: rx, tx: tx, sessionID: fields[5], inboundID: inboundID, owner: owner, ifindex: ifindex, closed: fields[0] == "closed"}, nil
 }
 
-func readInterfaceBytes(iface string) (uint64, uint64, error) {
+func readInterfaceBytes(iface string, expected uint64) (uint64, uint64, error) {
 	if strings.ContainsAny(iface, "/\\\x00") || iface == "." || iface == ".." {
 		return 0, 0, errors.New("pppvpn: invalid interface name")
 	}
-	base := filepath.Join("/sys/class/net", iface, "statistics")
+	dir := filepath.Join("/sys/class/net", iface)
+	if expected == 0 {
+		return 0, 0, errors.New("pppvpn: missing interface generation")
+	}
+	index, err := readCounter(filepath.Join(dir, "ifindex"))
+	if err != nil {
+		return 0, 0, err
+	}
+	if index != expected {
+		return 0, 0, errors.New("pppvpn: interface generation changed")
+	}
+	base := filepath.Join(dir, "statistics")
 	rx, err := readCounter(filepath.Join(base, "rx_bytes"))
 	if err != nil {
 		return 0, 0, err
 	}
 	tx, err := readCounter(filepath.Join(base, "tx_bytes"))
-	return rx, tx, err
+	if err != nil {
+		return 0, 0, err
+	}
+	index, err = readCounter(filepath.Join(dir, "ifindex"))
+	if err != nil {
+		return 0, 0, err
+	}
+	if index != expected {
+		return 0, 0, errors.New("pppvpn: interface generation changed during sampling")
+	}
+	return rx, tx, nil
 }
 
 func readCounter(path string) (uint64, error) {
@@ -179,4 +638,64 @@ func readCounter(path string) (uint64, error) {
 		return 0, err
 	}
 	return strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
+}
+
+// CheckClientSessionEvidence blocks destructive accounting operations while a
+// matching local spool record exists, whether active, closed or staged. A
+// missing record does not prove that no hook, session or unpolled usage exists.
+// scope == nil checks all inbound IDs; a non-nil empty scope checks none.
+func CheckClientSessionEvidence(emails []string, scope []int) error {
+	if scope != nil && len(scope) == 0 {
+		return nil
+	}
+	wanted := make(map[string]bool, len(emails))
+	for _, email := range emails {
+		if key := strings.ToLower(strings.TrimSpace(email)); key != "" {
+			wanted[key] = true
+		}
+	}
+	if len(wanted) == 0 {
+		return nil
+	}
+	if err := GetManager().CheckUntrackedRuntime(); err != nil {
+		return err
+	}
+	if err := CheckHookIncidents(); err != nil {
+		return err
+	}
+	allowed := make(map[int]bool, len(scope))
+	for _, id := range scope {
+		allowed[id] = true
+	}
+	paths, err := readSessionPaths()
+	if err != nil {
+		return err
+	}
+	for _, path := range paths {
+		name := filepath.Base(path)
+		// A partially published file can contain usage or identity not yet
+		// readable; do not guess whether it belongs to these clients.
+		if _, suffix, ok := strings.Cut(name, ".tmp."); ok {
+			if _, err := strconv.ParseUint(suffix, 10, 64); err == nil {
+				return fmt.Errorf("pppvpn: unfinished session record %q", path)
+			}
+		}
+		session, err := readPPPSession(path)
+		if err != nil {
+			return fmt.Errorf("pppvpn: inspect session evidence %q: %w", path, err)
+		}
+		rel, err := pppRelativePath(path)
+		if err != nil {
+			return err
+		}
+		if strings.HasPrefix(filepath.ToSlash(rel), "sessions-staged/") {
+			// A claim does not encode its original spool group, so its inbound
+			// cannot safely be used to exclude a scoped removal.
+			return errors.New("pppvpn: staged session requires reconciliation before removal")
+		}
+		if wanted[strings.ToLower(strings.TrimSpace(session.email))] && (scope == nil || allowed[session.inboundID]) {
+			return fmt.Errorf("pppvpn: session evidence for inbound %d requires manual reconciliation before removal", session.inboundID)
+		}
+	}
+	return nil
 }

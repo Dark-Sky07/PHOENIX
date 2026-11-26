@@ -65,6 +65,9 @@ func (s *ClientService) Create(inboundSvc *InboundService, payload *ClientCreate
 	if client.SubID == "" {
 		client.SubID = uuid.NewString()
 	}
+	// Retain the generated identity for callers that must safely compensate a
+	// partial multi-inbound create without deleting a different client.
+	payload.Client.SubID = client.SubID
 	if !client.Enable {
 		client.Enable = true
 	}
@@ -130,7 +133,7 @@ func (s *ClientService) Create(inboundSvc *InboundService, payload *ClientCreate
 			Settings: string(settingsPayload),
 		})
 		if addErr != nil {
-			return needRestart, addErr
+			return needRestart || nr, addErr
 		}
 		if nr {
 			needRestart = true
@@ -390,16 +393,16 @@ func (s *ClientService) Update(inboundSvc *InboundService, id int, updated model
 			Id:       ibId,
 			Settings: string(settingsPayload),
 		}, existing.Email)
+		needRestart = needRestart || nr
 		if upErr != nil {
 			return needRestart, upErr
-		}
-		if nr {
-			needRestart = true
 		}
 		if ips, ok := updated.AllowedIPsByInbound[ibId]; ok &&
 			(inbound.Protocol == model.WireGuard || inbound.Protocol == model.AmneziaWG) {
 			if err := s.persistTunnelAllowedIPs(inboundSvc, ibId, existing.Email, ips); err != nil {
-				return needRestart, err
+				// An AWG override may already have been saved before its live
+				// apply failed; preserve recovery on the error path.
+				return needRestart || (inbound.Protocol == model.AmneziaWG && inbound.NodeID == nil), err
 			}
 		}
 	}
@@ -429,6 +432,20 @@ func (s *ClientService) Delete(inboundSvc *InboundService, id int, keepTraffic b
 	if err != nil {
 		return false, err
 	}
+	if !keepTraffic {
+		if err := rejectNegativeTrafficEvidence(database.GetDB(), []string{existing.Email}); err != nil {
+			return false, err
+		}
+	}
+	if err := checkPPPAndL2TPAccountingIncidents(database.GetDB()); err != nil {
+		return false, err
+	}
+	if err := rejectClientNodeIncidents(database.GetDB(), []string{existing.Email}); err != nil {
+		return false, err
+	}
+	if err := rejectUnprovenDaemonRemoval(database.GetDB(), []string{existing.Email}, nil); err != nil {
+		return false, err
+	}
 	tombstoneClientEmail(existing.Email)
 
 	inboundIds, err := s.GetInboundIdsForRecord(id)
@@ -452,7 +469,9 @@ func (s *ClientService) Delete(inboundSvc *InboundService, id int, keepTraffic b
 		if existing.Email == "" {
 			continue
 		}
-		nr, delErr := s.DelInboundClientByEmail(inboundSvc, ibId, existing.Email, keepTraffic)
+		// Keep counters until the reseller archive is safely recorded below.
+		nr, delErr := s.DelInboundClientByEmail(inboundSvc, ibId, existing.Email, true)
+		needRestart = needRestart || nr
 		if delErr != nil {
 			// The client is already absent from this inbound (data drift or a
 			// retried delete). Skip it — deletion stays idempotent.
@@ -466,27 +485,32 @@ func (s *ClientService) Delete(inboundSvc *InboundService, id int, keepTraffic b
 		}
 	}
 
-	db := database.GetDB()
-	if err := db.Where("client_id = ?", id).Delete(&model.ClientInbound{}).Error; err != nil {
+	err = submitTrafficWrite(func() error {
+		return database.GetDB().Transaction(func(tx *gorm.DB) error {
+			if err := archiveResellerClientUsageTx(tx, existing, 0); err != nil {
+				return err
+			}
+			if err := tx.Where("client_id = ?", id).Delete(&model.ClientInbound{}).Error; err != nil {
+				return err
+			}
+			if !keepTraffic && existing.Email != "" {
+				if err := inboundSvc.DelClientStat(tx, existing.Email); err != nil {
+					return err
+				}
+				if err := tx.Where("LOWER(TRIM(client_email)) = LOWER(?)", existing.Email).Delete(&model.InboundClientIps{}).Error; err != nil {
+					return err
+				}
+			}
+			if err := tx.Delete(&model.ClientRecord{}, id).Error; err != nil {
+				return err
+			}
+			return tx.Where("LOWER(TRIM(email)) = LOWER(?)", existing.Email).Delete(&model.ResellerClient{}).Error
+		})
+	})
+	if err != nil {
 		return needRestart, err
 	}
-	if !keepTraffic && existing.Email != "" {
-		if err := db.Where("LOWER(TRIM(email)) = LOWER(?)", existing.Email).Delete(&xray.ClientTraffic{}).Error; err != nil {
-			return needRestart, err
-		}
-		if err := clearGlobalTraffic(db, existing.Email); err != nil {
-			return needRestart, err
-		}
-		if err := db.Where("LOWER(TRIM(client_email)) = LOWER(?)", existing.Email).Delete(&model.InboundClientIps{}).Error; err != nil {
-			return needRestart, err
-		}
-	}
-	if err := db.Delete(&model.ClientRecord{}, id).Error; err != nil {
-		return needRestart, err
-	}
-	if err := db.Where("LOWER(TRIM(email)) = LOWER(?)", existing.Email).Delete(&model.ResellerClient{}).Error; err != nil {
-		return needRestart, err
-	}
+
 	return needRestart, nil
 }
 
@@ -662,12 +686,33 @@ func (s *ClientService) DeleteByEmail(inboundSvc *InboundService, email string, 
 	if email == "" {
 		return false, common.NewError("client email is required")
 	}
+	if !keepTraffic {
+		if err := rejectNegativeTrafficEvidence(database.GetDB(), []string{email}); err != nil {
+			return false, err
+		}
+	}
+	if err := checkPPPAndL2TPAccountingIncidents(database.GetDB()); err != nil {
+		return false, err
+	}
+	if err := rejectClientNodeIncidents(database.GetDB(), []string{email}); err != nil {
+		return false, err
+	}
+	if err := rejectUnprovenDaemonRemoval(database.GetDB(), []string{email}, nil); err != nil {
+		return false, err
+	}
 	rec, err := s.GetRecordByEmail(nil, email)
 	if err == nil {
 		return s.Delete(inboundSvc, rec.Id, keepTraffic)
 	}
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return false, err
+	}
+	var assigned int64
+	if err := database.GetDB().Model(&model.ResellerClient{}).Where("LOWER(TRIM(email)) = ?", transferEmailKey(email)).Count(&assigned).Error; err != nil {
+		return false, err
+	}
+	if assigned > 0 {
+		return false, errors.New("cannot safely delete reseller client without a canonical client record")
 	}
 	inboundIds, idsErr := s.findInboundIdsByClientEmail(email)
 	if idsErr != nil {
@@ -679,6 +724,7 @@ func (s *ClientService) DeleteByEmail(inboundSvc *InboundService, email string, 
 	needRestart := false
 	for _, ibId := range inboundIds {
 		nr, delErr := s.DelInboundClientByEmail(inboundSvc, ibId, email, false)
+		needRestart = needRestart || nr
 		if delErr != nil {
 			if errors.Is(delErr, ErrClientNotInInbound) {
 				continue
@@ -716,11 +762,24 @@ func (s *ClientService) DeleteByEmailForInbounds(inboundSvc *InboundService, ema
 	if email == "" {
 		return false, common.NewError("client email is required")
 	}
+	if !keepTraffic {
+		if err := rejectNegativeTrafficEvidence(database.GetDB(), []string{email}); err != nil {
+			return false, err
+		}
+	}
 	rec, err := s.GetRecordByEmail(nil, email)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return false, common.NewError(fmt.Sprintf("client %q not found in any inbound or client record", email))
 		}
+		return false, err
+	}
+	if err := rejectUnprovenDaemonRemoval(database.GetDB(), []string{email}, inboundIDs); err != nil {
+		return false, err
+	}
+	// Record a baseline even for a scoped no-op: the caller may revoke the
+	// mapping after this function returns. A second snapshot follows removal.
+	if err := archiveResellerClientUsage(rec); err != nil {
 		return false, err
 	}
 	if len(inboundIDs) == 0 {
@@ -756,6 +815,7 @@ func (s *ClientService) DeleteByEmailForInbounds(inboundSvc *InboundService, ema
 		// Keep shared traffic while the client still belongs to any other
 		// inbound. The cleanup below handles the final-association case.
 		nr, delErr := s.DelInboundClientByEmail(inboundSvc, inboundID, rec.Email, true)
+		needRestart = needRestart || nr
 		if delErr != nil {
 			if errors.Is(delErr, ErrClientNotInInbound) {
 				continue
@@ -773,35 +833,38 @@ func (s *ClientService) DeleteByEmailForInbounds(inboundSvc *InboundService, ema
 	if !removed {
 		return needRestart, nil
 	}
-
-	remainingIDs, err := s.GetInboundIdsForRecord(rec.Id)
+	// The last snapshot and final database cleanup are one writer transaction.
+	// Inbound/runtime removals above remain separate and can be retried.
+	err = submitTrafficWrite(func() error {
+		return database.GetDB().Transaction(func(tx *gorm.DB) error {
+			if err := archiveResellerClientUsageTx(tx, rec, 0); err != nil {
+				return err
+			}
+			var remaining int64
+			if err := tx.Model(&model.ClientInbound{}).Where("client_id = ?", rec.Id).Count(&remaining).Error; err != nil {
+				return err
+			}
+			if remaining > 0 {
+				return nil
+			}
+			if !keepTraffic {
+				if err := inboundSvc.DelClientStat(tx, rec.Email); err != nil {
+					return err
+				}
+				if err := tx.Where("LOWER(TRIM(client_email)) = LOWER(?)", rec.Email).Delete(&model.InboundClientIps{}).Error; err != nil {
+					return err
+				}
+			}
+			if err := tx.Delete(&model.ClientRecord{}, rec.Id).Error; err != nil {
+				return err
+			}
+			return tx.Where("LOWER(TRIM(email)) = LOWER(?)", rec.Email).Delete(&model.ResellerClient{}).Error
+		})
+	})
 	if err != nil {
 		return needRestart, err
 	}
-	if len(remainingIDs) > 0 {
-		// An admin-owned or another reseller-owned association remains. Never
-		// delete its shared stats or canonical credentials.
-		return needRestart, nil
-	}
 
-	db := database.GetDB()
-	if !keepTraffic {
-		if err := db.Where("LOWER(TRIM(email)) = LOWER(?)", rec.Email).Delete(&xray.ClientTraffic{}).Error; err != nil {
-			return needRestart, err
-		}
-		if err := clearGlobalTraffic(db, rec.Email); err != nil {
-			return needRestart, err
-		}
-		if err := db.Where("LOWER(TRIM(client_email)) = LOWER(?)", rec.Email).Delete(&model.InboundClientIps{}).Error; err != nil {
-			return needRestart, err
-		}
-	}
-	if err := db.Delete(&model.ClientRecord{}, rec.Id).Error; err != nil {
-		return needRestart, err
-	}
-	if err := db.Where("LOWER(TRIM(email)) = LOWER(?)", rec.Email).Delete(&model.ResellerClient{}).Error; err != nil {
-		return needRestart, err
-	}
 	return needRestart, nil
 }
 
@@ -850,6 +913,15 @@ func (s *ClientService) UpdateByEmailForInbounds(inboundSvc *InboundService, ema
 func (s *ClientService) Detach(inboundSvc *InboundService, id int, inboundIds []int) (bool, error) {
 	existing, err := s.GetByID(id)
 	if err != nil {
+		return false, err
+	}
+	if err := checkPPPAndL2TPAccountingIncidents(database.GetDB()); err != nil {
+		return false, err
+	}
+	if err := rejectClientNodeIncidents(database.GetDB(), []string{existing.Email}); err != nil {
+		return false, err
+	}
+	if err := rejectUnprovenDaemonRemoval(database.GetDB(), []string{existing.Email}, inboundIds); err != nil {
 		return false, err
 	}
 	currentIds, err := s.GetInboundIdsForRecord(id)
@@ -977,4 +1049,25 @@ func (s *ClientService) RevokeSubscription(inboundSvc *InboundService, email str
 		return "", err
 	}
 	return newSubID, nil
+}
+
+// RollbackNewClientCreate compensates a partial multi-inbound create only if
+// the persisted client still has the unique identity generated for that
+// request. This is best effort: runtime operations and DB writes are not one
+// transaction, and callers must surface rollback failures.
+func (s *ClientService) RollbackNewClientCreate(inboundSvc *InboundService, email, subID string) (bool, error) {
+	if strings.TrimSpace(email) == "" || strings.TrimSpace(subID) == "" {
+		return false, nil
+	}
+	rec, err := s.GetRecordByEmail(nil, email)
+	if database.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if rec.SubID != subID {
+		return false, errors.New("partial client identity changed; refusing rollback")
+	}
+	return s.Delete(inboundSvc, rec.Id, false)
 }

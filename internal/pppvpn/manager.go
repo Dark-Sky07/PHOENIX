@@ -2,8 +2,10 @@ package pppvpn
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -29,6 +31,44 @@ func GetManager() *Manager {
 	return singleton
 }
 
+// UntrackedRuntimeError means local runtime files are not owned by this
+// manager. File presence is evidence to investigate, not proof a daemon lives.
+type UntrackedRuntimeError struct{ Detail string }
+
+func (e *UntrackedRuntimeError) Error() string {
+	return "pppvpn: untracked runtime requires manual review: " + e.Detail
+}
+
+func (m *Manager) checkUntrackedRuntimeLocked() error {
+	for _, protocol := range []Protocol{SSTP, PPTP} {
+		dir := filepath.Join(rootDir(), string(protocol))
+		entries, err := os.ReadDir(dir)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return &UntrackedRuntimeError{Detail: fmt.Sprintf("inspect %s: %v", dir, err)}
+		}
+		for _, entry := range entries {
+			id, err := strconv.Atoi(entry.Name())
+			old := m.inbounds[id]
+			if err == nil && id > 0 && entry.Name() == strconv.Itoa(id) && entry.IsDir() && old != nil && old.process != nil && old.instance.Protocol == protocol {
+				continue
+			}
+			return &UntrackedRuntimeError{Detail: filepath.Join(dir, entry.Name())}
+		}
+	}
+	return nil
+}
+
+// CheckUntrackedRuntime does not signal or clean up an unknown process. A
+// clean directory scan is not proof of process ownership or session drain.
+func (m *Manager) CheckUntrackedRuntime() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.checkUntrackedRuntimeLocked()
+}
+
 func (m *Manager) Ensure(i Instance) error {
 	if err := Validate(i); err != nil {
 		return err
@@ -37,6 +77,9 @@ func (m *Manager) Ensure(i Instance) error {
 	defer m.mu.Unlock()
 	if m.inbounds == nil {
 		m.inbounds = map[int]*managed{}
+	}
+	if err := m.checkUntrackedRuntimeLocked(); err != nil {
+		return err
 	}
 	fp := i.fingerprint()
 	if old := m.inbounds[i.ID]; old != nil && old.fingerprint == fp && old.process != nil && old.process.IsRunning() {
@@ -51,7 +94,11 @@ func (m *Manager) Ensure(i Instance) error {
 	}
 	if old := m.inbounds[i.ID]; old != nil {
 		if old.process != nil {
-			_ = old.process.Stop()
+			if err := old.process.Stop(); err != nil {
+				// Keep the old process and configuration tracked. Starting a
+				// replacement while its exit is uncertain can overlap sessions.
+				return fmt.Errorf("stop old %s daemon for inbound %d: %w", i.Protocol, i.ID, err)
+			}
 		}
 		networkManager().removeInstance(old.instance)
 		removeChapSecrets(old.instance)
@@ -70,9 +117,9 @@ func (m *Manager) Ensure(i Instance) error {
 	}
 	proc := &Process{}
 	if err = proc.Start(i, cfg); err != nil {
-		networkManager().removeInstance(i)
-		removeChapSecrets(i)
-		_ = removeInstanceDir(i)
+		// Even a failed startup may have launched child processes. Preserve
+		// ownership and evidence rather than silently deleting runtime files.
+		m.inbounds[i.ID] = &managed{instance: i, fingerprint: fp, process: proc}
 		return err
 	}
 	m.inbounds[i.ID] = &managed{instance: i, fingerprint: fp, process: proc}
@@ -80,19 +127,33 @@ func (m *Manager) Ensure(i Instance) error {
 	return nil
 }
 
-func (m *Manager) Remove(id int) {
+// RemoveChecked retains the managed process and configuration when its exit
+// cannot be observed. The signal says nothing about child PPP sessions.
+func (m *Manager) RemoveChecked(id int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := m.checkUntrackedRuntimeLocked(); err != nil {
+		return err
+	}
 	cur := m.inbounds[id]
-	if cur != nil {
-		if cur.process != nil {
-			_ = cur.process.Stop()
+	if cur == nil {
+		return nil
+	}
+	if cur.process != nil {
+		if err := cur.process.Stop(); err != nil {
+			return fmt.Errorf("stop %s daemon for inbound %d: %w", cur.instance.Protocol, id, err)
 		}
-		networkManager().removeInstance(cur.instance)
-		removeChapSecrets(cur.instance)
-		delete(m.inbounds, id)
-		_ = removeInstanceDir(cur.instance)
-		return
+	}
+	networkManager().removeInstance(cur.instance)
+	removeChapSecrets(cur.instance)
+	delete(m.inbounds, id)
+	_ = removeInstanceDir(cur.instance)
+	return nil
+}
+
+func (m *Manager) Remove(id int) {
+	if err := m.RemoveChecked(id); err != nil {
+		logger.Warningf("pppvpn: remove inbound %d failed: %v", id, err)
 	}
 }
 

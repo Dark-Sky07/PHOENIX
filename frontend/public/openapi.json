@@ -2443,6 +2443,10 @@
             "example": 86400,
             "type": "integer"
           },
+          "verifiedGlobalPush": {
+            "description": "Experimental rollout mode; ordinary node edits do not alter it. When\nenabled the sender never falls back to unversioned global traffic.",
+            "type": "boolean"
+          },
           "xrayError": {
             "type": "string"
           },
@@ -2487,6 +2491,7 @@
           "tlsVerifyMode",
           "updatedAt",
           "uptimeSecs",
+          "verifiedGlobalPush",
           "xrayError",
           "xrayState",
           "xrayVersion"
@@ -3866,6 +3871,209 @@
                     },
                     "obj": {}
                   }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/inbounds/verifiedNodeSnapshot": {
+      "post": {
+        "tags": [
+          "Inbounds"
+        ],
+        "summary": "Experimental signed node snapshot for a separately provisioned bearer-token sender stream. Fails closed on incomplete local data; does not poll the runtime or prove historical completeness.",
+        "operationId": "post_panel_api_inbounds_verifiedNodeSnapshot",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "challenge": {
+                    "type": "string",
+                    "description": "Base64 unpredictable 32-byte challenge, echoed in the signed snapshot."
+                  }
+                },
+                "required": [
+                  "challenge"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/inbounds/trafficReadiness": {
+      "post": {
+        "tags": [
+          "Inbounds"
+        ],
+        "summary": "Experimental authenticated readiness challenge for an already registered global snapshot receiver. Does not activate a sender or attest reconciliation.",
+        "operationId": "post_panel_api_inbounds_trafficReadiness",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "version": {
+                    "type": "integer",
+                    "description": "Protocol version, currently 1."
+                  },
+                  "sender": {
+                    "type": "string",
+                    "description": "Registered sender identity."
+                  },
+                  "generation": {
+                    "type": "string",
+                    "description": "Registered generation."
+                  },
+                  "nonce": {
+                    "type": "string",
+                    "description": "Base64 unpredictable 32-byte challenge."
+                  },
+                  "mac": {
+                    "type": "string",
+                    "description": "Base64 token-derived challenge HMAC."
+                  }
+                },
+                "required": [
+                  "version",
+                  "sender",
+                  "generation",
+                  "nonce",
+                  "mac"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                },
+                "example": {
+                  "success": true,
+                  "obj": {
+                    "challenge": {},
+                    "lastSequence": 0,
+                    "mac": "base64"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/inbounds/pushVerifiedClientTraffics": {
+      "post": {
+        "tags": [
+          "Inbounds"
+        ],
+        "summary": "Experimental ordered global snapshot receiver. Requires a bearer token bound to a pre-provisioned sender and generation; the current legacy endpoint is not protected by this route.",
+        "operationId": "post_panel_api_inbounds_pushVerifiedClientTraffics",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "version": {
+                    "type": "integer",
+                    "description": "Envelope protocol version, currently 1."
+                  },
+                  "sender": {
+                    "type": "string",
+                    "description": "Registered sender identity."
+                  },
+                  "generation": {
+                    "type": "string",
+                    "description": "Registered sender generation."
+                  },
+                  "sequence": {
+                    "type": "integer",
+                    "description": "Durably reserved, strictly increasing sequence."
+                  },
+                  "snapshot": {
+                    "type": "string",
+                    "description": "Base64 of the exact JSON traffic array bytes."
+                  },
+                  "mac": {
+                    "type": "string",
+                    "description": "Base64 HMAC of the envelope using the token-derived key."
+                  }
+                },
+                "required": [
+                  "version",
+                  "sender",
+                  "generation",
+                  "sequence",
+                  "snapshot",
+                  "mac"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                },
+                "example": {
+                  "success": true
                 }
               }
             }
@@ -6077,6 +6285,10 @@
                   "inboundIds": {
                     "type": "string",
                     "description": "Inbound IDs to attach the client to. At least one required."
+                  },
+                  "salePrice": {
+                    "type": "object",
+                    "description": "For reseller-created clients: optional self-declared {amountMinor, currency}; non-negative integer minor units and a supported currency code. Not payment verification."
                   }
                 },
                 "required": [
@@ -6453,7 +6665,7 @@
         "tags": [
           "Clients"
         ],
-        "summary": "Reset the up/down counters for every client globally. Quotas and expiry are not affected. Triggers an Xray restart if any counter actually moved.",
+        "summary": "Admin only; reseller requests are temporarily rejected to protect usage accounting. Reset the up/down counters for every client globally. Quotas and expiry are not affected. Triggers an Xray restart if any counter actually moved.",
         "operationId": "post_panel_api_clients_resetAllTraffics",
         "responses": {
           "200": {
@@ -6975,7 +7187,7 @@
         "tags": [
           "Clients"
         ],
-        "summary": "Zero up/down counters for many clients in one call. Loops the single-reset path so each client is re-enabled across its attached inbounds and pushed to Xray/remote nodes. Returns the count of successfully reset clients.",
+        "summary": "Admin only; reseller requests are temporarily rejected to protect usage accounting. Zero up/down counters for many clients in one call. Loops the single-reset path so each client is re-enabled across its attached inbounds and pushed to Xray/remote nodes. Returns the count of successfully reset clients.",
         "operationId": "post_panel_api_clients_bulkResetTraffic",
         "requestBody": {
           "required": true,
@@ -7267,7 +7479,7 @@
         "tags": [
           "Clients"
         ],
-        "summary": "Zero out a single client’s up/down counters. Re-enables the client across every attached inbound and pushes the change to Xray (or the remote node) so depleted users can connect again immediately.",
+        "summary": "Admin only; reseller requests are temporarily rejected to protect usage accounting. Zero out a single client’s up/down counters. Re-enables the client across every attached inbound and pushes the change to Xray (or the remote node) so depleted users can connect again immediately.",
         "operationId": "post_panel_api_clients_resetTraffic_email",
         "parameters": [
           {
@@ -7308,7 +7520,7 @@
         "tags": [
           "Clients"
         ],
-        "summary": "Manually adjust a client’s upload + download counters. Useful for migrations from external accounting systems.",
+        "summary": "Admin only; reseller requests are temporarily rejected to protect usage accounting. Manually adjust a client’s upload + download counters. Useful for migrations from external accounting systems.",
         "operationId": "post_panel_api_clients_updateTraffic_email",
         "parameters": [
           {
@@ -7981,6 +8193,7 @@
                       "transitive": false,
                       "updatedAt": 1700000000,
                       "uptimeSecs": 86400,
+                      "verifiedGlobalPush": false,
                       "xrayError": "",
                       "xrayState": "",
                       "xrayVersion": "25.10.31"
@@ -8074,6 +8287,394 @@
                   "obj": {
                     "webCertFile": "/root/cert/example.com/fullchain.pem",
                     "webKeyFile": "/root/cert/example.com/privkey.pem"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/nodes/nodeSnapshot/producer": {
+      "post": {
+        "tags": [
+          "Nodes"
+        ],
+        "summary": "Stage a token-bound node snapshot producer. Interactive superadmin only; requires reconciliation confirmation and never resets existing state.",
+        "operationId": "post_panel_api_nodes_nodeSnapshot_producer",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "tokenId": {
+                    "type": "integer",
+                    "description": "Full-scope API token ID on this node."
+                  },
+                  "reconciled": {
+                    "type": "boolean",
+                    "description": "Confirm manual accounting and migration review."
+                  }
+                },
+                "required": [
+                  "tokenId",
+                  "reconciled"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/nodes/nodeSnapshot/producer/{tokenId}": {
+      "get": {
+        "tags": [
+          "Nodes"
+        ],
+        "summary": "Read the existing node snapshot producer identity and generation without revealing a token. Interactive superadmin only.",
+        "operationId": "get_panel_api_nodes_nodeSnapshot_producer_tokenId",
+        "parameters": [
+          {
+            "name": "tokenId",
+            "in": "path",
+            "required": true,
+            "description": "Producer API token ID.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/nodes/nodeSnapshot/receiver/{id}": {
+      "post": {
+        "tags": [
+          "Nodes"
+        ],
+        "summary": "Probe a fresh nonce-bound signed snapshot, then register a node receiver and disable legacy sync. Interactive superadmin only; failures do not fall back. Does not lift quota blocks.",
+        "operationId": "post_panel_api_nodes_nodeSnapshot_receiver_id",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Local node ID.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "sender": {
+                    "type": "string",
+                    "description": "Producer GUID transferred securely."
+                  },
+                  "generation": {
+                    "type": "string",
+                    "description": "Producer generation transferred securely."
+                  },
+                  "reconciled": {
+                    "type": "boolean",
+                    "description": "Confirm manual accounting and migration review."
+                  }
+                },
+                "required": [
+                  "sender",
+                  "generation",
+                  "reconciled"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/nodes/trafficSnapshot/sender/{id}": {
+      "get": {
+        "tags": [
+          "Nodes"
+        ],
+        "summary": "Read a provisioned sender identity, generation and last reserved sequence. Interactive superadmin session only; no token secret is returned.",
+        "operationId": "get_panel_api_nodes_trafficSnapshot_sender_id",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Local node ID.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Nodes"
+        ],
+        "summary": "Experimental: register a new verified snapshot sender for a node. Interactive superadmin session only; reconciled must be true. This stages the identity without enabling verified mode; it never resets an existing sequence.",
+        "operationId": "post_panel_api_nodes_trafficSnapshot_sender_id",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Local node ID; must use HTTPS with standard TLS verification.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "reconciled": {
+                    "type": "boolean",
+                    "description": "Confirm manual accounting and rollout review."
+                  }
+                },
+                "required": [
+                  "reconciled"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/nodes/trafficSnapshot/sender/{id}/activate": {
+      "post": {
+        "tags": [
+          "Nodes"
+        ],
+        "summary": "Activate a staged sender after a fresh authenticated receiver readiness check. Interactive superadmin only; readiness does not establish accounting completeness or secure incoming snapshots.",
+        "operationId": "post_panel_api_nodes_trafficSnapshot_sender_id_activate",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Local node ID.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "reconciled": {
+                    "type": "boolean",
+                    "description": "Confirm manual accounting and rollout review."
+                  }
+                },
+                "required": [
+                  "reconciled"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/nodes/trafficSnapshot/receiver": {
+      "post": {
+        "tags": [
+          "Nodes"
+        ],
+        "summary": "Experimental: register a verified snapshot receiver, binding an existing API token to the sender and generation. Interactive superadmin session only; existing streams cannot be replaced or reset.",
+        "operationId": "post_panel_api_nodes_trafficSnapshot_receiver",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "tokenId": {
+                    "type": "integer",
+                    "description": "Existing enabled, unexpired full-scope API token ID."
+                  },
+                  "sender": {
+                    "type": "string",
+                    "description": "Reconciled sender panel GUID."
+                  },
+                  "generation": {
+                    "type": "string",
+                    "description": "Generation supplied by the sender over a secure channel."
+                  },
+                  "reconciled": {
+                    "type": "boolean",
+                    "description": "Confirm manual accounting and rollout review."
+                  }
+                },
+                "required": [
+                  "tokenId",
+                  "sender",
+                  "generation",
+                  "reconciled"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
                   }
                 }
               }
@@ -10913,6 +11514,242 @@
         }
       }
     },
+    "/panel/api/resellers/report/{id}/sales": {
+      "get": {
+        "tags": [
+          "Resellers (نمایندگی)"
+        ],
+        "summary": "Recorded account creations, initial traffic and self-declared prices by UTC period. Amounts are exact decimal strings in currency minor units; unknown historical prices are counted separately. Declarations are not verified payments.",
+        "operationId": "get_panel_api_resellers_report_id_sales",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Reseller id.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "period",
+            "in": "query",
+            "required": false,
+            "description": "daily, monthly or yearly.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "description": "Inclusive Unix milliseconds.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "description": "Exclusive Unix milliseconds.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/resellers/report/{id}/sales/export": {
+      "get": {
+        "tags": [
+          "Resellers (نمایندگی)"
+        ],
+        "summary": "Export the recorded account creation report as CSV; accepts the same filters as the sales report.",
+        "operationId": "get_panel_api_resellers_report_id_sales_export",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Reseller id.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/resellers/report/{id}/sales/history": {
+      "get": {
+        "tags": [
+          "Resellers (نمایندگی)"
+        ],
+        "summary": "List the latest 500 manually recorded historical sales, with their source reference and actor.",
+        "operationId": "get_panel_api_resellers_report_id_sales_history",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Reseller id.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Resellers (نمایندگی)"
+        ],
+        "summary": "Administrator-only append of a historical sale. Records are self-reported, not verified payments. Reference must be unique for the reseller; check against recorded sales before importing.",
+        "operationId": "post_panel_api_resellers_report_id_sales_history",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Reseller id.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "reference": {
+                    "type": "string",
+                    "description": "Unique source reference."
+                  },
+                  "source": {
+                    "type": "string",
+                    "description": "Evidence or source description."
+                  },
+                  "email": {
+                    "type": "string",
+                    "description": ""
+                  },
+                  "soldAt": {
+                    "type": "integer",
+                    "description": "Sale time in Unix milliseconds, not in the future."
+                  },
+                  "trafficBytes": {
+                    "type": "integer",
+                    "description": "Initial traffic allocation in bytes."
+                  },
+                  "amountMinor": {
+                    "type": "integer",
+                    "description": "Declared amount in currency minor units; omit for unknown."
+                  },
+                  "currency": {
+                    "type": "string",
+                    "description": "Currency code when an amount is supplied."
+                  }
+                },
+                "required": [
+                  "reference",
+                  "source",
+                  "email",
+                  "soldAt",
+                  "trafficBytes"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/panel/api/resellers/export": {
       "get": {
         "tags": [
@@ -11929,6 +12766,95 @@
         ],
         "summary": "Download the signed-in reseller own client report as CSV (UTF-8 with BOM, CRLF rows, RFC 4180 quoting; traffic in binary GB).",
         "operationId": "get_panel_api_reseller_report_export",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/reseller/sales": {
+      "get": {
+        "tags": [
+          "Resellers (نمایندگی)"
+        ],
+        "summary": "The signed-in reseller’s recorded account creations and initial traffic by UTC period.",
+        "operationId": "get_panel_api_reseller_sales",
+        "parameters": [
+          {
+            "name": "period",
+            "in": "query",
+            "required": false,
+            "description": "daily, monthly or yearly.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "description": "Inclusive Unix milliseconds.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "description": "Exclusive Unix milliseconds.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/reseller/sales/export": {
+      "get": {
+        "tags": [
+          "Resellers (نمایندگی)"
+        ],
+        "summary": "Export the signed-in reseller’s account creation report as CSV; accepts the same filters as the sales report.",
+        "operationId": "get_panel_api_reseller_sales_export",
         "responses": {
           "200": {
             "description": "Successful response",

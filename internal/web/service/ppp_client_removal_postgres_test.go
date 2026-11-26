@@ -1,0 +1,129 @@
+package service
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"testing"
+
+	"github.com/Dark-Sky07/phoenix/internal/database/model"
+	"github.com/Dark-Sky07/phoenix/internal/xray"
+	"github.com/google/uuid"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+)
+
+func TestPPPRemovalGuardPostgres(t *testing.T) {
+	dsn := os.Getenv("PHOENIX_TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("PHOENIX_TEST_POSTGRES_DSN not set")
+	}
+	t.Setenv("XUI_BIN_FOLDER", t.TempDir())
+	// Match the application migration policy. Creating a new inbound foreign
+	// key here would change the shared CI database for subsequent tests.
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{DisableForeignKeyConstraintWhenMigrating: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := db.AutoMigrate(&model.Inbound{}, &model.ClientRecord{}, &model.ClientInbound{}, &model.ClientGlobalTraffic{}, &xray.ClientTraffic{}); err != nil {
+		t.Fatal(err)
+	}
+	tx := db.Begin()
+	if tx.Error != nil {
+		t.Fatal(tx.Error)
+	}
+	defer tx.Rollback()
+	id := uuid.NewString()
+	email := id + "@ppp-guard.test"
+	payload, err := json.Marshal(map[string]any{"clients": []any{map[string]any{"email": email}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ib := model.Inbound{Tag: id, Protocol: model.PPTP, Settings: string(payload)}
+	client := model.ClientRecord{Email: email, UUID: id, Enable: true}
+	for _, row := range []any{&ib, &client} {
+		if err := tx.Create(row).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := model.ClientInbound{ClientId: client.Id, InboundId: ib.Id}
+	if err := tx.Create(&link).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectUnprovenDaemonRemoval(tx, []string{email}, nil); err == nil {
+		t.Fatal("linked PPP removal accepted")
+	}
+	if err := tx.Model(&ib).Update("protocol", model.L2TP).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectUnprovenDaemonRemoval(tx, []string{email}, nil); err == nil {
+		t.Fatal("linked L2TP removal accepted")
+	}
+	if err := tx.Model(&ib).Update("protocol", model.OpenVPN).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectUnprovenDaemonRemoval(tx, []string{email}, nil); err == nil {
+		t.Fatal("linked OpenVPN removal accepted")
+	}
+	// The only evidence is now the link, whose email has whitespace SQL
+	// TRIM does not remove. The guard must still match the Go-normalized key.
+	if err := tx.Model(&ib).Update("settings", `{"clients":[]}`).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Model(&client).Update("email", "\t"+email+"\n").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectUnprovenDaemonRemoval(tx, []string{email}, nil); err == nil {
+		t.Fatal("Go-normalized link accepted by PostgreSQL guard")
+	}
+	if err := tx.Model(&ib).Update("settings", string(payload)).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Where("client_id = ?", client.Id).Delete(&model.ClientInbound{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectUnprovenDaemonRemoval(tx, []string{email}, nil); err == nil {
+		t.Fatal("settings drift accepted")
+	}
+	if err := rejectUnprovenDaemonRemoval(tx, []string{id + "-unrelated@test"}, nil); err != nil {
+		t.Fatalf("unrelated identity blocked: %v", err)
+	}
+	if err := tx.Model(&ib).Update("settings", `{"clients":[]}`).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Delete(&client).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Create(&model.ClientInbound{ClientId: client.Id, InboundId: ib.Id}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectUnprovenDaemonRemoval(tx, []string{id + "-unrelated@test"}, []int{ib.Id}); err == nil {
+		t.Fatal("orphan link allowed removal with unknown identity")
+	}
+	// This uncommitted global snapshot must be read on the caller's transaction
+	// and normalized by Go rather than PostgreSQL's narrower TRIM/LOWER.
+	quotaEmail := id + "@direct-quota.test"
+	traffic := xray.ClientTraffic{InboundId: ib.Id, Email: quotaEmail, Enable: true, Total: 100}
+	global := model.ClientGlobalTraffic{MasterGuid: id, Email: "\t" + quotaEmail + "\n", Up: 100}
+	for _, evidence := range []any{&traffic, &global} {
+		if err := tx.Create(evidence).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	settings := fmt.Sprintf(`{"clients":[{"email":%q,"enable":true}]}`, quotaEmail)
+	filtered, err := (&InboundService{}).buildRuntimeInboundForAPI(tx, &model.Inbound{Protocol: model.OpenVPN, Settings: settings})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		Clients []json.RawMessage `json:"clients"`
+	}
+	if err := json.Unmarshal([]byte(filtered.Settings), &result); err != nil || len(result.Clients) != 0 {
+		t.Fatalf("PostgreSQL uncommitted exhausted quota accepted: %s %v", filtered.Settings, err)
+	}
+}

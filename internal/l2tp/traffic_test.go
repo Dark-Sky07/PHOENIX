@@ -1,8 +1,12 @@
 package l2tp
 
 import (
+	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -47,11 +51,11 @@ func TestReadSessionsSupportsConcurrentSessionsForOneEmail(t *testing.T) {
 	writeSession(t, 7, "ppp0", "alice@example.com", "100", "200", true)
 	writeSession(t, 7, "ppp1", "alice@example.com", "300", "400", true)
 
-	got, ok := readSessions(7)
-	if !ok {
+	got, stale, err := readSessions(7)
+	if err != nil {
 		t.Fatal("readSessions reported a transient failure")
 	}
-	if len(got) != 2 {
+	if len(got) != 2 || len(stale) != 0 {
 		t.Fatalf("read %d sessions, want two independent interface/email keys: %#v", len(got), got)
 	}
 	if got["ppp0\x00alice@example.com"].rx != 100 || got["ppp1\x00alice@example.com"].tx != 400 {
@@ -59,16 +63,16 @@ func TestReadSessionsSupportsConcurrentSessionsForOneEmail(t *testing.T) {
 	}
 }
 
-func TestReadSessionsDropsStaleMarkerWithoutInterface(t *testing.T) {
+func TestReadSessionsReportsStaleMarkerWithoutInterface(t *testing.T) {
 	setupTrafficFilesystem(t)
 	writeSession(t, 8, "ppp-stale", "offline@example.com", "10", "20", false)
 
-	got, ok := readSessions(8)
-	if !ok {
-		t.Fatal("a stale marker should be a healthy empty-session read")
+	got, stale, err := readSessions(8)
+	if err != nil {
+		t.Fatal("a stale marker should be readable as uncertain evidence")
 	}
-	if len(got) != 0 {
-		t.Fatalf("stale marker produced an online session: %#v", got)
+	if len(got) != 0 || len(stale) != 1 || stale[0] != "ppp-stale\x00offline@example.com" {
+		t.Fatalf("stale marker not retained separately: %#v %#v", got, stale)
 	}
 }
 
@@ -76,20 +80,27 @@ func TestReadSessionsFailsClosedOnInvalidCounter(t *testing.T) {
 	setupTrafficFilesystem(t)
 	writeSession(t, 9, "ppp0", "alice@example.com", "not-a-counter", "20", true)
 
-	got, ok := readSessions(9)
-	if ok || got != nil {
-		t.Fatalf("invalid interface counter was accepted: got=%#v ok=%v", got, ok)
+	got, _, err := readSessions(9)
+	if err == nil || got != nil {
+		t.Fatalf("invalid interface counter was accepted: got=%#v err=%v", got, err)
 	}
 }
 
-func TestReadCounterParsesUnsignedValuesWithoutNegativeWrap(t *testing.T) {
+func TestReadCounterRejectsValuesOutsideSignedAccountingRange(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "counter")
 	if err := os.WriteFile(path, []byte("18446744073709551615\n"), 0o640); err != nil {
 		t.Fatal(err)
 	}
 	value, ok := readCounter(path)
-	if !ok || value != maxInterfaceCounter {
-		t.Fatalf("unsigned counter = (%d, %v), want saturated MaxInt64", value, ok)
+	if ok || value != 0 {
+		t.Fatalf("unrepresentable counter accepted: (%d, %v)", value, ok)
+	}
+
+	if err := os.WriteFile(path, []byte("9223372036854775807\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if value, ok := readCounter(path); !ok || value != maxInterfaceCounter {
+		t.Fatalf("largest representable counter rejected: (%d, %v)", value, ok)
 	}
 
 	if err := os.WriteFile(path, []byte("-1\n"), 0o640); err != nil {
@@ -97,5 +108,342 @@ func TestReadCounterParsesUnsignedValuesWithoutNegativeWrap(t *testing.T) {
 	}
 	if value, ok := readCounter(path); ok || value != 0 {
 		t.Fatalf("negative counter was accepted: (%d, %v)", value, ok)
+	}
+}
+
+func TestStoppedRuntimeReportsNeverSampledSessions(t *testing.T) {
+	for _, interfaceExists := range []bool{false, true} {
+		t.Run(fmt.Sprint(interfaceExists), func(t *testing.T) {
+			setupTrafficFilesystem(t)
+			writeSession(t, 12, "ppp0", "alice@example.test", "50", "100", interfaceExists)
+			m := &Manager{id: 12, proc: &managed{last: map[string]interfaceCounter{}, online: map[string]bool{"alice@example.test": true}}}
+			_, _, err := m.CollectTrafficChecked()
+			var missing *SessionDisappeared
+			if !errors.As(err, &missing) || !missing.NoBaseline || missing.Email != "alice@example.test" || missing.Interface != "ppp0" {
+				t.Fatalf("unobserved session hidden by stopped parent: %v", err)
+			}
+			if len(m.proc.last) != 0 || !m.proc.online["alice@example.test"] {
+				t.Fatal("uncertain session changed baseline or online state")
+			}
+			if _, err := os.Stat(filepath.Join(sessionDirForID(12), "ppp0")); err != nil {
+				t.Fatalf("session evidence removed: %v", err)
+			}
+		})
+	}
+}
+
+func TestStoppedRuntimeReportsSampledAndUnsampledSessionsTogether(t *testing.T) {
+	setupTrafficFilesystem(t)
+	writeSession(t, 12, "ppp0", "alice@example.test", "80", "120", true)
+	writeSession(t, 12, "ppp1", "bob@example.test", "20", "30", true)
+	writeSession(t, 12, "ppp2", "carol@example.test", "0", "0", false)
+	last := map[string]interfaceCounter{"ppp0\x00alice@example.test": {rx: 50, tx: 100}}
+	m := &Manager{id: 12, proc: &managed{last: last}}
+	_, _, err := m.CollectTrafficChecked()
+	var missing *SessionDisappeared
+	if !errors.As(err, &missing) {
+		t.Fatalf("stopped runtime not reported: %v", err)
+	}
+	if missing.Interface != "ppp0" || missing.Email != "alice@example.test" || missing.NoBaseline || missing.PreviousRx != 50 || missing.PreviousTx != 100 {
+		t.Fatalf("prior baseline not preserved: %+v", missing)
+	}
+	if len(missing.Additional) != 2 || missing.Additional[0].Email != "bob@example.test" || !missing.Additional[0].NoBaseline || missing.Additional[1].Email != "carol@example.test" || !missing.Additional[1].NoBaseline {
+		t.Fatalf("unobserved session identities omitted: %+v", missing.Additional)
+	}
+	if last["ppp0\x00alice@example.test"].rx != 50 || len(last) != 1 {
+		t.Fatal("stopped-runtime inspection advanced baseline")
+	}
+}
+
+func TestStoppedRuntimePendingHookDoesNotHideKnownBaseline(t *testing.T) {
+	root, _ := setupTrafficFilesystem(t)
+	dir := filepath.Join(root, "hook-incidents")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pending.test"), []byte("pending"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	last := map[string]interfaceCounter{"ppp0\x00alice": {rx: 50, tx: 100}}
+	m := &Manager{id: 12, proc: &managed{last: last}}
+	_, _, err := m.CollectTrafficChecked()
+	var missing *SessionDisappeared
+	if !errors.As(err, &missing) || missing.NoBaseline || missing.PreviousRx != 50 {
+		t.Fatalf("pending hook masked lost tracked runtime: %v", err)
+	}
+}
+
+func TestStoppedRuntimeDoesNotIgnoreUnreadableUnsampledSession(t *testing.T) {
+	setupTrafficFilesystem(t)
+	writeSession(t, 12, "ppp0", "alice@example.test", "invalid", "100", true)
+	m := &Manager{id: 12, proc: &managed{last: map[string]interfaceCounter{}}}
+	_, _, err := m.CollectTrafficChecked()
+	var failure *SessionReadFailure
+	if !errors.As(err, &failure) {
+		t.Fatalf("unreadable session was treated as empty: %v", err)
+	}
+}
+
+func TestCollectTrafficChecksHookEvidenceWithoutRunningRuntime(t *testing.T) {
+	for _, runtime := range []string{"no-manager-process", "stopped-without-baselines"} {
+		t.Run(runtime, func(t *testing.T) {
+			root, _ := setupTrafficFilesystem(t)
+			dir := filepath.Join(root, "hook-incidents")
+			if err := os.MkdirAll(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			m := &Manager{id: 12}
+			if runtime == "stopped-without-baselines" {
+				m.proc = &managed{last: map[string]interfaceCounter{}}
+			}
+			path := filepath.Join(dir, "pending.test")
+			if err := os.WriteFile(path, []byte("pending"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			_, _, err := m.CollectTrafficChecked()
+			var pending *HookPendingError
+			if !errors.As(err, &pending) {
+				t.Fatalf("pending hook ignored without runtime: %v", err)
+			}
+			if err := os.Rename(path, filepath.Join(dir, "up.failed")); err != nil {
+				t.Fatal(err)
+			}
+			_, _, err = m.CollectTrafficChecked()
+			var failure *SessionReadFailure
+			if !errors.As(err, &failure) {
+				t.Fatalf("hook incident ignored without runtime: %v", err)
+			}
+			if err := os.Remove(filepath.Join(dir, "up.failed")); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := m.CollectTrafficChecked(); err != nil {
+				t.Fatalf("empty runtime unexpectedly failed: %v", err)
+			}
+		})
+	}
+}
+
+func TestCollectTrafficKeepsBaselinesWhileHookPending(t *testing.T) {
+	root, _ := setupTrafficFilesystem(t)
+	dir := filepath.Join(root, "hook-incidents")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "pending.test")
+	if err := os.WriteFile(path, []byte("pending"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
+	last := map[string]interfaceCounter{"ppp0\x00alice": {rx: 50, tx: 100}}
+	m := &Manager{id: 12, proc: &managed{proc: &Process{ipsecCmd: cmd, xl2tpdCmd: cmd}, last: last}}
+	_, _, err := m.CollectTrafficChecked()
+	var pending *HookPendingError
+	if !errors.As(err, &pending) || pending.Path != path {
+		t.Fatalf("pending hook treated as a permanent read failure: %v", err)
+	}
+	if last["ppp0\x00alice"].rx != 50 || last["ppp0\x00alice"].tx != 100 {
+		t.Fatal("pending hook advanced baseline")
+	}
+}
+
+func TestCollectTrafficCheckedFailurePreservesBaselines(t *testing.T) {
+	setupTrafficFilesystem(t)
+	writeSession(t, 12, "ppp0", "alice@example.com", "bad", "200", true)
+	cmd := &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
+	p := &Process{ipsecCmd: cmd, xl2tpdCmd: cmd}
+	baseline := map[string]interfaceCounter{"ppp0\x00alice@example.com": {rx: 50, tx: 100}}
+	m := &Manager{id: 12, proc: &managed{proc: p, tag: "tag", last: baseline}}
+	if _, _, err := m.CollectTrafficChecked(); err == nil {
+		t.Fatal("counter failure was not reported")
+	} else {
+		var failure *SessionReadFailure
+		if !errors.As(err, &failure) || failure.InboundID != 12 || len(failure.Previous) != 1 || failure.Previous[0].Email != "alice@example.com" || failure.Previous[0].PreviousRx != 50 {
+			t.Fatalf("read failure lost baseline evidence: %+v %v", failure, err)
+		}
+	}
+	if got := baseline["ppp0\x00alice@example.com"]; got.rx != 50 || got.tx != 100 {
+		t.Fatalf("baseline changed after failure: %+v", got)
+	}
+	writeSession(t, 12, "ppp0", "alice@example.com", "80", "160", true)
+	_, clients, err := m.CollectTrafficChecked()
+	if err != nil || len(clients) != 1 || clients[0].Up != 30 || clients[0].Down != 60 {
+		t.Fatalf("retry delta: %+v err=%v", clients, err)
+	}
+}
+
+func TestCollectTrafficCheckedRejectsIncompleteSessionMarkers(t *testing.T) {
+	setupTrafficFilesystem(t)
+	writeSession(t, 13, "ppp0", "alice@example.com", "80", "160", true)
+	cmd := &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
+	p := &Process{ipsecCmd: cmd, xl2tpdCmd: cmd}
+	baseline := map[string]interfaceCounter{"ppp0\x00alice@example.com": {rx: 50, tx: 100}}
+	m := &Manager{id: 13, proc: &managed{proc: p, tag: "tag", last: baseline}}
+	path := filepath.Join(sessionDirForID(13), "ppp0")
+	for _, content := range []string{"", "alice@example.com", " \n"} {
+		if err := os.WriteFile(path, []byte(content), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := m.CollectTrafficChecked(); err == nil {
+			t.Fatalf("accepted incomplete marker %q", content)
+		}
+		if got := baseline["ppp0\x00alice@example.com"]; got.rx != 50 || got.tx != 100 {
+			t.Fatalf("baseline changed after incomplete marker %q: %+v", content, got)
+		}
+	}
+	if err := os.WriteFile(path, []byte("alice@example.com\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	_, clients, err := m.CollectTrafficChecked()
+	if err != nil || len(clients) != 1 || clients[0].Up != 30 || clients[0].Down != 60 {
+		t.Fatalf("retry delta: %+v err=%v", clients, err)
+	}
+}
+
+func TestReadSessionsFailsClosedOnUnreadableMarker(t *testing.T) {
+	setupTrafficFilesystem(t)
+	path := filepath.Join(sessionDirForID(14), "ppp0")
+	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
+		t.Fatal(err)
+	}
+	// A dangling symlink deterministically simulates a marker disappearing
+	// between the directory scan and open, even when tests run as root.
+	if err := os.Symlink(filepath.Join(t.TempDir(), "missing"), path); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if got, _, err := readSessions(14); err == nil || got != nil {
+		t.Fatalf("unreadable marker was ignored: %#v %v", got, err)
+	}
+}
+
+func TestReadSessionsFailsClosedOnInterfaceLookupError(t *testing.T) {
+	_, sysroot := setupTrafficFilesystem(t)
+	writeSession(t, 15, "ppp0", "alice@example.com", "0", "0", false)
+	if err := os.MkdirAll(filepath.Dir(sysroot), 0750); err != nil {
+		t.Fatal(err)
+	}
+	// A non-directory parent produces ENOTDIR, not a known-absent interface.
+	if err := os.WriteFile(sysroot, []byte("not a directory"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got, _, err := readSessions(15); err == nil || got != nil {
+		t.Fatalf("interface lookup error was ignored: %#v %v", got, err)
+	}
+}
+
+func TestCollectTrafficRejectsDisappearedSampleWithoutAdvancingBaselines(t *testing.T) {
+	for _, missing := range []string{"marker", "interface"} {
+		t.Run(missing, func(t *testing.T) {
+			setupTrafficFilesystem(t)
+			writeSession(t, 16, "ppp0", "alice@example.com", "150", "250", true)
+			writeSession(t, 16, "ppp1", "bob@example.com", "80", "90", true)
+			cmd := &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
+			p := &Process{ipsecCmd: cmd, xl2tpdCmd: cmd}
+			last := map[string]interfaceCounter{
+				"ppp0\x00alice@example.com": {rx: 100, tx: 200},
+				"ppp1\x00bob@example.com":   {rx: 50, tx: 60},
+			}
+			m := &Manager{id: 16, proc: &managed{proc: p, tag: "tag", last: last}}
+			path := filepath.Join(sessionDirForID(16), "ppp1")
+			if missing == "interface" {
+				path = filepath.Join(l2tpSysClassNetRoot, "ppp1")
+			}
+			if err := os.RemoveAll(path); err != nil {
+				t.Fatal(err)
+			}
+			inbounds, clients, err := m.CollectTrafficChecked()
+			var disappeared *SessionDisappeared
+			if !errors.As(err, &disappeared) || disappeared.InboundID != 16 || disappeared.Interface != "ppp1" || disappeared.Email != "bob@example.com" || disappeared.PreviousRx != 50 || disappeared.PreviousTx != 60 {
+				t.Fatalf("wrong missing observation: %+v %v", disappeared, err)
+			}
+			if len(inbounds) != 0 || len(clients) != 0 || last["ppp0\x00alice@example.com"].rx != 100 || last["ppp1\x00bob@example.com"].rx != 50 {
+				t.Fatalf("partial sample advanced: %#v %#v %#v", inbounds, clients, last)
+			}
+		})
+	}
+}
+
+func TestCollectTrafficRejectsNeverSampledStaleMarkers(t *testing.T) {
+	setupTrafficFilesystem(t)
+	writeSession(t, 18, "ppp0", "alice@example.com", "0", "0", false)
+	writeSession(t, 18, "ppp1", "bob@example.com", "0", "0", false)
+	writeSession(t, 18, "ppp2", "active@example.com", "90", "100", true)
+	cmd := &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
+	last := map[string]interfaceCounter{"ppp2\x00active@example.com": {rx: 50, tx: 60}}
+	m := &Manager{id: 18, proc: &managed{proc: &Process{ipsecCmd: cmd, xl2tpdCmd: cmd}, last: last}}
+	inbounds, clients, err := m.CollectTrafficChecked()
+	var missing *SessionDisappeared
+	if !errors.As(err, &missing) || missing.Email != "alice@example.com" || !missing.NoBaseline || len(missing.Additional) != 1 || !missing.Additional[0].NoBaseline || missing.Additional[0].Email != "bob@example.com" {
+		t.Fatalf("never-sampled marker ignored: %+v %v", missing, err)
+	}
+	if len(missing.Retained) != 1 || missing.Retained[0].PreviousRx != 50 || missing.Retained[0].ObservedRx != 90 || !strings.Contains(err.Error(), "no prior sample") {
+		t.Fatalf("incomplete reconciliation evidence: %+v %v", missing, err)
+	}
+	if len(inbounds) != 0 || len(clients) != 0 || last["ppp2\x00active@example.com"].rx != 50 {
+		t.Fatalf("sample advanced despite missing final counters: %#v %#v %#v", inbounds, clients, last)
+	}
+}
+
+func TestCollectTrafficPreservesAllMissingSessions(t *testing.T) {
+	setupTrafficFilesystem(t)
+	writeSession(t, 16, "ppp2", "remaining@example.com", "90", "100", true)
+	writeSession(t, 16, "ppp3", "new@example.com", "7", "8", true)
+	cmd := &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
+	last := map[string]interfaceCounter{
+		"ppp0\x00alice@example.com":     {rx: 10, tx: 20},
+		"ppp1\x00bob@example.com":       {rx: 30, tx: 40},
+		"ppp2\x00remaining@example.com": {rx: 50, tx: 60},
+	}
+	m := &Manager{id: 16, proc: &managed{proc: &Process{ipsecCmd: cmd, xl2tpdCmd: cmd}, tag: "tag", last: last}}
+	_, _, err := m.CollectTrafficChecked()
+	var missing *SessionDisappeared
+	if !errors.As(err, &missing) || missing.Interface != "ppp0" || missing.Cause != "session absent from sample or interface missing" || len(missing.Additional) != 1 {
+		t.Fatalf("missing observations not captured: %+v %v", missing, err)
+	}
+	other := missing.Additional[0]
+	if other.Interface != "ppp1" || other.Email != "bob@example.com" || other.PreviousRx != 30 || other.PreviousTx != 40 {
+		t.Fatalf("additional baseline lost: %+v", other)
+	}
+	if len(missing.New) != 1 || missing.New[0].Email != "new@example.com" || missing.New[0].ObservedRx != 7 || !strings.Contains(missing.Error(), "new@example.com") {
+		t.Fatalf("new session observation lost: %+v", missing)
+	}
+	if len(missing.Retained) != 1 || missing.Retained[0].Email != "remaining@example.com" || missing.Retained[0].PreviousRx != 50 || missing.Retained[0].ObservedRx != 90 || !strings.Contains(missing.Error(), "bob@example.com") || !strings.Contains(missing.Error(), "remaining@example.com") || last["ppp2\x00remaining@example.com"].rx != 50 {
+		t.Fatalf("evidence or remaining baseline lost: %v %#v", missing, last)
+	}
+}
+
+func TestCollectTrafficPreservesBaselinesWhenRuntimeStops(t *testing.T) {
+	last := map[string]interfaceCounter{
+		"ppp0\x00alice": {rx: 10, tx: 20},
+		"ppp1\x00bob":   {rx: 30, tx: 40},
+	}
+	m := &Manager{id: 17, proc: &managed{proc: &Process{}, last: last, online: map[string]bool{"alice": true}}}
+	_, _, err := m.CollectTrafficChecked()
+	var missing *SessionDisappeared
+	if !errors.As(err, &missing) || missing.Cause != "tracked runtime unavailable" || len(missing.Additional) != 1 {
+		t.Fatalf("runtime exit silently erased accounting uncertainty: %+v %v", missing, err)
+	}
+	if len(last) != 2 || !m.proc.online["alice"] || !strings.Contains(missing.Error(), "bob") {
+		t.Fatalf("evidence or online state lost: %v %#v", missing, m.proc)
+	}
+}
+
+func TestCollectTrafficRejectsCounterDecreaseBeforeAdvancingAnyBaseline(t *testing.T) {
+	setupTrafficFilesystem(t)
+	writeSession(t, 16, "ppp0", "alice@example.com", "150", "250", true)
+	writeSession(t, 16, "ppp1", "bob@example.com", "20", "10", true)
+	cmd := &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
+	p := &Process{ipsecCmd: cmd, xl2tpdCmd: cmd}
+	last := map[string]interfaceCounter{
+		"ppp0\x00alice@example.com": {rx: 100, tx: 200},
+		"ppp1\x00bob@example.com":   {rx: 30, tx: 5},
+	}
+	m := &Manager{id: 16, proc: &managed{proc: p, tag: "tag", last: last}}
+	inbounds, clients, err := m.CollectTrafficChecked()
+	var decrease *CounterDecrease
+	if !errors.As(err, &decrease) || decrease.InboundID != 16 || decrease.Interface != "ppp1" || decrease.Email != "bob@example.com" || decrease.PreviousRx != 30 || decrease.ObservedRx != 20 {
+		t.Fatalf("wrong observation: %+v %v", decrease, err)
+	}
+	if len(inbounds) != 0 || len(clients) != 0 || last["ppp0\x00alice@example.com"].rx != 100 || last["ppp1\x00bob@example.com"].rx != 30 {
+		t.Fatalf("partial sample advanced: %#v %#v %#v", inbounds, clients, last)
 	}
 }

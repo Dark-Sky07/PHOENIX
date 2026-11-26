@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/Dark-Sky07/phoenix/internal/config"
@@ -44,6 +45,15 @@ func l2tpBinDir() string {
 // tests. It remains empty in production, so runtime paths stay under the
 // configured panel binary directory.
 var l2tpRootOverride string
+var strongSwanRootOverride string
+var systemChapSecretsPathOverride string
+
+func systemChapSecretsFile() string {
+	if systemChapSecretsPathOverride != "" {
+		return systemChapSecretsPathOverride
+	}
+	return systemChapSecretsPath
+}
 
 func l2tpRoot() string {
 	if l2tpRootOverride != "" {
@@ -57,7 +67,11 @@ func dataDirForID(id int) string {
 }
 
 func strongSwanDirForID(id int) string {
-	return filepath.Join(strongSwanRuntimeRoot, fmt.Sprintf("%d", id))
+	root := strongSwanRuntimeRoot
+	if strongSwanRootOverride != "" {
+		root = strongSwanRootOverride
+	}
+	return filepath.Join(root, fmt.Sprintf("%d", id))
 }
 
 func ipsecConfigPath(id int) string  { return filepath.Join(dataDirForID(id), "ipsec.conf") }
@@ -201,40 +215,83 @@ func renderPPPOptions(inst Instance) string {
 }
 
 func renderIPUpScript(inst Instance) string {
-	// The directory contains only a numeric inbound id, so it is safe to embed
-	// after shell-quoting. Runtime values are always quoted and interface names
-	// are validated in traffic.go before they are used as path components.
 	dir := strings.ReplaceAll(sessionDirPath(inst.Id), "'", "'\\''")
-	return "#!/bin/sh\nset -eu\n" +
+	root := strings.ReplaceAll(l2tpRoot(), "'", "'\\''")
+	return "#!/bin/sh\nset -eu\numask 077\n" +
 		"PATH=/usr/sbin:/usr/bin:/sbin:/bin\nexport PATH\n" +
-		"dir='" + dir + "'\n" +
-		// pppd's documented interface name is $1/$IFNAME. PPP_IFACE is
-		// exported by some distro wrapper scripts, but is not guaranteed when
-		// pppd invokes an explicit ip-up-script directly.
+		"dir='" + dir + "'\nroot='" + root + "'\n" +
 		"iface=\"${PPP_IFACE:-${IFNAME:-${1:-}}}\"\n" +
-		// PEERNAME is the authenticated PPP username and is the stable identity
-		// that maps a session back to the panel client email.
 		"peer=\"${PEERNAME:-${PPP_PEERNAME:-}}\"\n" +
+		// A collision or failed publication must not replace another session's
+		// marker. Persist a separate incident for every uncertain hook exit.
+		"incident() {\n" +
+		"  code=$?; trap - EXIT\n" +
+		"  if [ \"$code\" -ne 0 ]; then\n" +
+		"    incidents=\"$root/hook-incidents\"\n" +
+		"    mkdir -p \"$incidents\" || exit \"$code\"\n" +
+		"    sync \"$root\" || exit \"$code\"\n" +
+		"    evidence=$(mktemp \"$incidents/up.XXXXXXXXXX\") || exit \"$code\"\n" +
+		"    sync \"$evidence\" \"$incidents\" || exit \"$code\"\n" +
+		"    printf 'L2TP ip-up failure inbound %s interface %s peer %s pppd_pid %s hook_parent %s\\n' '" + strconv.Itoa(inst.Id) + "' \"$iface\" \"$peer\" \"${PPPD_PID:-}\" \"$PPID\" > \"$evidence\" || exit \"$code\"\n" +
+		"    sync \"$evidence\" \"$incidents\" || true\n" +
+		"  fi\n" +
+		"  exit \"$code\"\n" +
+		"}\ntrap incident EXIT\n" +
+		// Publish in-progress evidence before session mutation. It remains
+		// on SIGKILL and is temporary while a live hook completes.
+		"incidents=\"$root/hook-incidents\"\n" +
+		"mkdir -p \"$incidents\"\n" +
+		"sync \"$root\"\n" +
+		"pending=$(mktemp \"$incidents/pending.XXXXXXXXXX\")\n" +
+		"printf 'L2TP ip-up pending inbound %s interface %s peer %s\\n' '" + strconv.Itoa(inst.Id) + "' \"$iface\" \"$peer\" > \"$pending\"\n" +
+		"sync \"$pending\" \"$incidents\"\n" +
 		"case \"$iface\" in\n" +
-		"  ''|*[!A-Za-z0-9_.-]*) exit 0 ;;\n" +
+		"  ''|.|..|*[!A-Za-z0-9_.-]*) exit 1 ;;\n" +
 		"esac\n" +
+		"[ -n \"$peer\" ] || exit 1\n" +
+		"mkdir -p \"$dir\"\n" +
+		"sync \"$root\" \"$(dirname \"$dir\")\" \"$dir\"\n" +
 		"sysctl -w \"net.ipv4.conf.$iface.route_localnet=1\" >/dev/null 2>&1 || true\n" +
 		"sysctl -w \"net.ipv4.conf.$iface.rp_filter=0\" >/dev/null 2>&1 || true\n" +
-		"[ -n \"$peer\" ] || exit 0\n" +
-		"mkdir -p \"$dir\"\n" +
-		"printf '%s\\n' \"$peer\" > \"$dir/$iface\"\n"
+		// Write and sync a separate pending file first. A hard link publishes
+		// the completed marker atomically and fails on every existing target,
+		// including directories and symlinks; -T prevents directory traversal.
+		"staged=$(mktemp \"$incidents/pending.XXXXXXXXXX\")\n" +
+		"printf '%s\\n' \"$peer\" > \"$staged\"\n" +
+		"sync \"$staged\" \"$incidents\"\n" +
+		"ln -T \"$staged\" \"$dir/$iface\"\n" +
+		"sync \"$dir/$iface\" \"$dir\"\n" +
+		"rm \"$staged\" \"$pending\"\n" +
+		"sync \"$incidents\"\n" +
+		"trap - EXIT\n"
 }
 
 func renderIPDownScript(inst Instance) string {
 	dir := strings.ReplaceAll(sessionDirPath(inst.Id), "'", "'\\''")
-	return "#!/bin/sh\nset -eu\n" +
+	root := strings.ReplaceAll(l2tpRoot(), "'", "'\\''")
+	return "#!/bin/sh\nset -eu\numask 077\n" +
 		"PATH=/usr/sbin:/usr/bin:/sbin:/bin\nexport PATH\n" +
-		"dir='" + dir + "'\n" +
+		"dir='" + dir + "'\nroot='" + root + "'\n" +
 		"iface=\"${PPP_IFACE:-${IFNAME:-${1:-}}}\"\n" +
+		"peer=\"${PEERNAME:-${PPP_PEERNAME:-}}\"\n" +
+		// A down hook does not prove a final drain or preserve a session
+		// generation. Persist an incident and leave the active marker intact;
+		// a late hook must never unlink a newer session's marker.
+		"incidents=\"$root/hook-incidents\"\n" +
+		"mkdir -p \"$incidents\"\n" +
+		"sync \"$root\"\n" +
+		"evidence=$(mktemp \"$incidents/down.XXXXXXXXXX\")\n" +
+		"sync \"$evidence\" \"$incidents\"\n" +
+		"printf 'L2TP ip-down inbound %s interface %s peer %s pppd_pid %s hook_parent %s\\n' '" + strconv.Itoa(inst.Id) + "' \"$iface\" \"$peer\" \"${PPPD_PID:-}\" \"$PPID\" > \"$evidence\"\n" +
+		"if [ -r /proc/sys/kernel/random/boot_id ]; then printf 'boot_id: ' >> \"$evidence\"; cat /proc/sys/kernel/random/boot_id >> \"$evidence\"; fi\n" +
 		"case \"$iface\" in\n" +
-		"  ''|*[!A-Za-z0-9_.-]*) exit 0 ;;\n" +
+		"  ''|.|..|*[!A-Za-z0-9_.-]*) sync \"$evidence\" \"$incidents\"; exit 1 ;;\n" +
 		"esac\n" +
-		"rm -f \"$dir/$iface\"\n"
+		"if [ -f \"$dir/$iface\" ]; then printf 'active marker: ' >> \"$evidence\"; head -c 4096 \"$dir/$iface\" >> \"$evidence\"; printf '\\n' >> \"$evidence\"; fi\n" +
+		"for counter in ifindex statistics/rx_bytes statistics/tx_bytes; do\n" +
+		"  if [ -r \"/sys/class/net/$iface/$counter\" ]; then printf '%s: ' \"$counter\" >> \"$evidence\"; cat \"/sys/class/net/$iface/$counter\" >> \"$evidence\"; fi\n" +
+		"done\n" +
+		"sync \"$evidence\" \"$incidents\"\n"
 }
 
 func renderChapSecrets(inst Instance) string {
@@ -297,7 +354,7 @@ func renderSystemChapSecrets(existing string, inst Instance) string {
 }
 
 func writeSystemChapSecrets(contents string) error {
-	dir := filepath.Dir(systemChapSecretsPath)
+	dir := filepath.Dir(systemChapSecretsFile())
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err
 	}
@@ -318,14 +375,14 @@ func writeSystemChapSecrets(contents string) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpName, systemChapSecretsPath); err != nil {
+	if err := os.Rename(tmpName, systemChapSecretsFile()); err != nil {
 		return err
 	}
 	return nil
 }
 
 func reconcileSystemChapSecrets(inst Instance) error {
-	existing, err := os.ReadFile(systemChapSecretsPath)
+	existing, err := os.ReadFile(systemChapSecretsFile())
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -337,7 +394,7 @@ func reconcileSystemChapSecrets(inst Instance) error {
 }
 
 func clearSystemChapSecrets() error {
-	existing, err := os.ReadFile(systemChapSecretsPath)
+	existing, err := os.ReadFile(systemChapSecretsFile())
 	if os.IsNotExist(err) {
 		return nil
 	}
@@ -353,28 +410,12 @@ func clearSystemChapSecrets() error {
 	return writeSystemChapSecrets(cleaned)
 }
 
-// removeLegacyRuntimeRoots deletes strongSwan runtime directories left behind
-// by earlier releases that used a different runtime root name. Matching is
-// structural (any "*-l2tp" directory beside the current root), so no legacy
-// name is embedded in the binary. Best effort: failures are ignored.
-func removeLegacyRuntimeRoots() {
-	legacy, err := filepath.Glob(filepath.Join(filepath.Dir(strongSwanRuntimeRoot), "*-l2tp"))
-	if err != nil {
-		return
-	}
-	for _, dir := range legacy {
-		if dir == strongSwanRuntimeRoot {
-			continue
-		}
-		_ = os.RemoveAll(dir)
-	}
-}
-
 func writeConfig(inst Instance) error {
 	if err := ValidateSettings(inst); err != nil {
 		return err
 	}
-	removeLegacyRuntimeRoots()
+	// Other strongSwan roots, even those ending in -l2tp, may belong to an
+	// unrelated service or contain unreconciled evidence. Do not delete them.
 	dir := dataDirForID(inst.Id)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err

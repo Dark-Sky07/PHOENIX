@@ -13,6 +13,7 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/amneziawg"
 	"github.com/Dark-Sky07/phoenix/internal/amneziawgnet"
 	"github.com/Dark-Sky07/phoenix/internal/config"
+	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
 	"github.com/Dark-Sky07/phoenix/internal/logger"
 	"github.com/Dark-Sky07/phoenix/internal/tuic"
@@ -20,15 +21,59 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/xray"
 
 	"go.uber.org/atomic"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var (
-	p                 *xray.Process
-	lock              sync.Mutex
-	isNeedXrayRestart atomic.Bool // Indicates that restart was requested for Xray
-	isManuallyStopped atomic.Bool // Indicates that Xray was stopped manually from the panel
-	result            string
+	p                          *xray.Process
+	lock                       sync.Mutex
+	isNeedXrayRestart          atomic.Bool // Indicates that restart was requested for Xray
+	isManuallyStopped          atomic.Bool // Indicates that Xray was stopped manually from the panel
+	xrayCounterIncidentPending atomic.Bool // Local in-memory barrier until persistence succeeds.
+	xrayCoreExitPending        atomic.Bool // An unexpected core exit is not yet durable in the database.
+	result                     string
+	// One baseline per panel process, shared by every XrayService instance.
+	// The state is protected by lock, which also protects process changes.
+	trafficState xrayTrafficState
 )
+
+// Reaped cores are registered before the watcher waits for the process lock.
+// Quota/removal checks can therefore fail closed while that lock is busy.
+var pendingXrayExitObservations = struct {
+	sync.Mutex
+	processes map[*xray.Process]struct{}
+}{processes: make(map[*xray.Process]struct{})}
+
+func rememberXrayExitObservation(process *xray.Process) {
+	pendingXrayExitObservations.Lock()
+	pendingXrayExitObservations.processes[process] = struct{}{}
+	pendingXrayExitObservations.Unlock()
+}
+
+func hasPendingXrayExitObservation() bool {
+	pendingXrayExitObservations.Lock()
+	defer pendingXrayExitObservations.Unlock()
+	return len(pendingXrayExitObservations.processes) > 0
+}
+
+type xrayTrafficState struct {
+	api                    xray.XrayAPI
+	process                *xray.Process
+	pendingCounterDecrease *xray.UserTrafficCounterDecrease
+	pendingCounterMissing  *xray.UserTrafficCounterMissing
+}
+
+// observeProcess is called under lock. The only assignment to p starts a new
+// managed core; it never attaches to an existing process, so its counters begin
+// at zero. Sharing this state prevents a replacement job from counting the
+// same core's cumulative counters twice.
+func (t *xrayTrafficState) observeProcess(current *xray.Process) {
+	if t.process != current {
+		t.api.ResetTrafficBaseline(true)
+		t.process = current
+	}
+}
 
 // XrayService provides business logic for Xray process management.
 // It handles starting, stopping, restarting Xray, and managing its configuration.
@@ -917,26 +962,51 @@ func resolveXrayLogPaths(logCfg json_util.RawMessage) json_util.RawMessage {
 
 // GetXrayTraffic fetches the current traffic statistics from the running Xray process.
 func (s *XrayService) GetXrayTraffic() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
-	if !s.IsXrayRunning() {
+	// The process lock serializes polls across all service instances, as well
+	// as process replacement. The dedicated API shares its baseline globally.
+	lock.Lock()
+	defer lock.Unlock()
+	// Do not poll again or discard the evidence on a core replacement while
+	// an earlier incident could not be written to the database.
+	if trafficState.pendingCounterDecrease != nil {
+		return nil, nil, trafficState.persistPendingCounterDecrease(database.GetDB())
+	}
+	if trafficState.pendingCounterMissing != nil {
+		return nil, nil, trafficState.persistPendingCounterMissing(database.GetDB())
+	}
+	current := p
+	if current == nil || !current.IsRunning() {
 		err := errors.New("xray is not running")
 		logger.Debug("Attempted to fetch Xray traffic, but Xray is not running:", err)
 		return nil, nil, err
 	}
-	apiPort := p.GetAPIPort()
-	if err := s.xrayAPI.Init(apiPort); err != nil {
+	trafficState.observeProcess(current)
+	if err := checkLocalXrayCounterIncidents(database.GetDB()); err != nil {
+		return nil, nil, err
+	}
+	if err := trafficState.api.Init(current.GetAPIPort()); err != nil {
 		logger.Debug("Failed to initialize Xray API:", err)
 		return nil, nil, err
 	}
-	defer s.xrayAPI.Close()
-
-	traffic, clientTraffic, err := s.xrayAPI.GetTraffic()
+	defer trafficState.api.Close()
+	traffic, clientTraffic, err := trafficState.api.GetTraffic()
 	if err != nil {
+		var decrease *xray.UserTrafficCounterDecrease
+		if errors.As(err, &decrease) {
+			trafficState.pendingCounterDecrease = decrease
+			xrayCounterIncidentPending.Store(true)
+			return nil, nil, trafficState.persistPendingCounterDecrease(database.GetDB())
+		}
+		var missing *xray.UserTrafficCounterMissing
+		if errors.As(err, &missing) {
+			trafficState.pendingCounterMissing = missing
+			xrayCounterIncidentPending.Store(true)
+			return nil, nil, trafficState.persistPendingCounterMissing(database.GetDB())
+		}
 		logger.Debug("Failed to fetch Xray traffic:", err)
 		return nil, nil, err
 	}
-	// OpenVPN/L2TP relay listeners carry traffic the daemons already account
-	// for; drop the core's copy so nothing is counted twice.
-	traffic = dropDaemonRelayTraffic(p.GetConfig(), traffic)
+	traffic = dropDaemonRelayTraffic(current.GetConfig(), traffic)
 	return traffic, clientTraffic, nil
 }
 
@@ -1059,7 +1129,16 @@ func (s *XrayService) RestartXray(isForce bool) error {
 	logger.Debug("restart Xray, force:", isForce)
 	// Evaluate the relay crash-loop guard before the config is regenerated so
 	// a suspension decided here already shapes this very config.
-	crashed := p != nil && !p.IsRunning() && !isManuallyStopped.Load()
+	wasManuallyStopped := isManuallyStopped.Load()
+	crashed := p != nil && !p.IsRunning() && !wasManuallyStopped
+	if crashed {
+		// The dead core can no longer provide its final counters. Keep a
+		// durable uncertainty marker rather than assuming its last poll was
+		// complete. No traffic quantity is inferred from the exit.
+		if err := recordUnexpectedXrayExit(database.GetDB()); err != nil {
+			return err
+		}
+	}
 	noteDaemonRelayCrash(isForce, crashed)
 	isManuallyStopped.Store(false)
 
@@ -1078,18 +1157,65 @@ func (s *XrayService) RestartXray(isForce bool) error {
 			logger.Info("Xray config changes applied through the core API, no restart needed")
 			return nil
 		}
-		p.Stop()
+		if stopErr := p.Stop(); stopErr != nil {
+			// A failed stop leaves the core's final accounting uncertain even
+			// when it still reports running.
+			if !wasManuallyStopped {
+				if markErr := recordUnexpectedXrayExit(database.GetDB()); markErr != nil {
+					return fmt.Errorf("stop Xray: %v; record exit: %w", stopErr, markErr)
+				}
+			}
+			return fmt.Errorf("stop Xray before restart: %w", stopErr)
+		}
+	} else if p != nil && !crashed && !wasManuallyStopped {
+		// Config generation may have outlived a core that was running at
+		// the first check. Preserve the uncertainty before replacing it.
+		if err := recordUnexpectedXrayExit(database.GetDB()); err != nil {
+			return err
+		}
 	}
 
 	p = xray.NewProcess(xrayConfig)
+	started := p
+	started.SetOnUnexpectedExit(func() { rememberXrayExitObservation(started) })
 	result = ""
 	s.xrayAPI.StatsLastValues = nil
 	err = p.Start()
 	if err != nil {
 		return err
 	}
+	go watchManagedXrayExit(started, started.Done())
 
 	return nil
+}
+
+// watchManagedXrayExit notices a reaped managed core without waiting for the
+// periodic watchdog. Stop/replacement is serialized with this check and must
+// not be misclassified. A marker write failure leaves the in-memory barrier;
+// the watchdog and restart path retry persistence.
+func watchManagedXrayExit(started *xray.Process, done <-chan struct{}) {
+	<-done
+	defer func() {
+		pendingXrayExitObservations.Lock()
+		delete(pendingXrayExitObservations.processes, started)
+		pendingXrayExitObservations.Unlock()
+	}()
+	if started.WasStoppedIntentionally() {
+		return
+	}
+	// The process wait callback normally registered this before Done closed;
+	// this also covers callers that do not install a callback.
+	rememberXrayExitObservation(started)
+	lock.Lock()
+	defer lock.Unlock()
+	if p != started || started.WasStoppedIntentionally() {
+		return
+	}
+	// A manual-stop flag set after this core already exited does not prove
+	// that its exit was intentional; rely on the process's own stop flag.
+	if err := recordUnexpectedXrayExit(database.GetDB()); err != nil {
+		logger.Error("Record unexpected Xray exit failed:", err)
+	}
 }
 
 // tryHotApply attempts to reconcile the running Xray instance with newCfg
@@ -1202,11 +1328,26 @@ func addOutboundReconciling(api *xray.XrayAPI, outbound []byte) error {
 func (s *XrayService) StopXray() error {
 	lock.Lock()
 	defer lock.Unlock()
-	isManuallyStopped.Store(true)
+	wasManuallyStopped := isManuallyStopped.Load()
 	logger.Debug("Attempting to stop Xray...")
 	if s.IsXrayRunning() {
-		return p.Stop()
+		isManuallyStopped.Store(true)
+		err := p.Stop()
+		if err != nil && !wasManuallyStopped {
+			if markErr := recordUnexpectedXrayExit(database.GetDB()); markErr != nil {
+				return fmt.Errorf("stop Xray: %v; record exit: %w", err, markErr)
+			}
+		}
+		return err
 	}
+	// A stop request after an unexpected exit must not suppress the watcher
+	// or let a subsequent restart erase the unresolved accounting interval.
+	if p != nil && !wasManuallyStopped {
+		if err := recordUnexpectedXrayExit(database.GetDB()); err != nil {
+			return err
+		}
+	}
+	isManuallyStopped.Store(true)
 	return errors.New("xray is not running")
 }
 
@@ -1232,7 +1373,151 @@ func (s *XrayService) IsNeedRestartAndSetFalse() bool {
 	return isNeedXrayRestart.CompareAndSwap(true, false)
 }
 
+// ObserveUnexpectedXrayExit lets the watchdog persist the uncertainty marker
+// on its first observation, rather than waiting for its restart threshold.
+// A nil process means the panel has not yet started a managed core; preserve
+// the watchdog's existing startup behavior without inventing an exit.
+func (s *XrayService) ObserveUnexpectedXrayExit() (bool, error) {
+	lock.Lock()
+	defer lock.Unlock()
+	if isManuallyStopped.Load() || (p != nil && p.IsRunning()) {
+		return false, nil
+	}
+	if p == nil {
+		return true, nil
+	}
+	if err := recordUnexpectedXrayExit(database.GetDB()); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
 // DidXrayCrash checks if Xray crashed by verifying it's not running and wasn't manually stopped.
 func (s *XrayService) DidXrayCrash() bool {
 	return !s.IsXrayRunning() && !isManuallyStopped.Load()
+}
+
+// persistPendingCounterDecrease runs under the process lock. Keep the original
+// observation until the database confirms it is durable; never replace it with
+// a later, possibly higher reading. A process crash can still lose this memory.
+func (t *xrayTrafficState) persistPendingCounterDecrease(db *gorm.DB) error {
+	decrease := t.pendingCounterDecrease
+	if decrease == nil {
+		return nil
+	}
+	diskErr := storeCounterIncidentFallback(localXrayIncidentEvidence(decrease))
+	if err := recordLocalXrayCounterIncident(db, decrease); err != nil {
+		if diskErr != nil {
+			return fmt.Errorf("%w; database incident write failed: %v; fallback failed: %v", decrease, err, diskErr)
+		}
+		return fmt.Errorf("%w; database incident write failed: %v; fallback retained for manual review", decrease, err)
+	}
+	t.pendingCounterDecrease = nil
+	if t == &trafficState {
+		xrayCounterIncidentPending.Store(false)
+	}
+	if diskErr != nil {
+		return fmt.Errorf("%w; fallback failed: %v; database incident retained", decrease, diskErr)
+	}
+	return decrease
+}
+
+// A missing counter has no observed value. Direction distinguishes this from
+// an actual zero; fields named Observed* are not evidence for missing values.
+func (t *xrayTrafficState) persistPendingCounterMissing(db *gorm.DB) error {
+	missing := t.pendingCounterMissing
+	if missing == nil {
+		return nil
+	}
+	if transferEmailKey(missing.Email) == "" || missing.Previous < 0 || (missing.Direction != "uplink" && missing.Direction != "downlink") {
+		return fmt.Errorf("%w; invalid missing Xray counter evidence", missing)
+	}
+	incident := model.ResellerNodeCounterIncident{NodeId: 0, Email: transferEmailKey(missing.Email), Direction: "missing-" + missing.Direction}
+	if missing.Direction == "uplink" {
+		incident.PreviousUp = missing.Previous
+	} else {
+		incident.PreviousDown = missing.Previous
+	}
+	diskErr := storeCounterIncidentFallback(incident)
+	if db == nil {
+		return fmt.Errorf("%w; database unavailable; fallback error: %v", missing, diskErr)
+	}
+	if err := db.Clauses(clause.OnConflict{DoNothing: true}).Create(&incident).Error; err != nil {
+		return fmt.Errorf("%w; database incident write failed: %v; fallback error: %v", missing, err, diskErr)
+	}
+	t.pendingCounterMissing = nil
+	if t == &trafficState {
+		xrayCounterIncidentPending.Store(false)
+	}
+	if diskErr != nil {
+		return fmt.Errorf("%w; fallback failed: %v; database incident retained", missing, diskErr)
+	}
+	return missing
+}
+
+// These markers persist until evidence-based reconciliation. An unobserved
+// direction is not zero usage: Direction identifies the only measured pair.
+func recordLocalXrayCounterIncident(db *gorm.DB, decrease *xray.UserTrafficCounterDecrease) error {
+	if db == nil || decrease == nil || transferEmailKey(decrease.Email) == "" || decrease.Previous < 0 || decrease.Observed < 0 || decrease.Observed >= decrease.Previous {
+		return errors.New("invalid local Xray counter incident")
+	}
+	incident := localXrayIncidentEvidence(decrease)
+	switch decrease.Direction {
+	case "uplink":
+		incident.PreviousUp, incident.ObservedUp = decrease.Previous, decrease.Observed
+	case "downlink":
+		incident.PreviousDown, incident.ObservedDown = decrease.Previous, decrease.Observed
+	default:
+		return errors.New("invalid local Xray counter direction")
+	}
+	return db.Clauses(clause.OnConflict{DoNothing: true}).Create(&incident).Error
+}
+
+func localXrayIncidentEvidence(decrease *xray.UserTrafficCounterDecrease) model.ResellerNodeCounterIncident {
+	incident := model.ResellerNodeCounterIncident{NodeId: 0, Email: transferEmailKey(decrease.Email), Direction: decrease.Direction}
+	if decrease.Direction == "uplink" {
+		incident.PreviousUp, incident.ObservedUp = decrease.Previous, decrease.Observed
+	}
+	if decrease.Direction == "downlink" {
+		incident.PreviousDown, incident.ObservedDown = decrease.Previous, decrease.Observed
+	}
+	return incident
+}
+
+func checkLocalXrayCounterIncidents(db *gorm.DB) error {
+	if err := diskCounterIncidentError(); err != nil {
+		return err
+	}
+	if db == nil {
+		return errors.New("database unavailable while checking Xray counter incidents")
+	}
+	var count int64
+	if err := db.Model(&model.ResellerNodeCounterIncident{}).Where("node_id = ?", 0).Count(&count).Error; err != nil {
+		return err
+	}
+	if count > 0 {
+		return errors.New("local Xray counter incident requires manual reconciliation")
+	}
+	return nil
+}
+
+// An unexpected managed-core exit may have lost traffic since the last poll.
+// The marker is global because the affected users and missing bytes are not
+// knowable from the process exit. NodeId 0 denotes local Xray, empty Email is
+// deliberately not a client identity, and Direction identifies this incident.
+func recordUnexpectedXrayExit(db *gorm.DB) error {
+	xrayCoreExitPending.Store(true)
+	incident := model.ResellerNodeCounterIncident{NodeId: 0, Email: "", Direction: "core-exited"}
+	diskErr := storeCounterIncidentFallback(incident)
+	if db == nil {
+		return errors.New("cannot persist unexpected Xray exit: database unavailable")
+	}
+	if err := db.Clauses(clause.OnConflict{DoNothing: true}).Create(&incident).Error; err != nil {
+		return fmt.Errorf("cannot persist unexpected Xray exit: %w; fallback error: %v", err, diskErr)
+	}
+	xrayCoreExitPending.Store(false)
+	if diskErr != nil {
+		logger.Warning("unexpected Xray exit: local fallback failed; database incident retained:", diskErr)
+	}
+	return nil
 }

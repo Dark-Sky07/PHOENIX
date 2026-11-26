@@ -18,6 +18,7 @@ import AppSidebar from '@/layouts/AppSidebar';
 import { PageHeader, StatStrip, type StatItem } from '@/components/ui';
 import NodeList from './NodeList';
 import NodeFormModal from './NodeFormModal';
+import TrafficPeerModal from './TrafficPeerModal';
 import { setMessageInstance } from '@/utils/messageBus';
 import { HttpUtil } from '@/utils';
 import type { PanelUpdateInfo } from '../index/PanelUpdateModal';
@@ -42,6 +43,7 @@ export default function NodesPage() {
     staleTime: 5 * 60 * 1000,
   });
 
+  const [trafficPeerOpen, setTrafficPeerOpen] = useState(false);
   const [formOpen, setFormOpen] = useState(false);
   const [formMode, setFormMode] = useState<'add' | 'edit'>('add');
   const [formNode, setFormNode] = useState<NodeRecord | null>(null);
@@ -182,6 +184,7 @@ export default function NodesPage() {
                   <PageHeader
                     eyebrow={t('menu.groupManage', 'Manage')}
                     title={t('menu.nodes', 'Nodes')}
+                    actions={<Button onClick={() => setTrafficPeerOpen(true)}>{t('pages.nodes.trafficPeers.title')}</Button>}
                     subtitle={(
                       <>
                         <span><strong>{totals.total}</strong> {t('pages.nodes.totalNodes')}</span>
@@ -216,6 +219,7 @@ export default function NodesPage() {
           </Layout.Content>
         </Layout>
 
+        <TrafficPeerModal open={trafficPeerOpen} nodes={nodes} onClose={() => setTrafficPeerOpen(false)} onChanged={() => { void refetch(); }} />
         <NodeFormModal
           open={formOpen}
           mode={formMode}

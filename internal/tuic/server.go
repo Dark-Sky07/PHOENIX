@@ -53,8 +53,10 @@ type Server struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	closed  atomic.Bool
-	running atomic.Bool
+	closed    atomic.Bool
+	running   atomic.Bool
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // NewServer creates a new TUIC v5 Server instance.
@@ -201,18 +203,22 @@ func (s *Server) registerConn(user *User, conn *quic.Conn) {
 
 func (s *Server) unregisterConn(user *User, conn *quic.Conn) {
 	s.activeConnsMu.Lock()
+	ended := false
 	if conns := s.activeConns[user.UUID]; conns != nil {
 		if registered, ok := conns[conn]; ok {
 			delete(conns, conn)
-			if registered == user {
-				s.users.sessionEnded(user)
-			}
+			ended = registered == user
 		}
 		if len(conns) == 0 {
 			delete(s.activeConns, user.UUID)
 		}
 	}
 	s.activeConnsMu.Unlock()
+	// Authentication takes the registry lock before activeConnsMu. Drop the
+	// latter before sessionEnded takes the registry lock to avoid inversion.
+	if ended {
+		s.users.sessionEnded(user)
+	}
 }
 
 func (s *Server) closeUserConns(user *User) {
@@ -860,7 +866,7 @@ func (s *Server) forwardUDPPacket(
 		s.logLimited(tuicLogWarn, "udp-send", 30*time.Second, "UDP relay request failed: %v", err)
 		return
 	}
-	user.Traffic.BytesUp.Add(int64(len(payload)))
+	addTrafficCounter(&user.Traffic.BytesUp, int64(len(payload)))
 	s.markActive(user.Email)
 }
 
@@ -893,7 +899,7 @@ func (s *Server) relayUDPResponses(
 			continue
 		}
 
-		user.Traffic.BytesDown.Add(int64(len(respPayload)))
+		addTrafficCounter(&user.Traffic.BytesDown, int64(len(respPayload)))
 		s.markActive(user.Email)
 
 		nextPktID++
@@ -965,25 +971,26 @@ func (s *Server) sendUDPPacketFragments(
 
 // Close gracefully stops the server and releases all network resources.
 func (s *Server) Close() error {
-	if s.closed.Swap(true) {
-		return nil
-	}
-	s.running.Store(false)
-	s.logf(tuicLogInfo, "listener stopped")
-	s.cancel()
+	// All callers must wait for the same close and handler drain. Returning as
+	// soon as closed is set can let a concurrent manager drain counters while
+	// relays from the first close are still writing them.
+	s.closeOnce.Do(func() {
+		s.closed.Store(true)
+		s.running.Store(false)
+		s.logf(tuicLogInfo, "listener stopped")
+		s.cancel()
 
-	var err error
-	if s.quicListener != nil {
-		err = s.quicListener.Close()
-	}
-	if s.packetConn != nil {
-		_ = s.packetConn.Close()
-	}
+		if s.quicListener != nil {
+			s.closeErr = s.quicListener.Close()
+		}
+		if s.packetConn != nil {
+			_ = s.packetConn.Close()
+		}
 
-	s.closeAllConns()
-
-	s.wg.Wait()
-	return err
+		s.closeAllConns()
+		s.wg.Wait()
+	})
+	return s.closeErr
 }
 
 const (

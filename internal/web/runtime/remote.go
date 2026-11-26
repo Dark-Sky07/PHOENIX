@@ -3,6 +3,7 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
 	"github.com/Dark-Sky07/phoenix/internal/logger"
 	"github.com/Dark-Sky07/phoenix/internal/util/netsafe"
+	"github.com/Dark-Sky07/phoenix/internal/web/trafficprotocol"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
 )
 
@@ -89,6 +91,11 @@ func (r *Remote) baseURL() (string, error) {
 }
 
 func (r *Remote) do(ctx context.Context, method, path string, body any) (*envelope, error) {
+	return r.doWithClient(ctx, method, path, body, remoteHTTPClient, 0)
+}
+
+// maxResponse bounds sensitive small protocol responses before JSON decoding.
+func (r *Remote) doWithClient(ctx context.Context, method, path string, body any, client *http.Client, maxResponse int64) (*envelope, error) {
 	if r.node.ApiToken == "" {
 		return nil, errors.New("node has no API token configured")
 	}
@@ -129,15 +136,22 @@ func (r *Remote) do(ctx context.Context, method, path string, body any) (*envelo
 		req.Header.Set("Content-Type", contentType)
 	}
 
-	resp, err := remoteHTTPClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("%s %s: %w", method, path, err)
 	}
 	defer resp.Body.Close()
 
-	raw, err := io.ReadAll(resp.Body)
+	reader := io.Reader(resp.Body)
+	if maxResponse > 0 {
+		reader = io.LimitReader(resp.Body, maxResponse+1)
+	}
+	raw, err := io.ReadAll(reader)
 	if err != nil {
 		return nil, fmt.Errorf("read body: %w", err)
+	}
+	if maxResponse > 0 && int64(len(raw)) > maxResponse {
+		return nil, errors.New("remote response too large")
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%s %s: HTTP %d", method, path, resp.StatusCode)
@@ -270,8 +284,10 @@ func (r *Remote) AddInbound(ctx context.Context, ib *model.Inbound) error {
 func (r *Remote) DelInbound(ctx context.Context, ib *model.Inbound) error {
 	id, err := r.resolveRemoteID(ctx, ib.Tag)
 	if err != nil {
-		logger.Warning("remote DelInbound: tag", ib.Tag, "not found on", r.node.Name)
-		return nil
+		// Failure to resolve a node's inbound is not evidence that it was
+		// removed. In particular, authentication/network errors and stale or
+		// incomplete lists must remain visible to the caller.
+		return fmt.Errorf("remote DelInbound: resolve tag %q: %w", ib.Tag, err)
 	}
 	if _, err := r.do(ctx, http.MethodPost, "panel/api/inbounds/del/"+strconv.Itoa(id), nil); err != nil {
 		return err
@@ -283,7 +299,10 @@ func (r *Remote) DelInbound(ctx context.Context, ib *model.Inbound) error {
 func (r *Remote) UpdateInbound(ctx context.Context, oldIb, newIb *model.Inbound) error {
 	id, err := r.resolveRemoteID(ctx, oldIb.Tag)
 	if err != nil {
-		return r.AddInbound(ctx, newIb)
+		// Resolution may fail because of authorization, network failures or
+		// a stale/incomplete list. Never turn an uncertain update into a new
+		// inbound with potentially duplicated credentials and accounting.
+		return fmt.Errorf("remote UpdateInbound: resolve tag %q: %w", oldIb.Tag, err)
 	}
 	payload := wireInbound(newIb)
 	if _, err := r.do(ctx, http.MethodPost, "panel/api/inbounds/update/"+strconv.Itoa(id), payload); err != nil {
@@ -325,18 +344,17 @@ func (r *Remote) DeleteUser(ctx context.Context, ib *model.Inbound, email string
 	}
 	id, err := r.resolveRemoteID(ctx, ib.Tag)
 	if err != nil {
-		return nil
+		return fmt.Errorf("remote DeleteUser: resolve tag %q: %w", ib.Tag, err)
 	}
 	body := map[string]any{"inboundIds": []int{id}}
 	_, err = r.do(ctx, http.MethodPost,
 		"panel/api/clients/"+url.PathEscape(email)+"/detach", body)
-	if err == nil {
-		return nil
+	// A generic "not found" is not a typed, authenticated proof that an
+	// active session is gone; it may refer to the endpoint, node, or user.
+	if err != nil {
+		return fmt.Errorf("remote DeleteUser: %w", err)
 	}
-	if strings.Contains(strings.ToLower(err.Error()), "not found") {
-		return nil
-	}
-	return err
+	return nil
 }
 
 func (r *Remote) UpdateUser(ctx context.Context, ib *model.Inbound, oldEmail string, payload model.Client) error {
@@ -425,6 +443,9 @@ func (r *Remote) ResetInboundTraffic(ctx context.Context, ib *model.Inbound) err
 }
 
 type TrafficSnapshot struct {
+	// Challenge binds a verified snapshot to the requesting pull. Legacy
+	// snapshots omit it and never use it as accounting evidence.
+	Challenge    []byte `json:"challenge,omitempty"`
 	Inbounds     []*model.Inbound
 	OnlineEmails []string
 	// OnlineTree is the node's GUID-keyed online subtree (its own clients under
@@ -434,6 +455,43 @@ type TrafficSnapshot struct {
 	// the per-GUID endpoint — OnlineEmails is the fallback then.
 	OnlineTree    map[string][]string
 	LastOnlineMap map[string]int64
+}
+
+// FetchVerifiedNodeSnapshot obtains an untrusted envelope; its MAC, sender,
+// generation and sequence must be verified in the accounting transaction.
+// There is deliberately no fallback or redirect on failure.
+func (r *Remote) FetchVerifiedNodeSnapshot(ctx context.Context) (*trafficprotocol.Envelope, error) {
+	if r.node == nil || r.node.Scheme != "https" || (r.node.TlsVerifyMode != "" && r.node.TlsVerifyMode != "verify") {
+		return nil, errors.New("verified node snapshots require HTTPS and standard TLS verification")
+	}
+	if _, err := trafficprotocol.NodeSnapshotKeyFromAPIToken(r.node.ApiToken); err != nil {
+		return nil, err
+	}
+	client := *remoteHTTPClient
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	limit := int64((trafficprotocol.MaxSnapshotBytes+2)/3*4 + 8192)
+	challenge := make([]byte, 32)
+	if _, err := rand.Read(challenge); err != nil {
+		return nil, err
+	}
+	env, err := r.doWithClient(ctx, http.MethodPost, "panel/api/inbounds/verifiedNodeSnapshot", map[string][]byte{"challenge": challenge}, &client, limit)
+	if err != nil {
+		return nil, err
+	}
+	var result trafficprotocol.Envelope
+	if err := json.Unmarshal(env.Obj, &result); err != nil {
+		return nil, err
+	}
+	if len(result.Snapshot) == 0 || len(result.Snapshot) > trafficprotocol.MaxSnapshotBytes {
+		return nil, errors.New("invalid verified node snapshot size")
+	}
+	var echoed struct {
+		Challenge []byte `json:"challenge"`
+	}
+	if err := json.Unmarshal(result.Snapshot, &echoed); err != nil || !bytes.Equal(echoed.Challenge, challenge) {
+		return nil, errors.New("verified node snapshot challenge mismatch")
+	}
+	return &result, nil
 }
 
 func (r *Remote) FetchTrafficSnapshot(ctx context.Context) (*TrafficSnapshot, error) {
@@ -483,6 +541,60 @@ func (r *Remote) PushGlobalClientTraffics(ctx context.Context, masterGuid string
 		"traffics":   traffics,
 	}
 	_, err := r.do(ctx, http.MethodPost, "panel/api/inbounds/pushClientTraffics", payload)
+	return err
+}
+
+// CheckTrafficReadiness verifies an online proof for a separately provisioned
+// sender and receiver. It has no side effects and does not switch modes or
+// attest reconciliation. Callers must retain their own durable sender state.
+func (r *Remote) CheckTrafficReadiness(ctx context.Context, sender, generation string, senderSequence uint64) error {
+	if r.node.Scheme != "https" || (r.node.TlsVerifyMode != "" && r.node.TlsVerifyMode != "verify") {
+		return errors.New("traffic readiness requires HTTPS with standard certificate verification")
+	}
+	key, err := trafficprotocol.KeyFromAPIToken(r.node.ApiToken)
+	if err != nil {
+		return err
+	}
+	challenge, err := trafficprotocol.NewReadinessChallenge(sender, generation, key)
+	if err != nil {
+		return err
+	}
+	// Redirects could change the peer or downgrade TLS, leaking the bearer
+	// token or accepting a proof from a different endpoint.
+	client := *remoteHTTPClient
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	env, err := r.doWithClient(ctx, http.MethodPost, "panel/api/inbounds/trafficReadiness", challenge, &client, 8192)
+	if err != nil {
+		return err
+	}
+	var response trafficprotocol.ReadinessResponse
+	if err := json.Unmarshal(env.Obj, &response); err != nil {
+		return err
+	}
+	return trafficprotocol.VerifyReadiness(challenge, response, key, senderSequence)
+}
+
+// PushVerifiedGlobalClientTraffics sends an already captured and reserved
+// snapshot without falling back to the legacy endpoint. The remote transport
+// uses standard certificate verification; HTTP and insecure/custom TLS modes
+// are refused for this opt-in path. It is not yet used by the sync job.
+func (r *Remote) PushVerifiedGlobalClientTraffics(ctx context.Context, snapshot *trafficprotocol.Envelope) error {
+	if r.node == nil || r.node.Scheme != "https" || (r.node.TlsVerifyMode != "" && r.node.TlsVerifyMode != "verify") {
+		return errors.New("verified global traffic requires HTTPS with standard certificate verification")
+	}
+	if snapshot == nil || snapshot.Sequence == 0 {
+		return errors.New("verified global traffic snapshot is required")
+	}
+	key, err := trafficprotocol.KeyFromAPIToken(r.node.ApiToken)
+	if err != nil {
+		return err
+	}
+	if err := trafficprotocol.Verify(*snapshot, key, trafficprotocol.Expected{Sender: snapshot.Sender, Generation: snapshot.Generation, LastSequence: snapshot.Sequence - 1}); err != nil {
+		return err
+	}
+	client := *remoteHTTPClient
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	_, err = r.doWithClient(ctx, http.MethodPost, "panel/api/inbounds/pushVerifiedClientTraffics", snapshot, &client, 8192)
 	return err
 }
 

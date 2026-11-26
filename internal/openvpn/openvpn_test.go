@@ -86,6 +86,14 @@ func TestInstanceFromInboundRejectsOtherProtocols(t *testing.T) {
 	}
 }
 
+func TestFingerprintDistinguishesClientBoundaries(t *testing.T) {
+	one := Instance{Port: 1194, Clients: []string{"a,b"}}
+	two := Instance{Port: 1194, Clients: []string{"a", "b"}}
+	if one.fingerprint() == two.fingerprint() {
+		t.Fatal("different OpenVPN client lists have the same fingerprint")
+	}
+}
+
 func TestFingerprintChangesWithClientsAndSettings(t *testing.T) {
 	base := Instance{Id: 1, Port: 1194, Proto: "udp", RedirectGw: true, PushDNS: true, Clients: []string{"a@x.com"}}
 	same := Instance{Id: 1, Port: 1194, Proto: "udp", RedirectGw: true, PushDNS: true, Clients: []string{"a@x.com"}}

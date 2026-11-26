@@ -171,6 +171,9 @@ func TestDesiredTuicInstances(t *testing.T) {
 		t.Fatalf("failed to seed inbound: %v", err)
 	}
 
+	if err := database.GetDB().Create(&xray.ClientTraffic{InboundId: ib.Id, Email: "active@test.com", Enable: true}).Error; err != nil {
+		t.Fatalf("failed to seed active accounting identity: %v", err)
+	}
 	// Add client traffic entry disabling disabled@test.com
 	ct := &xray.ClientTraffic{
 		InboundId: 30,

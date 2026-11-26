@@ -37,10 +37,18 @@ func reconcilePPPVPNRuntime(inbound *model.Inbound) error {
 	if inbound == nil || inbound.NodeID != nil {
 		return nil
 	}
+	if inbound.Enable && (inbound.Protocol == model.L2TP || inbound.Protocol == model.SSTP || inbound.Protocol == model.PPTP) {
+		// The settings array can still contain quota-disabled credentials.
+		// Never install it raw when the authoritative traffic filter fails.
+		filtered, err := (&InboundService{}).buildRuntimeInboundForAPI(database.GetDB(), inbound)
+		if err != nil {
+			return fmt.Errorf("build filtered PPP VPN runtime settings: %w", err)
+		}
+		inbound = filtered
+	}
 	if inbound.Protocol == model.L2TP {
 		if !inbound.Enable {
-			l2tp.GetManager().Remove(inbound.Id)
-			return nil
+			return l2tp.GetManager().RemoveChecked(inbound.Id)
 		}
 		instance, ok := l2tp.InstanceFromInbound(inbound, nil)
 		if !ok {
@@ -51,8 +59,7 @@ func reconcilePPPVPNRuntime(inbound *model.Inbound) error {
 	}
 	if inbound.Protocol == model.SSTP || inbound.Protocol == model.PPTP {
 		if !inbound.Enable {
-			pppvpn.GetManager().Remove(inbound.Id)
-			return nil
+			return pppvpn.GetManager().RemoveChecked(inbound.Id)
 		}
 		instance, ok := pppvpn.InstanceFromInbound(inbound, nil)
 		if !ok {
@@ -69,7 +76,7 @@ func reconcilePPPVPNRuntime(inbound *model.Inbound) error {
 // whole batch, instead of repeating the full per-client cycle. It mirrors the
 // semantics of DelInboundClientByEmail for each removed client. needRestart is
 // the OR across all removals.
-func (s *ClientService) delInboundClients(inboundSvc *InboundService, inboundId int, recs []*model.ClientRecord, keepTraffic bool) (bool, error) {
+func (s *ClientService) delInboundClients(inboundSvc *InboundService, inboundId int, recs []*model.ClientRecord, keepTraffic bool) (needRestart bool, err error) {
 	if len(recs) == 0 {
 		return false, nil
 	}
@@ -90,8 +97,8 @@ func (s *ClientService) delInboundClients(inboundSvc *InboundService, inboundId 
 	// entry carrying a wanted email, independent of credential drift.
 	wanted := make(map[string]struct{}, len(recs))
 	for _, rec := range recs {
-		if rec.Email != "" {
-			wanted[rec.Email] = struct{}{}
+		if key := transferEmailKey(rec.Email); key != "" {
+			wanted[key] = struct{}{}
 		}
 	}
 
@@ -112,7 +119,7 @@ func (s *ClientService) delInboundClients(inboundSvc *InboundService, inboundId 
 			continue
 		}
 		email, _ := c["email"].(string)
-		if _, hit := wanted[email]; hit && email != "" {
+		if _, hit := wanted[transferEmailKey(email)]; hit && transferEmailKey(email) != "" {
 			enable, _ := c["enable"].(bool)
 			removed = append(removed, removedClient{email: email, needApiDel: enable})
 			continue
@@ -122,6 +129,14 @@ func (s *ClientService) delInboundClients(inboundSvc *InboundService, inboundId 
 
 	if len(removed) == 0 {
 		return false, nil
+	}
+
+	removedEmailsForGuard := make([]string, 0, len(removed))
+	for _, r := range removed {
+		removedEmailsForGuard = append(removedEmailsForGuard, r.email)
+	}
+	if err := rejectUnprovenDaemonRemoval(database.GetDB(), removedEmailsForGuard, []int{inboundId}); err != nil {
+		return false, err
 	}
 
 	db := database.GetDB()
@@ -151,50 +166,54 @@ func (s *ClientService) delInboundClients(inboundSvc *InboundService, inboundId 
 		}
 	}
 
-	needRestart := false
 	markDirty := false
+	localRemovalAttempted := false
+	remoteRemovalAttempted := false
+	defer func() {
+		// Runtime calls cannot be rolled back if a later save or sync fails.
+		// Also preserve a dirty plan across any subsequent early return.
+		if oldInbound.NodeID != nil && (markDirty || (err != nil && remoteRemovalAttempted)) {
+			if dErr := (&NodeService{}).MarkNodeDirty(*oldInbound.NodeID); dErr != nil {
+				logger.Warning("mark node dirty after client detach:", dErr)
+			}
+		}
+	}()
 	for _, r := range removed {
 		email := r.email
 		emailShared := sharedSet[strings.ToLower(strings.TrimSpace(email))]
 		if !emailShared && !keepTraffic {
 			if err := inboundSvc.DelClientIPs(db, email); err != nil {
 				logger.Error("Error in delete client IPs")
-				return needRestart, err
+				return needRestart || localRemovalAttempted, err
 			}
 		}
 		if len(email) > 0 {
-			var enables []bool
-			if err := db.Model(xray.ClientTraffic{}).Where("LOWER(TRIM(email)) = LOWER(TRIM(?))", strings.TrimSpace(email)).Limit(1).Pluck("enable", &enables).Error; err != nil {
-				logger.Error("Get stats error")
-				return needRestart, err
-			}
-			notDepleted := len(enables) > 0 && enables[0]
 			if !emailShared && !keepTraffic {
 				if err := inboundSvc.DelClientStat(db, email); err != nil {
 					logger.Error("Delete stats Data Error")
-					return needRestart, err
+					return needRestart || localRemovalAttempted, err
 				}
 			}
-			if r.needApiDel && notDepleted && oldInbound.NodeID == nil {
+			if r.needApiDel && oldInbound.NodeID == nil {
+				localRemovalAttempted = true
 				rt, rterr := inboundSvc.runtimeFor(oldInbound)
 				if rterr != nil {
 					needRestart = true
 				} else if err1 := rt.RemoveUser(context.Background(), oldInbound, email); err1 != nil {
-					if !strings.Contains(err1.Error(), fmt.Sprintf("User %s not found.", email)) {
-						needRestart = true
-					}
+					needRestart = true
 				}
 			}
 		}
 		if oldInbound.NodeID != nil && len(email) > 0 {
 			rt, push, dirty, perr := inboundSvc.nodePushPlan(oldInbound)
 			if perr != nil {
-				return needRestart, perr
+				return needRestart || localRemovalAttempted, perr
 			}
 			if dirty {
 				markDirty = true
 			}
 			if push {
+				remoteRemovalAttempted = true
 				if err1 := rt.DeleteUser(context.Background(), oldInbound, email); err1 != nil {
 					logger.Warning("Error in deleting client on", rt.Name(), ":", err1)
 					markDirty = true
@@ -204,7 +223,7 @@ func (s *ClientService) delInboundClients(inboundSvc *InboundService, inboundId 
 	}
 
 	if err := db.Save(oldInbound).Error; err != nil {
-		return needRestart, err
+		return needRestart || localRemovalAttempted, err
 	}
 	if err := reconcilePPPVPNRuntime(oldInbound); err != nil {
 		logger.Warning("PPP VPN: synchronous client removal reconcile failed:", err)
@@ -212,14 +231,21 @@ func (s *ClientService) delInboundClients(inboundSvc *InboundService, inboundId 
 	}
 	finalClients, gcErr := inboundSvc.GetClients(oldInbound)
 	if gcErr != nil {
-		return needRestart, gcErr
+		return needRestart || localRemovalAttempted, gcErr
 	}
 	if err := s.SyncInbound(db, inboundId, finalClients); err != nil {
-		return needRestart, err
+		return needRestart || localRemovalAttempted, err
 	}
-	if markDirty && oldInbound.NodeID != nil {
-		if dErr := (&NodeService{}).MarkNodeDirty(*oldInbound.NodeID); dErr != nil {
-			logger.Warning("mark node dirty failed:", dErr)
+	if oldInbound.NodeID == nil {
+		switch oldInbound.Protocol {
+		case model.AmneziaWG:
+			if inboundSvc.applyLocalAmneziaWG(oldInbound.Id) != nil {
+				needRestart = true
+			}
+		case model.TUIC:
+			if inboundSvc.applyLocalTuic(oldInbound.Id) != nil {
+				needRestart = true
+			}
 		}
 	}
 	return needRestart, nil
@@ -303,7 +329,7 @@ func (s *ClientService) AddInboundClient(inboundSvc *InboundService, data *model
 // map. Bulk callers pass a single snapshot so the global getAllEmailSubIDs scan
 // runs once for the whole batch instead of once per target inbound; a nil map
 // makes it compute its own (the single-add path).
-func (s *ClientService) addInboundClient(inboundSvc *InboundService, data *model.Inbound, emailSubIDs map[string]string) (bool, error) {
+func (s *ClientService) addInboundClient(inboundSvc *InboundService, data *model.Inbound, emailSubIDs map[string]string) (needRestart bool, err error) {
 	defer lockInbound(data.Id).Unlock()
 	if data.Protocol == model.WireGuard || data.Protocol == model.AmneziaWG {
 		tunnelAddressMutationMu.Lock()
@@ -455,25 +481,65 @@ func (s *ClientService) addInboundClient(inboundSvc *InboundService, data *model
 
 	db := database.GetDB()
 	tx := db.Begin()
+	if tx.Error != nil {
+		return false, tx.Error
+	}
 
 	markDirty := false
+	remoteRuntimeAttempted := false
+	markRemoteDirty := func() {
+		if oldInbound.NodeID != nil {
+			if dErr := (&NodeService{}).MarkNodeDirty(*oldInbound.NodeID); dErr != nil {
+				logger.Warning("mark node dirty after client add:", dErr)
+			}
+		}
+	}
 	defer func() {
-		if err != nil {
+		if recovered := recover(); recovered != nil {
 			tx.Rollback()
+			if remoteRuntimeAttempted {
+				markRemoteDirty()
+			}
+			panic(recovered)
+		}
+		if err != nil {
+			needRestart = true // runtime may have been touched before rollback
+			tx.Rollback()
+			if remoteRuntimeAttempted {
+				markRemoteDirty()
+			}
 			return
 		}
-		tx.Commit()
-		if oldInbound.Protocol == model.TUIC && oldInbound.NodeID == nil {
-			inboundSvc.applyLocalTuic(oldInbound.Id)
-		}
-		if markDirty && oldInbound.NodeID != nil {
-			if dErr := (&NodeService{}).MarkNodeDirty(*oldInbound.NodeID); dErr != nil {
-				logger.Warning("mark node dirty failed:", dErr)
+		if commitErr := tx.Commit().Error; commitErr != nil {
+			err = fmt.Errorf("commit inbound client add: %w", commitErr)
+			needRestart = true
+			if remoteRuntimeAttempted {
+				markRemoteDirty()
 			}
+			return
+		}
+		if oldInbound.NodeID == nil {
+			if pppErr := reconcilePPPVPNRuntime(oldInbound); pppErr != nil {
+				logger.Warning("PPP VPN: synchronous client reconcile failed:", pppErr)
+				needRestart = true
+			}
+			switch oldInbound.Protocol {
+			case model.TUIC:
+				if inboundSvc.applyLocalTuic(oldInbound.Id) != nil {
+					needRestart = true
+				}
+			case model.AmneziaWG:
+				if inboundSvc.applyLocalAmneziaWG(oldInbound.Id) != nil {
+					needRestart = true
+				}
+			}
+		}
+		if markDirty {
+			markRemoteDirty()
 		}
 	}()
 
-	needRestart := false
+	needRestart = false
 	rt, push, dirty, perr := inboundSvc.nodePushPlan(oldInbound)
 	if perr != nil {
 		err = perr
@@ -485,7 +551,9 @@ func (s *ClientService) addInboundClient(inboundSvc *InboundService, data *model
 	if oldInbound.NodeID == nil {
 		for _, client := range clients {
 			if len(client.Email) > 0 {
-				inboundSvc.AddClientStat(tx, data.Id, &client)
+				if err = inboundSvc.AddClientStat(tx, data.Id, &client); err != nil {
+					return false, err
+				}
 			}
 		}
 		if !push {
@@ -525,9 +593,12 @@ func (s *ClientService) addInboundClient(inboundSvc *InboundService, data *model
 	} else {
 		for _, client := range clients {
 			if len(client.Email) > 0 {
-				inboundSvc.AddClientStat(tx, data.Id, &client)
+				if err = inboundSvc.AddClientStat(tx, data.Id, &client); err != nil {
+					return false, err
+				}
 			}
 			if push {
+				remoteRuntimeAttempted = true
 				if err1 := rt.AddClient(context.Background(), oldInbound, client); err1 != nil {
 					logger.Warning("Error in adding client on", rt.Name(), ":", err1)
 					markDirty = true
@@ -540,10 +611,6 @@ func (s *ClientService) addInboundClient(inboundSvc *InboundService, data *model
 	if err = tx.Save(oldInbound).Error; err != nil {
 		return false, err
 	}
-	if err := reconcilePPPVPNRuntime(oldInbound); err != nil {
-		logger.Warning("PPP VPN: synchronous client reconcile failed:", err)
-		needRestart = true
-	}
 	finalClients, gcErr := inboundSvc.GetClients(oldInbound)
 	if gcErr != nil {
 		err = gcErr
@@ -552,13 +619,10 @@ func (s *ClientService) addInboundClient(inboundSvc *InboundService, data *model
 	if err = s.SyncInbound(tx, oldInbound.Id, finalClients); err != nil {
 		return false, err
 	}
-	if oldInbound.Protocol == model.AmneziaWG && oldInbound.NodeID == nil {
-		inboundSvc.applyLocalAmneziaWG(oldInbound.Id)
-	}
 	return needRestart, nil
 }
 
-func (s *ClientService) UpdateInboundClient(inboundSvc *InboundService, data *model.Inbound, oldEmail string) (bool, error) {
+func (s *ClientService) UpdateInboundClient(inboundSvc *InboundService, data *model.Inbound, oldEmail string) (needRestart bool, err error) {
 	defer lockInbound(data.Id).Unlock()
 
 	clients, err := inboundSvc.GetClients(data)
@@ -771,16 +835,52 @@ func (s *ClientService) UpdateInboundClient(inboundSvc *InboundService, data *mo
 	oldInbound.Settings = string(newSettings)
 	db := database.GetDB()
 	tx := db.Begin()
+	if tx.Error != nil {
+		return false, tx.Error
+	}
 
 	markDirty := false
+	localRuntimeAttempted := false
+	remoteRuntimeAttempted := false
 	defer func() {
+		if recovered := recover(); recovered != nil {
+			tx.Rollback()
+			panic(recovered)
+		}
 		if err != nil {
 			tx.Rollback()
+		} else if commitErr := tx.Commit().Error; commitErr != nil {
+			err = fmt.Errorf("commit inbound client update: %w", commitErr)
+		}
+		if err != nil {
+			// A failed transaction cannot undo a runtime call, and a commit
+			// error can have an uncertain outcome. Request recovery against
+			// the eventual DB state; neither flag proves quiescence.
+			needRestart = needRestart || localRuntimeAttempted
+			if remoteRuntimeAttempted && oldInbound.NodeID != nil {
+				if dErr := (&NodeService{}).MarkNodeDirty(*oldInbound.NodeID); dErr != nil {
+					logger.Warning("mark node dirty after failed update:", dErr)
+				}
+			}
 			return
 		}
-		tx.Commit()
-		if oldInbound.Protocol == model.TUIC && oldInbound.NodeID == nil {
-			inboundSvc.applyLocalTuic(oldInbound.Id)
+		// The runtime must see committed settings; applying against another DB
+		// connection before commit can read stale peers or block on the writer.
+		if oldInbound.NodeID == nil {
+			if pppErr := reconcilePPPVPNRuntime(oldInbound); pppErr != nil {
+				logger.Warning("PPP VPN: synchronous client reconcile failed:", pppErr)
+				needRestart = true
+			}
+			switch oldInbound.Protocol {
+			case model.TUIC:
+				if inboundSvc.applyLocalTuic(oldInbound.Id) != nil {
+					needRestart = true
+				}
+			case model.AmneziaWG:
+				if inboundSvc.applyLocalAmneziaWG(oldInbound.Id) != nil {
+					needRestart = true
+				}
+			}
 		}
 		if markDirty && oldInbound.NodeID != nil {
 			if dErr := (&NodeService{}).MarkNodeDirty(*oldInbound.NodeID); dErr != nil {
@@ -843,7 +943,7 @@ func (s *ClientService) UpdateInboundClient(inboundSvc *InboundService, data *mo
 			}
 		}
 	}
-	needRestart := false
+	needRestart = false
 	if len(oldEmail) > 0 {
 		rt, push, dirty, perr := inboundSvc.nodePushPlan(oldInbound)
 		if perr != nil {
@@ -858,17 +958,20 @@ func (s *ClientService) UpdateInboundClient(inboundSvc *InboundService, data *mo
 				needRestart = true
 			} else {
 				if oldClients[clientIndex].Enable {
+					localRuntimeAttempted = true
 					err1 := rt.RemoveUser(context.Background(), oldInbound, oldEmail)
 					if err1 == nil {
 						logger.Debug("Old client deleted on", rt.Name(), ":", oldEmail)
-					} else if strings.Contains(err1.Error(), fmt.Sprintf("User %s not found.", oldEmail)) {
-						logger.Debug("User is already deleted. Nothing to do more...")
 					} else {
 						logger.Debug("Error in deleting client on", rt.Name(), ":", err1)
 						needRestart = true
 					}
 				}
-				if clients[0].Enable {
+				// A failed removal can mean the old handler or its sessions are
+				// still active (including a retry returning not-found after a
+				// timeout). Do not install a new credential before recovery.
+				if clients[0].Enable && !needRestart {
+					localRuntimeAttempted = true
 					cipher := ""
 					if oldInbound.Protocol == "shadowsocks" {
 						cipher = oldSettings["method"].(string)
@@ -891,6 +994,7 @@ func (s *ClientService) UpdateInboundClient(inboundSvc *InboundService, data *mo
 				}
 			}
 		} else if push {
+			remoteRuntimeAttempted = true
 			if err1 := rt.UpdateUser(context.Background(), oldInbound, oldEmail, clients[0]); err1 != nil {
 				logger.Warning("Error in updating client on", rt.Name(), ":", err1)
 				markDirty = true
@@ -903,10 +1007,6 @@ func (s *ClientService) UpdateInboundClient(inboundSvc *InboundService, data *mo
 	if err = tx.Save(oldInbound).Error; err != nil {
 		return false, err
 	}
-	if err := reconcilePPPVPNRuntime(oldInbound); err != nil {
-		logger.Warning("PPP VPN: synchronous client reconcile failed:", err)
-		needRestart = true
-	}
 	finalClients, gcErr := inboundSvc.GetClients(oldInbound)
 	if gcErr != nil {
 		err = gcErr
@@ -915,15 +1015,17 @@ func (s *ClientService) UpdateInboundClient(inboundSvc *InboundService, data *mo
 	if err = s.SyncInbound(tx, oldInbound.Id, finalClients); err != nil {
 		return false, err
 	}
-	if oldInbound.Protocol == model.AmneziaWG && oldInbound.NodeID == nil {
-		inboundSvc.applyLocalAmneziaWG(oldInbound.Id)
-	}
 	return needRestart, nil
 }
 
-func (s *ClientService) DelInboundClientByEmail(inboundSvc *InboundService, inboundId int, email string, keepTraffic bool) (bool, error) {
+func (s *ClientService) DelInboundClientByEmail(inboundSvc *InboundService, inboundId int, email string, keepTraffic bool) (needRestart bool, err error) {
 	defer lockInbound(inboundId).Unlock()
 
+	if !keepTraffic {
+		if err := rejectNegativeTrafficEvidence(database.GetDB(), []string{email}); err != nil {
+			return false, err
+		}
+	}
 	oldInbound, err := inboundSvc.GetInbound(inboundId)
 	if err != nil {
 		logger.Error("Load Old Data Error")
@@ -959,6 +1061,9 @@ func (s *ClientService) DelInboundClientByEmail(inboundSvc *InboundService, inbo
 	if !found {
 		return false, fmt.Errorf("%w for email: %s", ErrClientNotInInbound, email)
 	}
+	if err := rejectUnprovenDaemonRemoval(database.GetDB(), []string{email}, []int{inboundId}); err != nil {
+		return false, err
+	}
 	db := database.GetDB()
 	newClients = compactOrphans(db, newClients)
 	if newClients == nil {
@@ -984,11 +1089,20 @@ func (s *ClientService) DelInboundClientByEmail(inboundSvc *InboundService, inbo
 		}
 	}
 
-	needRestart := false
 	markDirty := false
+	remoteRemovalAttempted := false
+	defer func() {
+		if oldInbound.NodeID != nil && (markDirty || (err != nil && remoteRemovalAttempted)) {
+			if dErr := (&NodeService{}).MarkNodeDirty(*oldInbound.NodeID); dErr != nil {
+				logger.Warning("mark node dirty after client removal:", dErr)
+			}
+		}
+	}()
 
-	if len(email) > 0 && !emailShared {
-		if !keepTraffic {
+	if len(email) > 0 {
+		// Statistics are shared across inbounds, but authentication is not.
+		// Retain shared counters while still removing this inbound's user.
+		if !emailShared && !keepTraffic {
 			traffic, err := inboundSvc.GetClientTrafficByEmail(email)
 			if err != nil {
 				return false, err
@@ -1015,13 +1129,12 @@ func (s *ClientService) DelInboundClientByEmail(inboundSvc *InboundService, inbo
 				} else if err1 := rt.RemoveUser(context.Background(), oldInbound, email); err1 == nil {
 					logger.Debug("Client deleted on", rt.Name(), ":", email)
 					needRestart = false
-				} else if strings.Contains(err1.Error(), fmt.Sprintf("User %s not found.", email)) {
-					logger.Debug("User is already deleted. Nothing to do more...")
 				} else {
 					logger.Debug("Error in deleting client on", rt.Name(), ":", email)
 					needRestart = true
 				}
 			} else if push {
+				remoteRemovalAttempted = true
 				if err1 := rt.DeleteUser(context.Background(), oldInbound, email); err1 != nil {
 					logger.Warning("Error in deleting client on", rt.Name(), ":", err1)
 					markDirty = true
@@ -1031,7 +1144,8 @@ func (s *ClientService) DelInboundClientByEmail(inboundSvc *InboundService, inbo
 	}
 
 	if err := db.Save(oldInbound).Error; err != nil {
-		return false, err
+		// A local runtime removal may have succeeded before persistence failed.
+		return needRestart || (needApiDel && oldInbound.NodeID == nil), err
 	}
 	if err := reconcilePPPVPNRuntime(oldInbound); err != nil {
 		logger.Warning("l2tp: synchronous client deletion reconcile failed:", err)
@@ -1039,20 +1153,19 @@ func (s *ClientService) DelInboundClientByEmail(inboundSvc *InboundService, inbo
 	}
 	finalClients, gcErr := inboundSvc.GetClients(oldInbound)
 	if gcErr != nil {
-		return false, gcErr
+		return needRestart || oldInbound.NodeID == nil, gcErr
 	}
 	if err := s.SyncInbound(db, inboundId, finalClients); err != nil {
-		return false, err
+		return needRestart || oldInbound.NodeID == nil, err
 	}
 	if oldInbound.Protocol == model.AmneziaWG && oldInbound.NodeID == nil {
-		inboundSvc.applyLocalAmneziaWG(oldInbound.Id)
+		if inboundSvc.applyLocalAmneziaWG(oldInbound.Id) != nil {
+			needRestart = true
+		}
 	}
 	if oldInbound.Protocol == model.TUIC && oldInbound.NodeID == nil {
-		inboundSvc.applyLocalTuic(oldInbound.Id)
-	}
-	if markDirty && oldInbound.NodeID != nil {
-		if dErr := (&NodeService{}).MarkNodeDirty(*oldInbound.NodeID); dErr != nil {
-			logger.Warning("mark node dirty failed:", dErr)
+		if inboundSvc.applyLocalTuic(oldInbound.Id) != nil {
+			needRestart = true
 		}
 	}
 	return needRestart, nil
@@ -1280,10 +1393,10 @@ func (s *ClientService) applyClientFieldByEmail(inboundSvc *InboundService, clie
 		}
 		inbound.Settings = string(modifiedSettings)
 		nr, uErr := s.UpdateInboundClient(inboundSvc, inbound, clientEmail)
+		needRestart = needRestart || nr
 		if uErr != nil {
 			return needRestart, uErr
 		}
-		needRestart = needRestart || nr
 	}
 
 	if !found {

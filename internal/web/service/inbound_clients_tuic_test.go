@@ -1,10 +1,13 @@
 package service
 
 import (
+	"encoding/json"
+	"net"
 	"strings"
 	"testing"
 
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
+	"github.com/Dark-Sky07/phoenix/internal/tuic"
 	"github.com/Dark-Sky07/phoenix/internal/web/runtime"
 )
 
@@ -75,21 +78,29 @@ func TestTuicClientMutationsDoNotRequireRestart(t *testing.T) {
 	inboundSvc := &InboundService{}
 	clientSvc := &ClientService{}
 
+	cert, key := testTUICCertificate(t)
+	settings, err := json.Marshal(map[string]any{
+		"certificate": cert, "private_key": key,
+		"clients": []model.Client{{ID: "a0000000-0000-0000-0000-000000000001", Password: "p1", Email: "user1@tuic.com", Enable: true}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := pc.LocalAddr().(*net.UDPAddr).Port
+	_ = pc.Close()
 	ib := &model.Inbound{
-		Tag:      "tuic-restart-test",
-		Protocol: model.TUIC,
-		Port:     54321,
-		Enable:   true,
-		Settings: `{
-			"certificate": "dummy-cert",
-			"private_key": "dummy-key",
-			"clients":[{"id":"a0000000-0000-0000-0000-000000000001","password":"p1","email":"user1@tuic.com","enable":true}]
-		}`,
+		Tag: "tuic-restart-test", Protocol: model.TUIC, Listen: "127.0.0.1",
+		Port: port, Enable: true, Settings: string(settings),
 	}
 	created, _, err := inboundSvc.AddInbound(ib)
 	if err != nil {
 		t.Fatalf("AddInbound failed: %v", err)
 	}
+	t.Cleanup(func() { tuic.GetManager().Remove(created.Id) })
 
 	addPayload := &model.Inbound{
 		Id:       created.Id,

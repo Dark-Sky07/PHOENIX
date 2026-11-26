@@ -137,34 +137,79 @@ PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 iface="${IFNAME:-${1:-}}"
 peer="${PEERNAME:-}"
-case "$iface" in ''|*[!A-Za-z0-9_.-]*) exit 0 ;; esac
 session_dir=%s
 mkdir -p "$session_dir"
 chmod 700 "$session_dir"
+# Every unexpected failure after this point leaves a visible, deliberately
+# unparseable incident for the panel collector to fence and an operator to review.
+incident() {
+  code=$?
+  trap - EXIT
+  if [ "$code" -ne 0 ]; then
+    file=$(mktemp "$session_dir/hook-error.XXXXXXXXXX") || exit "$code"
+    printf 'PPP hook failure: %%s interface %%s\n' '%s' "$iface" > "$file" || true
+    sync "$file" "$session_dir" || true
+  fi
+  exit "$code"
+}
+trap incident EXIT
+# Persist an in-progress record before any session mutation. An interrupted
+# hook leaves it for manual review; a running hook may finish and remove it.
+pending=$(mktemp "$session_dir/hook-pending.XXXXXXXXXX")
+printf 'PPP hook in progress: %%s interface %%s\n' '%s' "$iface" > "$pending"
+sync "$pending" "$session_dir"
+# Invalid identity must leave incident evidence rather than silently exiting.
+case "$iface" in ''|.|..|*[!A-Za-z0-9_.-]*) exit 1 ;; esac
+mkdir -p "$session_dir/.hook-locks"
+exec 9>"$session_dir/.hook-locks/$iface"
+flock -x -w 5 9
 active_file="$session_dir/$iface"
+# PPPD_PID is supplied by pppd. A reused PID alone is not a session identity:
+# require this hook to be its child and include boot ID and process start time.
+pid="${PPPD_PID:-}"
+case "$pid" in ''|*[!0-9]*) exit 1 ;; esac
+[ "$pid" = "$PPID" ] || exit 1
+boot=$(cat /proc/sys/kernel/random/boot_id)
+start=$(sed 's/^.*) //' "/proc/$pid/stat" | awk '{print $20}')
+case "$start" in ''|*[!0-9]*) exit 1 ;; esac
+owner="$boot:$pid:$start"
+ifindex=$(cat "/sys/class/net/$iface/ifindex")
+case "$ifindex" in ''|*[!0-9]*) exit 1 ;; esac
 rx=0
 tx=0
 if [ '%s' = closed ]; then
+  [ -f "$active_file" ] || exit 1
+  saved_peer=$(cut -f3 "$active_file")
+  session_id=$(cut -f6 "$active_file")
+  saved_owner=$(cut -f8 "$active_file")
+  saved_ifindex=$(cut -f9 "$active_file")
+  [ -n "$session_id" ] && [ "$saved_owner" = "$owner" ] && [ "$saved_ifindex" = "$ifindex" ] || exit 1
+  [ -z "$peer" ] || [ "$peer" = "$saved_peer" ] || exit 1
+  peer="$saved_peer"
   rx=$(cat "/sys/class/net/$iface/statistics/rx_bytes")
   tx=$(cat "/sys/class/net/$iface/statistics/tx_bytes")
-fi
-if [ '%s' = closed ]; then
-  [ -n "$peer" ] || peer=$(cut -f3 "$active_file" 2>/dev/null || true)
-  session_id=$(cut -f6 "$active_file" 2>/dev/null || true)
-  [ -n "$session_id" ] || session_id="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || printf '%%s-%%s-%%s' "$iface" "$$" "$(date +%%s)")"
+  [ "$(cat "/sys/class/net/$iface/ifindex")" = "$ifindex" ] || exit 1
   session_file="$session_dir/$iface.closed.$session_id"
+  # Existing closed evidence must not be overwritten.
+  [ ! -e "$session_file" ] || exit 1
 else
-  case "$peer" in '') exit 0 ;; esac
-  session_id=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || printf '%%s-%%s-%%s' "$iface" "$$" "$(date +%%s)")
+  [ -n "$peer" ] && [ ! -e "$active_file" ] || exit 1
+  session_id=$(cat /proc/sys/kernel/random/uuid)
   session_file="$active_file"
 fi
-case "$peer" in '') exit 0 ;; esac
 tmp="$session_file.tmp.$$"
-printf '%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\n' '%s' "$iface" "$peer" "$rx" "$tx" "$session_id" '%d' > "$tmp"
+printf '%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\t%%s\n' '%s' "$iface" "$peer" "$rx" "$tx" "$session_id" '%d' "$owner" "$ifindex" > "$tmp"
 chmod 600 "$tmp"
-mv -f "$tmp" "$session_file"
-if [ '%s' = closed ]; then rm -f "$active_file"; fi
-`, shellQuote(sessionDir), state, state, state, inboundID, state)
+sync "$tmp"
+# Link is atomic and refuses to replace an existing record.
+ln "$tmp" "$session_file"
+rm -f "$tmp"
+if [ '%s' = closed ]; then rm "$active_file"; fi
+sync "$session_dir"
+rm "$pending"
+sync "$session_dir"
+trap - EXIT
+`, shellQuote(sessionDir), state, state, state, state, inboundID, state)
 }
 
 func renderPPTPDConfig(i Instance, optionsPath string) string {
@@ -343,7 +388,27 @@ func writeConfig(i Instance) (string, error) {
 	// Keep accounting records outside the managed instance directory: Remove()
 	// deletes daemon configs/certificates after stopping it, but any final PPP
 	// counters still need to be drained by the next traffic poll.
-	sessionDir := filepath.Join(rootDir(), "sessions", fmt.Sprintf("%s-%d", i.Protocol, i.ID))
+	// Derive the spool name from the validated protocol component rather than
+	// accepting a path from settings, and confine all operations to this root.
+	protocolDir := filepath.Dir(relativeDir)
+	sessionRel := filepath.Join("sessions", protocolDir+"-"+strconv.Itoa(i.ID))
+	if !filepath.IsLocal(sessionRel) {
+		return "", errors.New("pppvpn: invalid session path")
+	}
+	sessionDir := filepath.Join(rootDir(), sessionRel)
+	root, err := os.OpenRoot(rootDir())
+	if err != nil {
+		return "", err
+	}
+	defer root.Close()
+	if err := root.MkdirAll(sessionRel, 0700); err != nil {
+		return "", fmt.Errorf("prepare PPP session spool: %w", err)
+	}
+	for _, rel := range []string{sessionRel, "sessions", "."} {
+		if err := syncPPPDirectory(root, rel); err != nil {
+			return "", err
+		}
+	}
 	ipUp := renderTrafficHook(sessionDir, i.ID, false) + "\nsysctl -w \"net.ipv4.conf.${IFNAME:-${1:-}}.route_localnet=1\" >/dev/null 2>&1 || true\nsysctl -w \"net.ipv4.conf.${IFNAME:-${1:-}}.rp_filter=0\" >/dev/null 2>&1 || true\n"
 	if err := atomicWrite(rootDir(), filepath.Join(relativeDir, "ip-up"), []byte(ipUp), 0o750); err != nil {
 		return "", err

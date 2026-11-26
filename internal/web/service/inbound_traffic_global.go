@@ -1,12 +1,15 @@
 package service
 
 import (
+	"encoding/json"
+	"errors"
 	"strings"
 	"time"
 
 	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
 	"github.com/Dark-Sky07/phoenix/internal/logger"
+	"github.com/Dark-Sky07/phoenix/internal/web/trafficprotocol"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
 
 	"gorm.io/gorm"
@@ -19,31 +22,95 @@ import (
 // local-only counters, so the pushing master's (and any other master's)
 // delta accounting over our snapshot stays correct.
 //
-// Rows are overwritten, not max-merged: a reset on the master propagates here
-// on its next push. Emails this panel doesn't host are dropped.
+// Unmapped clients still accept decreases. For reseller-owned clients, an
+// unversioned decrease is ambiguous and blocks updates until manual review.
+// Emails this panel doesn't host are dropped.
 func (s *InboundService) AcceptGlobalTraffic(masterGuid string, traffics []*xray.ClientTraffic) error {
+	return s.acceptGlobalTraffic(masterGuid, traffics, nil)
+}
+
+// AcceptVerifiedGlobalTraffic applies a signed snapshot and advances its
+// provisioned receiver sequence in the same database transaction. The caller
+// must obtain receiverID and key from trusted peer provisioning, not the
+// request. This method is not yet exposed on a network endpoint; the legacy
+// endpoint remains separate and is not protected by it.
+func (s *InboundService) AcceptVerifiedGlobalTraffic(receiverID string, key []byte, envelope trafficprotocol.Envelope) error {
+	if len(envelope.Snapshot) == 0 || len(envelope.Snapshot) > trafficprotocol.MaxSnapshotBytes {
+		return errors.New("invalid traffic snapshot size")
+	}
+	if envelope.Sender != strings.TrimSpace(envelope.Sender) {
+		return errors.New("noncanonical traffic snapshot sender")
+	}
+	// Prevent caller mutation between decoding and verification.
+	envelope.Snapshot = append([]byte(nil), envelope.Snapshot...)
+	envelope.MAC = append([]byte(nil), envelope.MAC...)
+	key = append([]byte(nil), key...)
+	var traffics []*xray.ClientTraffic
+	if err := json.Unmarshal(envelope.Snapshot, &traffics); err != nil {
+		return errors.New("invalid global traffic snapshot")
+	}
+	if len(traffics) == 0 {
+		return errors.New("empty verified global traffic snapshot")
+	}
+	return s.acceptGlobalTraffic(envelope.Sender, traffics, func(db *gorm.DB, apply func(*gorm.DB) error) error {
+		return trafficprotocol.ApplyVerified(db, receiverID, key, envelope, func(tx *gorm.DB, _ []byte) error {
+			return apply(tx)
+		})
+	})
+}
+
+func (s *InboundService) acceptGlobalTraffic(masterGuid string, traffics []*xray.ClientTraffic, transact func(*gorm.DB, func(*gorm.DB) error) error) error {
 	masterGuid = strings.TrimSpace(masterGuid)
 	if masterGuid == "" {
-		return nil
+		return errors.New("global traffic master identity is required")
 	}
 	emails := make([]string, 0, len(traffics))
 	byEmail := make(map[string]*xray.ClientTraffic, len(traffics))
 	for _, t := range traffics {
 		if t == nil || strings.TrimSpace(t.Email) == "" {
-			continue
+			return errors.New("global traffic client identity is required")
+		}
+		if t.Up < 0 || t.Down < 0 {
+			return errors.New("negative global traffic counters")
 		}
 		key := strings.ToLower(strings.TrimSpace(t.Email))
-		if _, dup := byEmail[key]; !dup {
-			emails = append(emails, key)
+		if _, dup := byEmail[key]; dup {
+			return errors.New("duplicate global traffic identity")
 		}
+		emails = append(emails, key)
 		byEmail[key] = t
 	}
 	if len(emails) == 0 {
 		return nil
 	}
 
+	// A global snapshot can change effective reseller usage. Serialize capture and commit with quota/ownership
+	// mutations and with pushes in other participating panel processes. Take
+	// the allocation lock before entering the writer to preserve lock order.
+	unlock, err := LockResellerAllocation()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	return submitTrafficWrite(func() error {
 		db := database.GetDB()
+		if err := retryPendingGlobalCounterIncident(db); err != nil {
+			return err
+		}
+		if err := pendingCounterIncidentError(); err != nil {
+			return err
+		}
+		if transact == nil {
+			// Provisioning must hold the same allocation lock. Once registered,
+			// a sender cannot overwrite its traffic through the legacy path.
+			var registered int64
+			if err := db.Model(&model.TrafficSnapshotReceiver{}).Where("sender = ?", masterGuid).Count(&registered).Error; err != nil {
+				return err
+			}
+			if registered != 0 {
+				return errors.New("registered global traffic sender requires verified snapshots")
+			}
+		}
 		known := make([]string, 0, len(emails))
 		for _, batch := range chunkStrings(emails, sqlInChunk) {
 			var page []string
@@ -54,8 +121,16 @@ func (s *InboundService) AcceptGlobalTraffic(masterGuid string, traffics []*xray
 			}
 			known = append(known, page...)
 		}
-		if len(known) == 0 {
+		if len(known) == 0 && transact == nil {
 			return nil
+		}
+		seenKnown := make(map[string]bool, len(known))
+		for _, email := range known {
+			key := transferEmailKey(email)
+			if seenKnown[key] {
+				return errors.New("ambiguous local client traffic requires reconciliation")
+			}
+			seenKnown[key] = true
 		}
 
 		now := time.Now().UnixMilli()
@@ -74,7 +149,55 @@ func (s *InboundService) AcceptGlobalTraffic(masterGuid string, traffics []*xray
 			})
 		}
 
-		return db.Transaction(func(tx *gorm.DB) error {
+		apply := func(tx *gorm.DB) error {
+			// This protocol has no authenticated generation or ordering. A
+			// decrease may be a reset, a stale replay, or missing traffic; it
+			// cannot safely be treated as a new accounting window.
+			previous := make(map[string]model.ClientGlobalTraffic, len(rows))
+			keys := make([]string, 0, len(rows))
+			for _, row := range rows {
+				keys = append(keys, transferEmailKey(row.Email))
+			}
+			for _, batch := range chunkStrings(keys, sqlInChunk) {
+				var oldRows []model.ClientGlobalTraffic
+				if err := tx.Where("master_guid = ? AND LOWER(TRIM(email)) IN ?", masterGuid, batch).Find(&oldRows).Error; err != nil {
+					return err
+				}
+				for _, old := range oldRows {
+					if old.Up < 0 || old.Down < 0 {
+						return errors.New("negative stored global traffic requires reconciliation")
+					}
+					key := transferEmailKey(old.Email)
+					if _, exists := previous[key]; exists {
+						return errors.New("ambiguous stored global traffic requires reconciliation")
+					}
+					previous[key] = old
+				}
+			}
+			if err := rejectClientNodeIncidents(tx, keys); err != nil {
+				return err
+			}
+			for i := range rows {
+				row := &rows[i]
+				key := transferEmailKey(row.Email)
+				old, exists := previous[key]
+				if exists {
+					// Preserve the existing unique-index key. Creating a second row
+					// for a spelling variant would leave stale usage behind.
+					row.Email = old.Email
+				}
+				if !exists || (row.Up >= old.Up && row.Down >= old.Down) {
+					continue
+				}
+				var mappings int64
+				if err := tx.Model(&model.ResellerClient{}).Where("LOWER(TRIM(email)) = ?", key).Count(&mappings).Error; err != nil {
+					return err
+				}
+				if mappings == 0 {
+					continue
+				}
+				return &globalCounterDecrease{masterGuid: masterGuid, email: key, previousUp: old.Up, previousDown: old.Down, observedUp: row.Up, observedDown: row.Down}
+			}
 			for _, batch := range chunkGlobalRows(rows, 200) {
 				if err := tx.Clauses(clause.OnConflict{
 					Columns:   []clause.Column{{Name: "master_guid"}, {Name: "email"}},
@@ -84,7 +207,17 @@ func (s *InboundService) AcceptGlobalTraffic(masterGuid string, traffics []*xray
 				}
 			}
 			return nil
-		})
+		}
+		if transact == nil {
+			transact = func(db *gorm.DB, apply func(*gorm.DB) error) error { return db.Transaction(apply) }
+		}
+		err := transact(db, apply)
+		var decrease *globalCounterDecrease
+		if errors.As(err, &decrease) {
+			rememberGlobalCounterIncident(decrease)
+			return retryPendingGlobalCounterIncident(db)
+		}
+		return err
 	})
 }
 
@@ -104,15 +237,25 @@ func chunkGlobalRows(rows []model.ClientGlobalTraffic, size int) [][]model.Clien
 // value any master pushed for that email. Read-path only — callers hand it
 // rows about to be serialized for display; the stored counters are untouched.
 func overlayGlobalTraffic(db *gorm.DB, rows []*xray.ClientTraffic) {
-	if len(rows) == 0 {
-		return
+	if err := overlayGlobalTrafficChecked(db, rows); err != nil {
+		logger.Warning("overlayGlobalTraffic:", err)
 	}
-	// Cheap short-circuit for the common case (a panel no master pushes to).
-	var probe int64
-	if err := db.Model(&model.ClientGlobalTraffic{}).Limit(1).Count(&probe).Error; err != nil || probe == 0 {
-		return
-	}
+}
 
+// overlayGlobalTrafficChecked must be used by accounting/sync senders: a
+// failed or partial overlay is not a valid global snapshot. Display callers
+// retain the best-effort wrapper above.
+func overlayGlobalTrafficChecked(db *gorm.DB, rows []*xray.ClientTraffic) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	var probe int64
+	if err := db.Model(&model.ClientGlobalTraffic{}).Limit(1).Count(&probe).Error; err != nil {
+		return err
+	}
+	if probe == 0 {
+		return nil
+	}
 	emails := make([]string, 0, len(rows))
 	byEmail := make(map[string][]*xray.ClientTraffic, len(rows))
 	for _, r := range rows {
@@ -131,20 +274,30 @@ func overlayGlobalTraffic(db *gorm.DB, rows []*xray.ClientTraffic) {
 	for _, batch := range chunkStrings(emails, sqlInChunk) {
 		var globals []model.ClientGlobalTraffic
 		if err := db.Where("LOWER(TRIM(email)) IN ?", batch).Find(&globals).Error; err != nil {
-			logger.Warning("overlayGlobalTraffic:", err)
-			return
+			return err
 		}
+		seen := make(map[string]bool, len(globals))
 		for i := range globals {
-			for _, r := range byEmail[strings.ToLower(strings.TrimSpace(globals[i].Email))] {
-				if globals[i].Up > r.Up {
-					r.Up = globals[i].Up
+			global := &globals[i]
+			if global.Up < 0 || global.Down < 0 {
+				return errors.New("negative global traffic cannot be forwarded")
+			}
+			identity := global.MasterGuid + "\x00" + transferEmailKey(global.Email)
+			if seen[identity] {
+				return errors.New("ambiguous global traffic cannot be forwarded")
+			}
+			seen[identity] = true
+			for _, r := range byEmail[transferEmailKey(global.Email)] {
+				if global.Up > r.Up {
+					r.Up = global.Up
 				}
-				if globals[i].Down > r.Down {
-					r.Down = globals[i].Down
+				if global.Down > r.Down {
+					r.Down = global.Down
 				}
 			}
 		}
 	}
+	return nil
 }
 
 // overlayGlobalTrafficValues is overlayGlobalTraffic for value slices.
@@ -193,7 +346,20 @@ func (s *InboundService) GetNodeClientTraffics(nodeID int) ([]*xray.ClientTraffi
 		}
 		out = append(out, page...)
 	}
-	overlayGlobalTraffic(db, out)
+	seenRows := make(map[string]bool, len(out))
+	for _, row := range out {
+		if row == nil || transferEmailKey(row.Email) == "" || row.Up < 0 || row.Down < 0 {
+			return nil, errors.New("invalid local traffic cannot be forwarded")
+		}
+		key := transferEmailKey(row.Email)
+		if seenRows[key] {
+			return nil, errors.New("ambiguous local traffic cannot be forwarded")
+		}
+		seenRows[key] = true
+	}
+	if err := overlayGlobalTrafficChecked(db, out); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 

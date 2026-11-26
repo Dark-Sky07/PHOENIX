@@ -5,6 +5,7 @@ import { cleanup, render, screen, waitFor } from '@testing-library/react';
 
 import { ThemeProvider } from '@/hooks/useTheme';
 import { Status } from '@/models/status';
+import type { CounterIncidentStatus } from '@/models/status';
 import { DBInbound } from '@/models/dbinbound';
 
 const GB = 1024 ** 3;
@@ -120,6 +121,8 @@ vi.mock('@/api/queries/useNodesQuery', () => ({
 }));
 
 const statusObj = {
+  counterIncidents: { available: true, databaseCount: 0, fallbackPresent: false, pendingInProcess: false } as CounterIncidentStatus,
+  nodeSnapshotSafety: { available: true, nodeCount: 0 },
   cpu: 5.8, cpuCores: 4, logicalPro: 8, cpuSpeedMhz: 2900,
   disk: { current: 65820373811.2, total: 171798691840 },
   loads: [0.42, 0.51, 0.47],
@@ -194,12 +197,23 @@ describe('smoke: redesigned pages', () => {
     errors.length = 0;
     vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => { errors.push(args); });
   });
-  afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+  afterEach(() => {
+    statusObj.counterIncidents = { available: true, databaseCount: 0, fallbackPresent: false, pendingInProcess: false };
+    statusObj.nodeSnapshotSafety = { available: true, nodeCount: 0 };
+    statusObj.openvpn.errorMsg = '';
+    cleanup();
+    vi.restoreAllMocks();
+  });
 
   it('renders the dashboard without runtime errors', async () => {
     const { default: IndexPage } = await import('@/pages/index/IndexPage');
     const { container } = wrap(<IndexPage />);
     expect(container.querySelector('.dash-hero')).toBeTruthy();
+    expect(container.querySelector('.reseller-traffic-warning')).toBeTruthy();
+    const openvpnWarning = container.querySelector('.openvpn-credential-warning');
+    expect(openvpnWarning).toBeTruthy();
+    expect(openvpnWarning?.textContent).toContain('between traffic polls can be missed without any warning');
+    expect(openvpnWarning?.textContent).toContain('absence of alerts does not prove usage is complete');
     expect(container.querySelectorAll('.resource-tile').length).toBe(4);
     expect(container.querySelectorAll('.service-row').length).toBeGreaterThanOrEqual(3);
     expect(screen.getAllByText('Xray').length).toBeGreaterThan(0);
@@ -208,6 +222,73 @@ describe('smoke: redesigned pages', () => {
     expect(screen.getByText('185.92.14.37')).toBeTruthy();
     const realErrors = errors.filter(isRealError);
     expect(realErrors, JSON.stringify(realErrors.map((a) => String(a[0]).slice(0, 200)))).toEqual([]);
+  });
+
+  it('shows daemon errors even while OpenVPN is running', async () => {
+    const { default: IndexPage } = await import('@/pages/index/IndexPage');
+    statusObj.openvpn.errorMsg = 'OpenVPN traffic poll incomplete for 1 inbound(s); missing usage may require review';
+    const { container } = wrap(<IndexPage />);
+    const warning = container.querySelector('.service-row-warning');
+    expect(warning?.textContent).toContain('traffic poll incomplete');
+    expect(warning?.getAttribute('role')).toBe('alert');
+    expect(warning?.closest('.service-row')?.classList.contains('is-running')).toBe(true);
+  });
+
+  it('warns when accounting incident status is active or unavailable', async () => {
+    const { default: IndexPage } = await import('@/pages/index/IndexPage');
+    const states = [
+      { available: true, databaseCount: 1, fallbackPresent: false, pendingInProcess: false },
+      { available: true, databaseCount: 0, fallbackPresent: true, pendingInProcess: false },
+      { available: true, databaseCount: 0, fallbackPresent: false, pendingInProcess: true },
+      { available: false, databaseCount: 0, fallbackPresent: false, pendingInProcess: false },
+    ];
+    for (const state of states) {
+      statusObj.counterIncidents = state;
+      const { container } = wrap(<IndexPage />);
+      expect(container.querySelector('.ant-alert-error')).toBeTruthy();
+      cleanup();
+    }
+    statusObj.counterIncidents = { available: true, databaseCount: 0, fallbackPresent: false, pendingInProcess: false };
+    const { container } = wrap(<IndexPage />);
+    expect(container.querySelector('.ant-alert-error')).toBeNull();
+  });
+
+  it('warns about missing or unavailable daemon identity diagnostics', async () => {
+    const { default: IndexPage } = await import('@/pages/index/IndexPage');
+    for (const daemonIdentityCount of [2, undefined]) {
+      statusObj.counterIncidents = { available: true, databaseCount: 0, fallbackPresent: false, pendingInProcess: false, daemonIdentityCount };
+      const { container } = wrap(<IndexPage />);
+      expect(container.querySelector('.daemon-identity-warning')).toBeTruthy();
+      cleanup();
+    }
+    statusObj.counterIncidents = { available: true, databaseCount: 0, fallbackPresent: false, pendingInProcess: false, daemonIdentityCount: 0 };
+    const { container } = wrap(<IndexPage />);
+    expect(container.querySelector('.daemon-identity-warning')).toBeNull();
+  });
+
+  it('warns about all registered remote nodes or unavailable node safety status', async () => {
+    const { default: IndexPage } = await import('@/pages/index/IndexPage');
+    for (const state of [{ available: true, nodeCount: 2 }, { available: false, nodeCount: 0 }, undefined, { available: true, nodeCount: -1 }]) {
+      statusObj.nodeSnapshotSafety = state as never;
+      const { container } = wrap(<IndexPage />);
+      expect(container.querySelector('.node-traffic-safety-warning')).toBeTruthy();
+      cleanup();
+    }
+    statusObj.nodeSnapshotSafety = { available: true, nodeCount: 0 };
+    const { container } = wrap(<IndexPage />);
+    expect(container.querySelector('.node-traffic-safety-warning')).toBeNull();
+  });
+
+  it('treats absent or malformed incident data as unavailable', async () => {
+    const { default: IndexPage } = await import('@/pages/index/IndexPage');
+    const inputs = [undefined, null, {}, { available: true, databaseCount: -1, fallbackPresent: false, pendingInProcess: false },
+      { available: 'true', databaseCount: 0, fallbackPresent: false, pendingInProcess: false }];
+    for (const input of inputs) {
+      statusObj.counterIncidents = input as never;
+      const { container } = wrap(<IndexPage />);
+      expect(container.querySelector('.ant-alert-error')).toBeTruthy();
+      cleanup();
+    }
   });
 
   it('renders the inbounds page without runtime errors', async () => {

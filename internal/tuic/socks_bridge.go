@@ -36,7 +36,7 @@ type CountingConn struct {
 func (c *CountingConn) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
 	if n > 0 && c.bytesRead != nil {
-		c.bytesRead.Add(int64(n))
+		addTrafficCounter(c.bytesRead, int64(n))
 	}
 	return n, err
 }
@@ -44,7 +44,7 @@ func (c *CountingConn) Read(p []byte) (int, error) {
 func (c *CountingConn) Write(p []byte) (int, error) {
 	n, err := c.Conn.Write(p)
 	if n > 0 && c.bytesWritten != nil {
-		c.bytesWritten.Add(int64(n))
+		addTrafficCounter(c.bytesWritten, int64(n))
 	}
 	return n, err
 }
@@ -490,7 +490,7 @@ func PipeBiDirectionalContext(ctx context.Context, a, b io.ReadWriteCloser, upCo
 			n, err := src.Read(buf)
 			if n > 0 {
 				if counter != nil {
-					counter.Add(int64(n))
+					addTrafficCounter(counter, int64(n))
 				}
 				if _, werr := dst.Write(buf[:n]); werr != nil {
 					closeBoth()

@@ -5,7 +5,9 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"regexp"
 	"slices"
@@ -800,8 +802,11 @@ func preserveDaemonInboundClients(inbound *model.Inbound, oldSettings string) {
 	if inbound == nil || (inbound.Protocol != model.OpenVPN && inbound.Protocol != model.L2TP && inbound.Protocol != model.SSTP && inbound.Protocol != model.PPTP) {
 		return
 	}
-	if strings.TrimSpace(oldSettings) == "" || strings.TrimSpace(inbound.Settings) == "" {
+	if strings.TrimSpace(oldSettings) == "" {
 		return
+	}
+	if strings.TrimSpace(inbound.Settings) == "" {
+		inbound.Settings = "{}"
 	}
 	var newMap map[string]any
 	if err := json.Unmarshal([]byte(inbound.Settings), &newMap); err != nil || newMap == nil {
@@ -1201,10 +1206,13 @@ func (s *InboundService) addInbound(inbound *model.Inbound, preserveExistingClie
 		}
 		if push {
 			payload := inbound
-			if inbound.NodeID == nil && (inbound.Protocol == model.MTProto || inbound.Protocol == model.TUIC) {
-				if built, bErr := s.buildInboundForLocalRuntime(tx, inbound); bErr == nil {
-					payload = built
+			if inbound.NodeID == nil && (inbound.Protocol == model.MTProto || inbound.Protocol == model.TUIC || inbound.Protocol == model.OpenVPN || inbound.Protocol == model.L2TP || inbound.Protocol == model.SSTP || inbound.Protocol == model.PPTP) {
+				built, bErr := s.buildInboundForLocalRuntime(tx, inbound)
+				if bErr != nil {
+					err = fmt.Errorf("build filtered daemon settings: %w", bErr)
+					return inbound, false, err
 				}
+				payload = built
 			}
 			if err1 := rt.AddInbound(context.Background(), payload); err1 == nil {
 				logger.Debug("New inbound added on", rt.Name(), ":", inbound.Tag)
@@ -1212,7 +1220,7 @@ func (s *InboundService) addInbound(inbound *model.Inbound, preserveExistingClie
 				logger.Debug("Unable to add inbound on", rt.Name(), ":", err1)
 				if inbound.NodeID != nil {
 					markDirty = true
-				} else if inbound.Protocol != model.MTProto && inbound.Protocol != model.TUIC {
+				} else {
 					needRestart = true
 				}
 			}
@@ -1237,6 +1245,20 @@ func (s *InboundService) DelInbound(id int) (bool, error) {
 	markDirty := false
 	var ib model.Inbound
 	loadErr := db.Model(model.Inbound{}).Where("id = ?", id).First(&ib).Error
+	if loadErr == nil {
+		if err := rejectInboundNodeIncidents(db, &ib); err != nil {
+			return false, err
+		}
+		// A daemon stop or missing marker does not prove that all sessions
+		// stopped and published their final accounting. In particular,
+		// DelInbound historically continued deleting the row even if its local
+		// runtime removal failed. Keep the inbound and links for manual review.
+		if ib.NodeID == nil && (ib.Protocol == model.OpenVPN || ib.Protocol == model.L2TP || ib.Protocol == model.SSTP || ib.Protocol == model.PPTP) {
+			return false, fmt.Errorf("local %s inbound %d requires verified disconnect and accounting before removal", ib.Protocol, ib.Id)
+		}
+	} else if !database.IsNotFound(loadErr) {
+		return false, loadErr
+	}
 	if loadErr == nil && ib.Protocol == model.L2TP {
 		l2tpInboundMu.Lock()
 		defer l2tpInboundMu.Unlock()
@@ -1367,7 +1389,24 @@ func (s *InboundService) SetInboundEnable(id int, enable bool) (bool, error) {
 		return false, common.NewError("openvpn is supported only on the local Linux host")
 	}
 
+	// Resolve the plan before persisting the toggle. Otherwise a missing node
+	// can leave the DB changed without applying or scheduling runtime recovery,
+	// and a retry would incorrectly see the requested state as already done.
+	rt, push, dirty, perr := s.nodePushPlan(inbound)
+	if perr != nil {
+		return false, perr
+	}
 	db := database.GetDB()
+	var daemonPayload *model.Inbound
+	if inbound.NodeID == nil && push && enable && (inbound.Protocol == model.OpenVPN || inbound.Protocol == model.L2TP || inbound.Protocol == model.SSTP || inbound.Protocol == model.PPTP) {
+		// Do this before persisting the toggle: failing open to unfiltered
+		// settings can re-enable credentials disabled by quota or expiry.
+		daemonPayload, err = s.buildRuntimeInboundForAPI(db, inbound)
+		if err != nil {
+			return false, fmt.Errorf("build filtered daemon settings: %w", err)
+		}
+		daemonPayload.Enable = true
+	}
 	if err := db.Model(model.Inbound{}).Where("id = ?", id).
 		Update("enable", enable).Error; err != nil {
 		return false, err
@@ -1375,10 +1414,6 @@ func (s *InboundService) SetInboundEnable(id int, enable bool) (bool, error) {
 	inbound.Enable = enable
 
 	needRestart := false
-	rt, push, dirty, perr := s.nodePushPlan(inbound)
-	if perr != nil {
-		return false, perr
-	}
 
 	// Remote nodes interpret DelInbound as a real row delete (it hits
 	// panel/api/inbounds/del/:id on the remote), so toggling the enable
@@ -1412,10 +1447,8 @@ func (s *InboundService) SetInboundEnable(id int, enable bool) (bool, error) {
 
 	if inbound.Protocol == model.OpenVPN || inbound.Protocol == model.L2TP || inbound.Protocol == model.SSTP || inbound.Protocol == model.PPTP {
 		payload := inbound
-		if enable {
-			if built, bErr := s.buildRuntimeInboundForAPI(db, inbound); bErr == nil {
-				payload = built
-			}
+		if daemonPayload != nil {
+			payload = daemonPayload
 		}
 		if err := rt.UpdateInbound(context.Background(), inbound, payload); err != nil {
 			logger.Debug("SetInboundEnable: UpdateInbound on", rt.Name(), "failed:", err)
@@ -1450,6 +1483,18 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 		l2tpInboundMu.Lock()
 		defer l2tpInboundMu.Unlock()
 	}
+	if inbound == nil {
+		return nil, false, errors.New("inbound is required")
+	}
+	oldInbound, err := s.GetInbound(inbound.Id)
+	if err != nil {
+		return inbound, false, err
+	}
+	// Preserve omitted daemon clients before normalization can synthesize an
+	// empty clients array. Only inherit from the same protocol.
+	if oldInbound.Protocol == inbound.Protocol {
+		preserveDaemonInboundClients(inbound, oldInbound.Settings)
+	}
 	if err := normalizeTuicSettings(inbound); err != nil {
 		return inbound, false, err
 	}
@@ -1483,11 +1528,14 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 		return inbound, false, common.NewError(conflict.String())
 	}
 
-	oldInbound, err := s.GetInbound(inbound.Id)
-	if err != nil {
-		return inbound, false, err
-	}
 	oldRuntime := *oldInbound
+	// Protocol conversion otherwise bypasses the local daemon inbound deletion
+	// guard, discarding the runtime identity while final session traffic
+	// is still unproven. Disabling the inbound remains a separate operation.
+	if oldInbound.NodeID == nil && oldInbound.Protocol != inbound.Protocol &&
+		(oldInbound.Protocol == model.OpenVPN || oldInbound.Protocol == model.L2TP || oldInbound.Protocol == model.SSTP || oldInbound.Protocol == model.PPTP) {
+		return inbound, false, fmt.Errorf("local %s inbound %d requires verified disconnect and accounting before protocol conversion", oldInbound.Protocol, oldInbound.Id)
+	}
 	inbound.NodeID = oldInbound.NodeID
 	if inbound.NodeID != nil && !isNodeEligibleProtocol(inbound.Protocol) {
 		return inbound, false, common.NewErrorf("%s inbounds cannot be assigned to a node", inbound.Protocol)
@@ -1684,15 +1732,16 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 			oldSnapshot.Tag = tag
 			payload := oldInbound
 			if oldInbound.Enable && (oldInbound.Protocol == model.TUIC || oldInbound.Protocol == model.OpenVPN || oldInbound.Protocol == model.L2TP || oldInbound.Protocol == model.SSTP || oldInbound.Protocol == model.PPTP) {
-				if built, bErr := s.buildInboundForLocalRuntime(tx, oldInbound); bErr == nil {
-					payload = built
+				built, bErr := s.buildInboundForLocalRuntime(tx, oldInbound)
+				if bErr != nil {
+					err = fmt.Errorf("build filtered daemon settings: %w", bErr)
+					return inbound, false, err
 				}
+				payload = built
 			}
 			if err2 := rt.UpdateInbound(context.Background(), &oldSnapshot, payload); err2 != nil {
 				logger.Debug("Unable to update daemon/TUIC inbound on", rt.Name(), ":", err2)
-				if oldInbound.Protocol != model.TUIC && oldInbound.Protocol != model.OpenVPN && oldInbound.Protocol != model.L2TP && oldInbound.Protocol != model.SSTP && oldInbound.Protocol != model.PPTP {
-					needRestart = true
-				}
+				needRestart = true
 			}
 		} else {
 			oldSnapshot := oldRuntime
@@ -1764,80 +1813,130 @@ func (s *InboundService) buildRuntimeInboundForAPI(tx *gorm.DB, inbound *model.I
 	if inbound == nil {
 		return nil, fmt.Errorf("inbound is nil")
 	}
-
 	runtimeInbound := *inbound
 	settings := map[string]any{}
-	if err := json.Unmarshal([]byte(inbound.Settings), &settings); err != nil {
+	decoder := json.NewDecoder(strings.NewReader(inbound.Settings))
+	decoder.UseNumber() // Do not round byte quotas or other integer settings.
+	if err := decoder.Decode(&settings); err != nil {
 		return nil, err
 	}
-
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("trailing inbound settings")
+		}
+		return nil, err
+	}
+	strict := inbound.Protocol == model.TUIC || inbound.Protocol == model.OpenVPN || inbound.Protocol == model.L2TP || inbound.Protocol == model.SSTP || inbound.Protocol == model.PPTP
 	clients, ok := settings["clients"].([]any)
 	if !ok {
+		if _, exists := settings["clients"]; strict && exists {
+			return nil, fmt.Errorf("invalid daemon client list")
+		}
 		return &runtimeInbound, nil
 	}
-
-	emails := make([]string, 0, len(clients))
-	for _, client := range clients {
-		if c, ok := client.(map[string]any); ok {
-			if email, _ := c["email"].(string); email != "" {
-				emails = append(emails, transferEmailKey(email))
-			}
+	if strict {
+		// Decode just the accounting fields from the original JSON into integers,
+		// not float64. A malformed credential is omitted, not treated as unlimited.
+		var raw struct {
+			Clients []json.RawMessage `json:"clients"`
 		}
-	}
-
-	var clientStats []xray.ClientTraffic
-	q := tx.Model(xray.ClientTraffic{}).Select("id", "email", "enable")
-	if len(emails) > 0 {
-		q = q.Where("inbound_id = ? OR LOWER(TRIM(email)) IN ?", inbound.Id, emails)
+		if err := json.Unmarshal([]byte(inbound.Settings), &raw); err != nil {
+			return nil, err
+		}
+		if len(raw.Clients) != len(clients) {
+			return nil, fmt.Errorf("daemon client list mismatch")
+		}
+		candidates := make([]model.Client, len(clients))
+		for i, item := range raw.Clients {
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(item, &fields); err != nil || fields == nil {
+				continue
+			}
+			invalid := false
+			for _, name := range []string{"enable", "totalGB", "expiryTime", "activateBefore"} {
+				if value, exists := fields[name]; exists && string(value) == "null" {
+					invalid = true
+					break
+				}
+			}
+			if invalid {
+				continue
+			}
+			var c struct {
+				Email          string `json:"email"`
+				Enable         *bool  `json:"enable"`
+				TotalGB        int64  `json:"totalGB"`
+				ExpiryTime     int64  `json:"expiryTime"`
+				ActivateBefore int64  `json:"activateBefore"`
+			}
+			if err := json.Unmarshal(item, &c); err != nil {
+				continue
+			}
+			candidates[i] = model.Client{Email: c.Email, Enable: c.Enable == nil || *c.Enable, TotalGB: c.TotalGB, ExpiryTime: c.ExpiryTime, ActivateBefore: c.ActivateBefore}
+		}
+		allowed, ids, err := daemonAccountingEligibility(tx, candidates)
+		if err != nil {
+			return nil, err
+		}
+		finalClients := make([]any, 0, len(clients))
+		for i, client := range clients {
+			c, ok := client.(map[string]any)
+			if !ok || !allowed[i] {
+				continue
+			}
+			if inbound.Protocol == model.TUIC {
+				delete(c, "traffic_id")
+				c["traffic_id"] = ids[i]
+			}
+			finalClients = append(finalClients, c)
+		}
+		settings["clients"] = finalClients
 	} else {
-		q = q.Where("inbound_id = ?", inbound.Id)
-	}
-	if err := q.Find(&clientStats).Error; err != nil {
-		return nil, err
-	}
-
-	enableMap := make(map[string]bool, len(clientStats))
-	trafficIDs := make(map[string]int, len(clientStats))
-	for _, clientTraffic := range clientStats {
-		key := transferEmailKey(clientTraffic.Email)
-		enableMap[key] = clientTraffic.Enable
-		trafficIDs[key] = clientTraffic.Id
-	}
-
-	finalClients := make([]any, 0, len(clients))
-	for _, client := range clients {
-		c, ok := client.(map[string]any)
-		if !ok {
-			continue
-		}
-
-		email, _ := c["email"].(string)
-		key := transferEmailKey(email)
-		if enable, exists := enableMap[key]; exists && !enable {
-			continue
-		}
-
-		if manualEnable, ok := c["enable"].(bool); ok && !manualEnable {
-			continue
-		}
-
-		if inbound.Protocol == model.TUIC {
-			delete(c, "traffic_id")
-			if id := trafficIDs[key]; id > 0 {
-				c["traffic_id"] = id
+		emails := make([]string, 0, len(clients))
+		for _, client := range clients {
+			if c, ok := client.(map[string]any); ok {
+				if email, _ := c["email"].(string); email != "" {
+					emails = append(emails, transferEmailKey(email))
+				}
 			}
 		}
-
-		finalClients = append(finalClients, c)
+		var stats []xray.ClientTraffic
+		q := tx.Model(xray.ClientTraffic{}).Select("id", "email", "enable")
+		if len(emails) > 0 {
+			q = q.Where("inbound_id = ? OR LOWER(TRIM(email)) IN ?", inbound.Id, emails)
+		} else {
+			q = q.Where("inbound_id = ?", inbound.Id)
+		}
+		if err := q.Find(&stats).Error; err != nil {
+			return nil, err
+		}
+		enabled := make(map[string]bool, len(stats))
+		for _, row := range stats {
+			enabled[transferEmailKey(row.Email)] = row.Enable
+		}
+		finalClients := make([]any, 0, len(clients))
+		for _, client := range clients {
+			c, ok := client.(map[string]any)
+			if !ok {
+				continue
+			}
+			email, _ := c["email"].(string)
+			if enable, exists := enabled[transferEmailKey(email)]; exists && !enable {
+				continue
+			}
+			if enable, ok := c["enable"].(bool); ok && !enable {
+				continue
+			}
+			finalClients = append(finalClients, c)
+		}
+		settings["clients"] = finalClients
 	}
-
-	settings["clients"] = finalClients
 	modifiedSettings, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return nil, err
 	}
 	runtimeInbound.Settings = string(modifiedSettings)
-
 	return &runtimeInbound, nil
 }
 
@@ -1869,6 +1968,31 @@ func (s *InboundService) updateClientTraffics(tx *gorm.DB, oldInbound *model.Inb
 	for i := range newClients {
 		if key := transferEmailKey(newClients[i].Email); key != "" {
 			newEmails[key] = struct{}{}
+		}
+	}
+	if oldInbound.NodeID == nil && (oldInbound.Protocol == model.OpenVPN || oldInbound.Protocol == model.L2TP || oldInbound.Protocol == model.SSTP || oldInbound.Protocol == model.PPTP) {
+		// Include canonical links as well as the JSON list: older inbounds may
+		// have drifted between these sources. Guard before deleting any stats.
+		var linked []string
+		if err := tx.Table("clients").Joins("JOIN client_inbounds ON client_inbounds.client_id = clients.id").
+			Where("client_inbounds.inbound_id = ?", oldInbound.Id).Pluck("clients.email", &linked).Error; err != nil {
+			return err
+		}
+		for _, client := range oldClients {
+			linked = append(linked, client.Email)
+		}
+		removed := make([]string, 0)
+		for _, email := range linked {
+			key := transferEmailKey(email)
+			if key == "" {
+				return errors.New("PPP client identity unavailable during inbound edit")
+			}
+			if _, kept := newEmails[key]; !kept {
+				removed = append(removed, key)
+			}
+		}
+		if err := rejectUnprovenDaemonRemoval(tx, removed, []int{oldInbound.Id}); err != nil {
+			return err
 		}
 	}
 

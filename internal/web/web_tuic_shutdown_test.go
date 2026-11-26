@@ -77,6 +77,13 @@ func TestGracefulShutdownPersistsFinalTuicTraffic(t *testing.T) {
 		t.Fatal("TUIC listener did not start")
 	}
 
+	// The shutdown accounting update must occur behind the shared marker.
+	if err := database.GetDB().Exec(`CREATE TRIGGER require_tuic_shutdown_marker BEFORE UPDATE ON client_traffics
+		WHEN NEW.email = 'shutdown-tuic@x' AND (NEW.up != OLD.up OR NEW.down != OLD.down)
+		AND NOT EXISTS (SELECT 1 FROM xray_traffic_in_flights)
+		BEGIN SELECT RAISE(ABORT, 'shutdown marker missing'); END`).Error; err != nil {
+		t.Fatal(err)
+	}
 	if err := NewServer().Stop(); err != nil && !strings.Contains(err.Error(), "xray is not running") {
 		t.Fatalf("graceful server shutdown: %v", err)
 	}

@@ -11,6 +11,7 @@ on:
       - "go.sum"
       - "frontend/**"
       - "scripts/**"
+      - "patches/xray/**"
       - "update.sh"
       - "install.sh"
       - "install-phoenix.sh"
@@ -29,6 +30,7 @@ on:
       - "go.sum"
       - "frontend/**"
       - "scripts/**"
+      - "patches/xray/**"
       - "update.sh"
       - "install.sh"
       - "install-phoenix.sh"
@@ -56,6 +58,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - name: Test sandbox Go cache integrity checks
+        run: PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_sandbox_go_setup.py
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -69,7 +73,22 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          go list ./... | grep -v '/frontend/node_modules/' > /tmp/go-packages.txt
+          # A transient module proxy stream error can interrupt go list before
+          # any tests run. Retry dependency/package discovery, never test failures.
+          listed=false
+          for attempt in 1 2 3; do
+            if go list ./... > /tmp/all-go-packages.txt; then
+              listed=true
+              break
+            fi
+            echo "go list failed (attempt $attempt); retrying" >&2
+            sleep $((attempt * 5))
+          done
+          if [ "$listed" != true ]; then
+            echo "go list failed after retries" >&2
+            exit 1
+          fi
+          grep -v '/frontend/node_modules/' /tmp/all-go-packages.txt > /tmp/go-packages.txt
           if go test $(cat /tmp/go-packages.txt) 2>&1 | tee /tmp/go-test.log; then
             exit 0
           fi
@@ -80,6 +99,124 @@ jobs:
           print(f'::error title=go-test-output::{output}')
           PYLOG
           exit 1
+  openvpn-config-parser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install OpenVPN
+        run: sudo apt-get update && sudo apt-get install -y openvpn
+      - name: Verify generated configuration with OpenVPN parser
+        env:
+          PHOENIX_TEST_OPENVPN_BINARY: /usr/sbin/openvpn
+        run: go test ./internal/openvpn -run '^TestRealOpenVPNConfigParser$' -count=1 -v
+
+  openvpn-live-characterization:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install OpenVPN and prepare isolated tunnel tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openvpn iproute2 iputils-ping tcpdump
+          sudo modprobe tun || true
+          sudo mkdir -p /dev/net
+          test -c /dev/net/tun || sudo mknod /dev/net/tun c 10 200
+      - name: Characterize profile reuse and experimental fingerprint admission
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -c -o /tmp/phoenix-openvpn-live.test ./internal/openvpn
+          if sudo env PATH="$PATH" PHOENIX_TEST_OPENVPN_LIVE_BINARY=/usr/sbin/openvpn /tmp/phoenix-openvpn-live.test -test.run '^TestRealOpenVPN(PreviouslyIssuedProfileStillConnects|ExperimentalFingerprintAdmission|ShortSessionBetweenPolls)$' -test.v 2>&1 | tee /tmp/openvpn-live.log; then exit 0; fi
+          python3 - <<'PYLOG'
+          from pathlib import Path
+          output = Path('/tmp/openvpn-live.log').read_text(errors='replace')[-4000:]
+          output = output.replace('%', '%25').replace(chr(13), '%0D').replace(chr(10), '%0A')
+          print(f'::error title=openvpn-live-test-output::{output}')
+          PYLOG
+          exit 1
+
+  xray-quiescence-characterization:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build the pinned Xray core
+        run: go build -mod=mod -o /tmp/phoenix-xray github.com/xtls/xray-core/main
+      - name: Characterize VLESS and Shadowsocks UDP after user removal
+        env:
+          XRAY_E2E_BINARY: /tmp/phoenix-xray
+        shell: bash
+        run: |
+          set -o pipefail
+          if go test -mod=mod ./internal/xray -run '^(TestXrayRemoveUserDoesNotDrainEstablishedVLESS|TestExperimentalShadowsocksUDPDisconnect)$' -count=1 -v 2>&1 | tee /tmp/xray-quiescence-test.log; then
+            exit 0
+          fi
+          python3 - <<'PYLOG'
+          from pathlib import Path
+          output = Path('/tmp/xray-quiescence-test.log').read_text(errors='replace')[-4000:]
+          output = output.replace('%', '%25').replace(chr(13), '%0D').replace(chr(10), '%0A')
+          print(f'::error title=xray-quiescence-test-output::{output}')
+          PYLOG
+          exit 1
+
+  experimental-xray-user-disconnect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build and race-test experimental pinned Xray
+        env:
+          PHOENIX_XRAY_RUN_TESTS: '1'
+          PHOENIX_XRAY_RACE_BINARY: '1'
+        shell: bash
+        run: |
+          set -o pipefail
+          if bash scripts/build-experimental-xray.sh /tmp/phoenix-xray-experimental 2>&1 | tee /tmp/experimental-xray-build.log; then exit 0; fi
+          python3 - <<'PYLOG'
+          from pathlib import Path
+          output = Path('/tmp/experimental-xray-build.log').read_text(errors='replace')[-4000:]
+          output = output.replace('%', '%25').replace(chr(13), '%0D').replace(chr(10), '%0A')
+          print(f'::error title=experimental-xray-build-output::{output}')
+          PYLOG
+          exit 1
+      - name: Test experimental session termination
+        env:
+          XRAY_E2E_BINARY: /tmp/phoenix-xray-experimental
+          XRAY_EXPECT_EXPERIMENTAL_DRAIN: '1'
+          GORACE: 'halt_on_error=1'
+        shell: bash
+        run: |
+          set -o pipefail
+          if go test -mod=mod ./internal/xray -run '^(TestXrayRemoveUserDoesNotDrainEstablished(VLESS|Trojan)|TestExperimentalVMessDisconnect|TestExperimentalShadowsocksTCPDisconnect|TestExperimentalShadowsocksUDPDisconnect|TestExperimentalShadowsocks2022TCPDisconnect|TestExperimentalShadowsocks2022UDPDisconnect)$' -count=1 -v 2>&1 | tee /tmp/experimental-xray-test.log; then exit 0; fi
+          python3 - <<'PYLOG'
+          from pathlib import Path
+          output = Path('/tmp/experimental-xray-test.log').read_text(errors='replace')
+          for marker in ('WARNING: DATA RACE', '--- FAIL:'):
+              pos = output.find(marker)
+              if pos >= 0:
+                  output = output[max(0, pos-1500):pos+10000]
+                  break
+          else:
+              output = output[-6000:]
+          output = output.replace('%', '%25').replace(chr(13), '%0D').replace(chr(10), '%0A')
+          print(f'::error title=experimental-xray-test-output::{output}')
+          PYLOG
+          exit 1
+
   codegen:
     runs-on: ubuntu-latest
     steps:
@@ -150,9 +287,62 @@ jobs:
       - name: Build
         run: npm run build
         working-directory: frontend
-      - name: Audit production dependencies
-        # Development/build-tool dependencies are not shipped in PHOENIX binaries.
-        # Keep the release gate focused on dependencies included in the product;
-        # known dev-only advisories remain visible through a full local npm audit.
-        run: npm audit --omit=dev --audit-level=moderate
+      - name: Audit all dependencies
+        # Development tooling is part of the build supply chain too.
+        run: npm audit --audit-level=low
         working-directory: frontend
+
+  postgres-traffic-identity:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: phoenix
+          POSTGRES_PASSWORD: phoenix
+          POSTGRES_DB: phoenix_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U phoenix -d phoenix_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Stub internal/web/dist for go:embed
+        run: mkdir -p internal/web/dist && touch internal/web/dist/.gitkeep
+      - name: Test PostgreSQL accounting locks
+        env:
+          PHOENIX_TEST_POSTGRES_DSN: postgres://phoenix:phoenix@localhost:5432/phoenix_test?sslmode=disable
+        shell: bash
+        run: |
+          set -o pipefail
+          if go test ./internal/web/service -run '^(TestXrayTrafficIdentityLocksExistingRowsPostgres|TestResellerAllocationAdvisoryLockPostgres|TestConcurrentVoucherRedemptionPostgres|TestConcurrentResellerPaymentPostgres|TestEffectiveGlobalTrafficEnforcementPostgres|TestInboundTrafficOverflowPostgres|TestResellerNodeBaselinePostgres|TestResellerRemoteGuardOrphanedEvidencePostgres|TestCounterIncidentAcrossPostgresProcesses|TestL2TPIncidentAcrossPostgresProcesses|TestPPPCheckpointConcurrentWritersPostgres|TestPPPAccountingDestinationsPostgres|TestXrayReceiptPayloadBindingPostgres|TestTuicReceiptPayloadBindingPostgres|TestPPPRemovalGuardPostgres|TestPPPIncidentAcrossPostgresProcesses|TestXrayPollMarkerAcrossPostgresProcesses)$' -count=1 2>&1 | tee /tmp/postgres-test.log; then exit 0; fi
+          python3 - <<'PYLOG'
+          from pathlib import Path
+          output = Path('/tmp/postgres-test.log').read_text(errors='replace')[-4000:]
+          output = output.replace('%', '%25').replace(chr(13), '%0D').replace(chr(10), '%0A')
+          print(f'::error title=postgres-test-output::{output}')
+          PYLOG
+          exit 1
+      - name: Test TUIC committed poll recovery on PostgreSQL
+        env:
+          PHOENIX_TEST_POSTGRES_DSN: postgres://phoenix:phoenix@localhost:5432/phoenix_test?sslmode=disable
+        run: go test ./internal/web/job -run '^(TestTuicCommittedPollRecoveryPostgres|TestOpenvpnPollReceiptPostgres)$' -count=1
+      - name: Test ordered snapshot sequence concurrency on PostgreSQL
+        env:
+          PHOENIX_TEST_POSTGRES_DSN: postgres://phoenix:phoenix@localhost:5432/phoenix_test?sslmode=disable
+        run: go test ./internal/web/trafficprotocol -run '^TestSnapshotSequencePostgresConcurrency$' -count=1
+      - name: Test PostgreSQL quota across processes
+        env:
+          PHOENIX_TEST_POSTGRES_DSN: postgres://phoenix:phoenix@localhost:5432/phoenix_test?sslmode=disable
+        run: go test ./internal/web/controller -run '^TestConcurrentResellerCreationAcrossPostgresProcesses$' -count=1
+      - name: Test PostgreSQL traffic evidence migration round-trip
+        env:
+          XUI_TEST_PG_DSN: postgres://phoenix:phoenix@localhost:5432/phoenix_test?sslmode=disable
+        run: go test ./internal/database -run '^TestTrafficEvidenceMigrationPostgres$' -count=1

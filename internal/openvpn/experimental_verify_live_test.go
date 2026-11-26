@@ -1,0 +1,493 @@
+package openvpn
+
+import (
+	"bufio"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+)
+
+// This is a test-only TLS admission prototype, not production revocation.
+// It is not used in generated configs or installed by PHOENIX.
+func TestRealOpenVPNExperimentalFingerprintAdmission(t *testing.T) {
+	binary := os.Getenv("PHOENIX_TEST_OPENVPN_LIVE_BINARY")
+	if binary == "" {
+		t.Skip("PHOENIX_TEST_OPENVPN_LIVE_BINARY not configured")
+	}
+	serverNS, clientNS := setupOpenVPNLiveNamespaces(t)
+	carolNS := fmt.Sprintf("phoenix-ovpn-c2-%d", os.Getpid())
+	ip := func(args ...string) {
+		t.Helper()
+		out, err := exec.Command("ip", args...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("ip %v: %v\n%s", args, err, out)
+		}
+	}
+	ip("netns", "add", carolNS)
+	t.Cleanup(func() { _ = exec.Command("ip", "netns", "delete", carolNS).Run() })
+	ip("-n", carolNS, "link", "set", "lo", "up")
+	ip("-n", serverNS, "link", "add", "ovpn-s2", "type", "veth", "peer", "name", "ovpn-c2")
+	ip("-n", serverNS, "link", "set", "ovpn-c2", "netns", carolNS)
+	ip("-n", serverNS, "addr", "add", "192.0.2.5/30", "dev", "ovpn-s2")
+	ip("-n", carolNS, "addr", "add", "192.0.2.6/30", "dev", "ovpn-c2")
+	ip("-n", serverNS, "link", "set", "ovpn-s2", "up")
+	ip("-n", carolNS, "link", "set", "ovpn-c2", "up")
+	t.Setenv("XUI_BIN_FOLDER", t.TempDir())
+	inst := Instance{Id: 120, Port: 31294, Proto: "udp"}
+	alice, err := BuildProfile(inst, "alice@example.test", "192.0.2.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob, err := BuildProfile(inst, "bob@example.test", "192.0.2.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	carol, err := BuildProfile(inst, "carol@example.test", "192.0.2.5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fingerprints []string
+	for _, email := range []string{"bob@example.test", "carol@example.test"} {
+		crt, key := clientFiles(dataDirForID(inst.Id), email)
+		cert, _, err := loadKeyPair(crt, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest := sha256.Sum256(cert.Raw)
+		hexDigest := hex.EncodeToString(digest[:])
+		parts := make([]string, 0, 32)
+		for i := 0; i < len(hexDigest); i += 2 {
+			parts = append(parts, hexDigest[i:i+2])
+		}
+		fingerprints = append(fingerprints, strings.Join(parts, ":"))
+	}
+	dir := t.TempDir()
+	allowlist := filepath.Join(dir, "allowlist")
+	if err := os.WriteFile(allowlist, []byte(strings.Join(fingerprints, "\n")+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	verifier := filepath.Join(dir, "verify")
+	script := "#!/bin/sh\n[ \"$1\" = 0 ] || exit 0\n[ -n \"${tls_digest_sha256_0:-}\" ] || exit 1\nexec grep -Fqx -- \"$tls_digest_sha256_0\" " + strconv.Quote(allowlist) + "\n"
+	if err := os.WriteFile(verifier, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeConfig(inst, 31295); err != nil {
+		t.Fatal(err)
+	}
+	// Test-only hook: record exactly what OpenVPN provides when this session
+	// disconnects. This plain file is not durable production accounting.
+	disconnectLog := filepath.Join(dir, "disconnect-record")
+	disconnectHook := filepath.Join(dir, "disconnect")
+	hook := "#!/bin/sh\nprintf '%s\\t%s\\t%s\\n' \"${common_name:-}\" \"${bytes_received:-}\" \"${bytes_sent:-}\" >> " + strconv.Quote(disconnectLog) + "\n"
+	if err := os.WriteFile(disconnectHook, []byte(hook), 0700); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.OpenFile(confPathForID(inst.Id), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = fmt.Fprintf(file, "disable-dco\nscript-security 2\ntls-verify %s\nclient-disconnect %s\n", verifier, disconnectHook)
+	closeErr := file.Close()
+	if err != nil || closeErr != nil {
+		t.Fatalf("write verifier config: %v %v", err, closeErr)
+	}
+	start := func(ns, config string) *exec.Cmd {
+		t.Helper()
+		cmd := exec.Command("ip", "netns", "exec", ns, binary, "--config", config)
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+		return cmd
+	}
+	clientProcesses := make(map[string]*exec.Cmd)
+	waitLog := func(path string, predicate func(string) bool) {
+		t.Helper()
+		deadline := time.Now().Add(25 * time.Second)
+		for time.Now().Before(deadline) {
+			data, _ := os.ReadFile(path)
+			if predicate(string(data)) {
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		data, _ := os.ReadFile(path)
+		server, _ := os.ReadFile(logPathForID(inst.Id))
+		t.Fatalf("expected log event missing in %s:\n%s\nserver:\n%s", path, data, server)
+	}
+	client := func(ns, name, text string) string {
+		t.Helper()
+		log := filepath.Join(t.TempDir(), name+".log")
+		conf := filepath.Join(t.TempDir(), name+".ovpn")
+		if err := os.WriteFile(conf, []byte(text+"\ndisable-dco\nlog "+quoteConfigPath(log)+"\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		clientProcesses[name] = start(ns, conf)
+		return log
+	}
+	start(serverNS, confPathForID(inst.Id))
+	waitLog(logPathForID(inst.Id), func(s string) bool { return strings.Contains(s, "Initialization Sequence Completed") })
+	bobLog := client(clientNS, "bob", bob)
+	waitLog(bobLog, func(s string) bool { return strings.Contains(s, "Initialization Sequence Completed") })
+	carolLog := client(carolNS, "carol", carol)
+	waitLog(carolLog, func(s string) bool { return strings.Contains(s, "Initialization Sequence Completed") })
+	pingThroughBob := func() {
+		t.Helper()
+		out, err := exec.Command("ip", "netns", "exec", clientNS, "ping", "-n", "-c", "2", "-W", "3", "10.120.0.1").CombinedOutput()
+		if err != nil {
+			t.Fatalf("Bob's established tunnel did not carry ICMP: %v\n%s", err, out)
+		}
+	}
+	pingThroughBob()
+	pingThroughCarol := func() {
+		t.Helper()
+		out, err := exec.Command("ip", "netns", "exec", carolNS, "ping", "-n", "-c", "2", "-W", "3", "10.120.0.1").CombinedOutput()
+		if err != nil {
+			t.Fatalf("Carol's tunnel did not carry ICMP: %v\n%s", err, out)
+		}
+	}
+	pingThroughCarol()
+	client(clientNS, "alice", alice)
+	denied := func(identity string) func(string) bool {
+		return func(s string) bool {
+			for _, line := range strings.Split(s, "\n") {
+				if strings.Contains(line, "VERIFY SCRIPT ERROR: depth=0") && strings.Contains(line, identity) {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	waitLog(logPathForID(inst.Id), denied("alice@example.test"))
+	// Missing allowlist must fail closed for a fresh authentication, too.
+	if err := os.Remove(allowlist); err != nil {
+		t.Fatal(err)
+	}
+	// Existing sessions are not reverified on every packet. This deliberately
+	// characterizes continued forwarding, not an active-session revocation.
+	pingThroughBob()
+	client(clientNS, "bob-without-allowlist", bob)
+	waitLog(logPathForID(inst.Id), denied("bob@example.test"))
+	pingThroughBob()
+
+	// In the isolated experiment only, ask the real management socket for
+	// the current session ID and kill that session. Never use a CN as a raw
+	// management command; this test uses a parsed numeric CID.
+	management := func(command string) string {
+		t.Helper()
+		const code = `import socket, sys
+s = socket.create_connection(('127.0.0.1', 31295), timeout=4)
+s.settimeout(4)
+s.sendall((sys.argv[1] + '\n').encode())
+buf = b''
+while True:
+    part = s.recv(65536)
+    if not part:
+        break
+    buf += part
+    if any(x.rstrip(b'\r') == b'END' or x.startswith((b'SUCCESS:', b'ERROR:')) for x in buf.split(b'\n')[:-1]):
+        break
+sys.stdout.buffer.write(buf)
+`
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, "ip", "netns", "exec", serverNS, "python3", "-c", code, command).CombinedOutput()
+		if err != nil {
+			t.Fatalf("management %q: %v\n%s", command, err, out)
+		}
+		return strings.ReplaceAll(string(out), "\r\n", "\n")
+	}
+	status := management("status 3")
+	beforeReconnect := status
+	// Exercise the production parser against the actual daemon response, not
+	// only synthetic status fixtures. Both distinct sessions must be present.
+	parsed, err := parseClientListResponse(strings.NewReader(status))
+	if err != nil || len(parsed) != 2 {
+		t.Fatalf("production parser rejected live two-client status: %v %v\n%s", parsed, err, status)
+	}
+	if _, ok := parsed["bob@example.test"]; !ok {
+		t.Fatalf("Bob missing from live parsed status: %v", parsed)
+	}
+	if _, ok := parsed["carol@example.test"]; !ok {
+		t.Fatalf("Carol missing from live parsed status: %v", parsed)
+	}
+	if parsed["bob@example.test"].ID == "" || parsed["carol@example.test"].ID == "" || parsed["bob@example.test"].ID == parsed["carol@example.test"].ID {
+		t.Fatalf("production parser did not retain distinct live client IDs: %v", parsed)
+	}
+	beforeBob := parsed["bob@example.test"]
+	clientIDIndex, rxIndex, txIndex := -1, -1, -1
+	clientID := ""
+	var observedRx, observedTx uint64
+	for _, line := range strings.Split(status, "\n") {
+		fields := strings.Split(strings.TrimRight(line, "\r"), "\t")
+		if len(fields) > 2 && fields[0] == "HEADER" && fields[1] == "CLIENT_LIST" {
+			for i, field := range fields {
+				switch field {
+				case "Client ID":
+					clientIDIndex = i - 1
+				case "Bytes Received":
+					rxIndex = i - 1
+				case "Bytes Sent":
+					txIndex = i - 1
+				}
+			}
+		}
+		if len(fields) > 1 && fields[0] == "CLIENT_LIST" && fields[1] == "bob@example.test" {
+			if clientID != "" || clientIDIndex < 0 || clientIDIndex >= len(fields) || rxIndex < 0 || rxIndex >= len(fields) || txIndex < 0 || txIndex >= len(fields) {
+				t.Fatalf("ambiguous Bob session: %s", status)
+			}
+			clientID = fields[clientIDIndex]
+			var err error
+			observedRx, err = strconv.ParseUint(fields[rxIndex], 10, 64)
+			if err != nil {
+				t.Fatalf("invalid received counter: %s", status)
+			}
+			observedTx, err = strconv.ParseUint(fields[txIndex], 10, 64)
+			if err != nil {
+				t.Fatalf("invalid sent counter: %s", status)
+			}
+		}
+	}
+	if _, err := strconv.ParseUint(clientID, 10, 64); err != nil {
+		t.Fatalf("missing or invalid Bob client ID: %q\n%s", clientID, status)
+	}
+	// Produce known traffic after the last management snapshot.
+	pingThroughBob()
+	if result := management("client-kill " + clientID); !strings.Contains(result, "SUCCESS: client-kill command succeeded") {
+		t.Fatalf("management did not acknowledge kill: %s", result)
+	}
+	// A successful response is only an acknowledgement: the daemon can
+	// still report the session briefly. Require a later complete status that
+	// no longer contains it before testing the data path.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		result := management("status 3")
+		if !strings.Contains(result, "HEADER\tCLIENT_LIST\t") || !strings.Contains(result, "\nEND\n") {
+			t.Fatalf("incomplete status after kill: %s", result)
+		}
+		if !strings.Contains(result, "CLIENT_LIST\tbob@example.test\t") {
+			if !strings.Contains(result, "CLIENT_LIST\tcarol@example.test\t") {
+				t.Fatalf("Carol disappeared from status after Bob's kill: %s", result)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Bob not absent within observation window: %s", result)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	// The disconnect hook should see the extra traffic in this one live
+	// run. It cannot recover a hook that never executes or data after a crash.
+	waitLog(disconnectLog, func(text string) bool { return strings.Contains(text, "bob@example.test\t") })
+	data, err := os.ReadFile(disconnectLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		fields := strings.Split(line, "\t")
+		if len(fields) != 3 || fields[0] != "bob@example.test" {
+			continue
+		}
+		if found {
+			t.Fatalf("duplicate Bob disconnect record: %s", data)
+		}
+		found = true
+		rx, errRx := strconv.ParseUint(fields[1], 10, 64)
+		tx, errTx := strconv.ParseUint(fields[2], 10, 64)
+		if errRx != nil || errTx != nil || rx <= observedRx || tx <= observedTx {
+			t.Fatalf("disconnect counters did not include post-snapshot traffic: %q (snapshot %d/%d)", line, observedRx, observedTx)
+		}
+	}
+	if !found {
+		t.Fatalf("missing Bob disconnect record: %s", data)
+	}
+	// Capture the actual probe on Bob's tunnel device. A routing error or a
+	// ping sent through another interface must not masquerade as evidence.
+	captureFile, err := os.Create(filepath.Join(t.TempDir(), "capture.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer captureFile.Close()
+	captureCtx, cancelCapture := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelCapture()
+	capture := exec.CommandContext(captureCtx, "ip", "netns", "exec", clientNS, "tcpdump", "-n", "-l", "-i", "tun0", "-c", "1", "icmp and dst host 10.120.0.1")
+	capture.Stdout, capture.Stderr = captureFile, captureFile
+	if err := capture.Start(); err != nil {
+		t.Fatalf("start tunnel capture: %v", err)
+	}
+	defer func() { _ = capture.Process.Kill(); _ = capture.Wait() }()
+	readyDeadline := time.Now().Add(4 * time.Second)
+	for {
+		data, _ := os.ReadFile(captureFile.Name())
+		if strings.Contains(string(data), "listening on tun0") {
+			break
+		}
+		if time.Now().After(readyDeadline) {
+			links, _ := exec.Command("ip", "-n", clientNS, "addr").CombinedOutput()
+			route, _ := exec.Command("ip", "-n", clientNS, "route", "get", "10.120.0.1").CombinedOutput()
+			t.Fatalf("capture not ready: %s\nclient links: %s\nroute: %s", data, links, route)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "ip", "netns", "exec", clientNS, "ping", "-I", "tun0", "-n", "-c", "1", "-W", "2", "10.120.0.1").CombinedOutput()
+	if !isObservedPingLoss(ctx.Err(), err, string(out)) {
+		t.Fatalf("no valid ICMP loss observation after kill: context=%v error=%v output=%s", ctx.Err(), err, out)
+	}
+	captureErr := capture.Wait()
+	captureOutput, readErr := os.ReadFile(captureFile.Name())
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if captureErr != nil || !strings.Contains(string(captureOutput), "ICMP echo request") {
+		route, _ := exec.Command("ip", "-n", clientNS, "route", "get", "10.120.0.1").CombinedOutput()
+		t.Fatalf("post-kill packet not captured: %v; capture=%s; ping=%s; route=%s", captureErr, captureOutput, out, route)
+	}
+	pingThroughCarol()
+
+	// Start a distinct Bob authentication only after the old session has
+	// disappeared. Pin its isolated source port so retries from the old
+	// process cannot be mistaken for this attempt in the server log.
+	const source = "192.0.2.6:41412"
+	reconnect := strings.Replace(bob, "remote 192.0.2.1 ", "remote 192.0.2.5 ", 1)
+	reconnect = strings.Replace(reconnect, "nobind\n", "lport 41412\n", 1)
+	if reconnect == bob || strings.Contains(reconnect, "nobind\n") {
+		t.Fatal("could not construct identifiable Bob reconnect fixture")
+	}
+	client(carolNS, "bob-after-kill", reconnect)
+	waitLog(logPathForID(inst.Id), func(log string) bool {
+		for _, line := range strings.Split(log, "\n") {
+			if strings.Contains(line, source) && strings.Contains(line, "VERIFY SCRIPT ERROR: depth=0") && strings.Contains(line, "bob@example.test") {
+				return true
+			}
+		}
+		return false
+	})
+	status = management("status 3")
+	if !strings.Contains(status, "HEADER\tCLIENT_LIST\t") || !strings.Contains(status, "\nEND\n") ||
+		strings.Contains(status, "CLIENT_LIST\tbob@example.test\t") || !strings.Contains(status, "CLIENT_LIST\tcarol@example.test\t") {
+		t.Fatalf("unexpected status after Bob reconnect attempt: %s", status)
+	}
+	parsed, err = parseClientListResponse(strings.NewReader(status))
+	if _, ok := parsed["carol@example.test"]; err != nil || !ok || len(parsed) != 1 {
+		t.Fatalf("production parser rejected live post-kill status: %v %v\n%s", parsed, err, status)
+	}
+	pingThroughCarol()
+
+	// Explicitly reauthorize Bob after the rejection experiment. Stop all old
+	// Bob processes first so only this fresh client can obtain the new CID.
+	for _, name := range []string{"bob", "bob-without-allowlist", "bob-after-kill"} {
+		cmd := clientProcesses[name]
+		if cmd == nil {
+			t.Fatalf("missing client process %s", name)
+		}
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}
+	if err := os.WriteFile(allowlist, []byte(strings.Join(fingerprints, "\n")+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	reauthorizedLog := client(clientNS, "bob-reauthorized", bob)
+	waitLog(reauthorizedLog, func(s string) bool { return strings.Contains(s, "Initialization Sequence Completed") })
+	// Make both new counters larger than the old snapshot. A simple
+	// decrease-only reset detector would miss this real reconnection.
+	probeOut, probeErr := exec.Command("ip", "netns", "exec", clientNS, "ping", "-I", "tun0", "-n", "-c", "128", "-i", "0.01", "-s", "1024", "-W", "3", "10.120.0.1").CombinedOutput()
+	if probeErr != nil {
+		t.Fatalf("reauthorized Bob tunnel did not carry probe traffic: %v\n%s", probeErr, probeOut)
+	}
+	afterReconnect := management("status 3")
+	later, err := parseClientListResponse(strings.NewReader(afterReconnect))
+	if err != nil || len(later) != 2 || later["bob@example.test"].ID == "" || later["bob@example.test"].ID == clientID {
+		t.Fatalf("new live Bob session not identified: %v %v\n%s", later, err, afterReconnect)
+	}
+	if later["bob@example.test"].Rx <= beforeBob.Rx || later["bob@example.test"].Tx <= beforeBob.Tx {
+		t.Fatalf("new session counters did not exceed old snapshot: before=%+v after=%+v", beforeBob, later["bob@example.test"])
+	}
+
+	// Replay the two genuine status responses through the production manager
+	// using a local test socket, and verify it counts the new session in full.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for _, response := range []string{beforeReconnect, afterReconnect} {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = bufio.NewReader(conn).ReadString('\n')
+			_, _ = fmt.Fprint(conn, response)
+			_ = conn.Close()
+		}
+	}()
+	defer func() { _ = ln.Close(); <-done }()
+	manager := &Manager{procs: map[int]*managed{inst.Id: {tag: "test-openvpn", mgmtPort: ln.Addr().(*net.TCPAddr).Port}}}
+	if _, _, err := manager.CollectTrafficWithErrors(); err != nil {
+		t.Fatal(err)
+	}
+	_, deltas, err := manager.CollectTrafficWithErrors()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bobDelta *ClientTrafficDelta
+	for i := range deltas {
+		if deltas[i].Email == "bob@example.test" {
+			bobDelta = &deltas[i]
+		}
+	}
+	bobCounters := later["bob@example.test"]
+	if bobDelta == nil || bobDelta.Up != bobCounters.Rx || bobDelta.Down != bobCounters.Tx || !strings.Contains(manager.Status().Error, "final usage is unverified") {
+		t.Fatalf("reconnected session not counted in full or warning missing: delta=%v counters=%+v status=%+v", bobDelta, bobCounters, manager.Status())
+	}
+}
+
+// A failed process, a timeout, or an invalid invocation is not evidence that
+// a probe was sent and went unanswered. This matches the iputils output used
+// by the live CI job; it does not prove where a lost packet went.
+func isObservedPingLoss(ctxErr, err error, output string) bool {
+	var exit *exec.ExitError
+	return ctxErr == nil && errors.As(err, &exit) && exit.ExitCode() == 1 &&
+		strings.Contains(output, "1 packets transmitted, 0 received, 100% packet loss")
+}
+
+func TestObservedPingLossRejectsCommandFailures(t *testing.T) {
+	failure := func(code int) error {
+		return exec.Command("sh", "-c", fmt.Sprintf("exit %d", code)).Run()
+	}
+	loss := "1 packets transmitted, 0 received, 100% packet loss"
+	for _, tc := range []struct {
+		name        string
+		ctxErr, err error
+		output      string
+		want        bool
+	}{
+		{"loss", nil, failure(1), loss, true},
+		{"no executable", nil, exec.ErrNotFound, loss, false},
+		{"timeout", context.DeadlineExceeded, failure(1), loss, false},
+		{"ping error", nil, failure(2), loss, false},
+		{"no statistics", nil, failure(1), "Network is unreachable", false},
+		{"reply", nil, nil, "1 packets transmitted, 1 received, 0% packet loss", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isObservedPingLoss(tc.ctxErr, tc.err, tc.output); got != tc.want {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

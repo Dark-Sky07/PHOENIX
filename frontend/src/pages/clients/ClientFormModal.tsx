@@ -62,6 +62,7 @@ interface SaveMetaCreate {
 interface SaveCreatePayload {
   client: Record<string, unknown>;
   inboundIds: number[];
+  salePrice?: { amountMinor: number; currency: string };
 }
 
 interface ClientFormModalProps {
@@ -72,6 +73,7 @@ interface ClientFormModalProps {
   attachedIds?: number[];
   tgBotEnable?: boolean;
   groups?: string[];
+  isReseller?: boolean;
   save: (
     payload: Record<string, unknown> | SaveCreatePayload,
     meta: SaveMetaEdit | SaveMetaCreate,
@@ -198,6 +200,7 @@ export default function ClientFormModal({
   attachedIds = [],
   tgBotEnable = false,
   groups = [],
+  isReseller = false,
   save,
   resetTraffic,
   onOpenChange,
@@ -207,6 +210,8 @@ export default function ClientFormModal({
   const isEdit = mode === 'edit';
 
   const [form, setForm] = useState<FormState>(emptyForm);
+  const [saleAmount, setSaleAmount] = useState<number | null>(null);
+  const [saleCurrency, setSaleCurrency] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [clientIps, setClientIps] = useState<string[]>([]);
@@ -273,6 +278,8 @@ export default function ClientFormModal({
 
   useEffect(() => {
     if (!open) return;
+    setSaleAmount(null);
+    setSaleCurrency('');
     setIpsModalOpen(false);
 
     if (isEdit && client) {
@@ -582,7 +589,7 @@ export default function ClientFormModal({
         });
       } else {
         msg = await save(
-          { client: clientPayload, inboundIds: form.inboundIds },
+          { client: clientPayload, inboundIds: form.inboundIds, ...(isReseller && saleAmount !== null ? { salePrice: { amountMinor: saleAmount, currency: saleCurrency } } : {}) },
           { isEdit: false },
         );
       }
@@ -664,6 +671,20 @@ export default function ClientFormModal({
                         </Form.Item>
                       </Col>
                     </Row>
+                    {isReseller && !isEdit && (
+                      <Row gutter={16}>
+                        <Col xs={24} md={16}>
+                          <Form.Item label={t('resellers.declaredSaleAmount', 'Declared sale amount (minor units)')} extra={t('resellers.declaredSaleAmountHelp', 'Optional; self-reported, not verified payment. Enter cents or the currency’s smallest unit.') }>
+                            <InputNumber min={0} max={Number.MAX_SAFE_INTEGER} precision={0} value={saleAmount} onChange={(v) => setSaleAmount(v === null ? null : Number(v))} style={{ width: '100%' }} />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} md={8}>
+                          <Form.Item label={t('resellers.saleCurrency', 'Currency code')}>
+                            <Input maxLength={3} placeholder="IRR" value={saleCurrency} onChange={(e) => setSaleCurrency(e.target.value.toUpperCase())} />
+                          </Form.Item>
+                        </Col>
+                      </Row>
+                    )}
                     <Row gutter={16}>
                       <Col xs={24} md={12}>
                         <Form.Item label={t('pages.clients.email')} required>

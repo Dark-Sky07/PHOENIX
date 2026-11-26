@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"strings"
 	"sync"
 
 	"github.com/Dark-Sky07/phoenix/internal/amneziawg"
@@ -136,8 +135,7 @@ func (l *Local) AddInbound(_ context.Context, ib *model.Inbound) error {
 
 func (l *Local) DelInbound(_ context.Context, ib *model.Inbound) error {
 	if ib.Protocol == model.OpenVPN {
-		openvpn.GetManager().Remove(ib.Id)
-		return nil
+		return openvpn.GetManager().Remove(ib.Id)
 	}
 	if ib.Protocol == model.MTProto {
 		mtproto.GetManager().Remove(ib.Id)
@@ -151,12 +149,10 @@ func (l *Local) DelInbound(_ context.Context, ib *model.Inbound) error {
 		return nil
 	}
 	if ib.Protocol == model.L2TP {
-		l2tp.GetManager().Remove(ib.Id)
-		return nil
+		return l2tp.GetManager().RemoveChecked(ib.Id)
 	}
 	if ib.Protocol == model.SSTP || ib.Protocol == model.PPTP {
-		pppvpn.GetManager().Remove(ib.Id)
-		return nil
+		return pppvpn.GetManager().RemoveChecked(ib.Id)
 	}
 	if ib.Protocol == model.TUIC {
 		tuic.GetManager().Remove(ib.Id)
@@ -173,7 +169,7 @@ func (l *Local) DelInbound(_ context.Context, ib *model.Inbound) error {
 func (l *Local) UpdateInbound(ctx context.Context, oldIb, newIb *model.Inbound) error {
 	if oldIb.Protocol == model.OpenVPN && newIb.Protocol == model.OpenVPN {
 		if !newIb.Enable {
-			openvpn.GetManager().StopInbound(newIb.Id)
+			return openvpn.GetManager().StopInbound(newIb.Id)
 		}
 		return nil
 	}
@@ -190,8 +186,7 @@ func (l *Local) UpdateInbound(ctx context.Context, oldIb, newIb *model.Inbound) 
 	}
 	if oldIb.Protocol == model.L2TP && newIb.Protocol == model.L2TP {
 		if !newIb.Enable {
-			l2tp.GetManager().Remove(newIb.Id)
-			return nil
+			return l2tp.GetManager().RemoveChecked(newIb.Id)
 		}
 		return l.AddInbound(ctx, newIb)
 	}
@@ -201,7 +196,9 @@ func (l *Local) UpdateInbound(ctx context.Context, oldIb, newIb *model.Inbound) 
 	if oldIb.Protocol == model.TUIC || newIb.Protocol == model.TUIC {
 		return l.updateTuicInbound(ctx, oldIb, newIb)
 	}
-	_ = l.DelInbound(ctx, oldIb)
+	if err := l.DelInbound(ctx, oldIb); err != nil {
+		return err
+	}
 	if !newIb.Enable {
 		return nil
 	}
@@ -220,7 +217,9 @@ func (l *Local) updateTuicInbound(ctx context.Context, oldIb, newIb *model.Inbou
 		return l.AddInbound(ctx, newIb)
 	}
 	if oldIb.Protocol != model.TUIC {
-		_ = l.DelInbound(ctx, oldIb)
+		if err := l.DelInbound(ctx, oldIb); err != nil {
+			return err
+		}
 		if l.deps.SetNeedRestart != nil {
 			l.deps.SetNeedRestart()
 		}
@@ -260,7 +259,9 @@ func (l *Local) updateAmneziaWGInbound(ctx context.Context, oldIb, newIb *model.
 		return l.AddInbound(ctx, newIb)
 	}
 	if oldIb.Protocol != model.AmneziaWG {
-		_ = l.DelInbound(ctx, oldIb)
+		if err := l.DelInbound(ctx, oldIb); err != nil {
+			return err
+		}
 	}
 	if !newIb.Enable {
 		amneziawgnet.GetManager().Remove(newIb.Id)
@@ -283,12 +284,12 @@ func (l *Local) AddUser(_ context.Context, ib *model.Inbound, userMap map[string
 	})
 }
 
-func (l *Local) RemoveUser(_ context.Context, ib *model.Inbound, email string) error {
+func (l *Local) RemoveUser(ctx context.Context, ib *model.Inbound, email string) error {
 	if ib.Protocol == model.OpenVPN || ib.Protocol == model.MTProto || ib.Protocol == model.AmneziaWG || ib.Protocol == model.L2TP || ib.Protocol == model.SSTP || ib.Protocol == model.PPTP || ib.Protocol == model.TUIC {
 		return nil
 	}
 	return l.withAPI(func(api *xray.XrayAPI) error {
-		return api.RemoveUser(ib.Tag, email)
+		return api.RemoveUserContext(ctx, ib.Tag, email)
 	})
 }
 
@@ -311,18 +312,14 @@ func (l *Local) DeleteUser(ctx context.Context, ib *model.Inbound, email string)
 	if email == "" {
 		return nil
 	}
-	if err := l.RemoveUser(ctx, ib, email); err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			return nil
-		}
-		return err
-	}
-	return nil
+	// Absence of a credential after a timed-out removal is not proof that
+	// its old connections or counter writers have drained.
+	return l.RemoveUser(ctx, ib, email)
 }
 
 func (l *Local) UpdateUser(ctx context.Context, ib *model.Inbound, oldEmail string, payload model.Client) error {
 	if oldEmail != "" {
-		if err := l.RemoveUser(ctx, ib, oldEmail); err != nil && !strings.Contains(err.Error(), "not found") {
+		if err := l.RemoveUser(ctx, ib, oldEmail); err != nil {
 			return err
 		}
 	}

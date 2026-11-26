@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -46,6 +47,7 @@ type XrayAPI struct {
 	grpcClient           *grpc.ClientConn
 	isConnected          bool
 	StatsLastValues      map[string]int64
+	statsBaselineReady   bool
 }
 
 func getRequiredUserString(user map[string]any, key string) (string, error) {
@@ -528,9 +530,19 @@ func (x *XrayAPI) AddUser(Protocol string, inboundTag string, user map[string]an
 	return err
 }
 
-// RemoveUser removes a user from an inbound in the Xray core by email.
+// RemoveUser removes a user from the inbound's authentication configuration.
+// It is not a quiescence barrier: success does not prove existing connections
+// were terminated, that another writer cannot re-add the user, or that final
+// traffic has been polled. Do not use it alone to release accounting quota.
 func (x *XrayAPI) RemoveUser(inboundTag, email string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	return x.RemoveUserContext(context.Background(), inboundTag, email)
+}
+
+// RemoveUserContext bounds the RPC and respects an earlier caller deadline.
+// Cancellation or timeout is an uncertain outcome: the core may already have
+// removed the credential or may still be stopping its sessions.
+func (x *XrayAPI) RemoveUserContext(parent context.Context, inboundTag, email string) error {
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
 
 	op := &command.RemoveUserOperation{Email: email}
@@ -547,14 +559,39 @@ func (x *XrayAPI) RemoveUser(inboundTag, email string) error {
 	return nil
 }
 
-// GetTraffic queries traffic statistics from the Xray core, optionally resetting counters.
+// UserTrafficCounterDecrease signals an uncertain interval, not a measured
+// delta. It must be reconciled rather than silently treating the new value as
+// all traffic since the last poll.
+type UserTrafficCounterDecrease struct {
+	Email     string
+	Direction string
+	Previous  int64
+	Observed  int64
+}
+
+func (e *UserTrafficCounterDecrease) Error() string {
+	return fmt.Sprintf("Xray user %q %s counter decreased from %d to %d; reconciliation required", e.Email, e.Direction, e.Previous, e.Observed)
+}
+
+// UserTrafficCounterMissing records a previously observed counter omitted by
+// the runtime. Absence does not establish a zero reading or final usage.
+type UserTrafficCounterMissing struct {
+	Email, Direction string
+	Previous         int64
+}
+
+func (e *UserTrafficCounterMissing) Error() string {
+	return fmt.Sprintf("Xray user %q %s counter missing after previous reading %d; reconciliation required", e.Email, e.Direction, e.Previous)
+}
+
+// GetTraffic queries traffic statistics from the Xray core without resetting counters.
 func (x *XrayAPI) GetTraffic() ([]*Traffic, []*ClientTraffic, error) {
 	if x.grpcClient == nil {
 		return nil, nil, common.NewError("xray api is not initialized")
 	}
 
-	trafficRegex := regexp.MustCompile(`(inbound|outbound)>>>([^>]+)>>>traffic>>>(downlink|uplink)`)
-	clientTrafficRegex := regexp.MustCompile(`user>>>([^>]+)>>>traffic>>>(downlink|uplink)`)
+	trafficRegex := regexp.MustCompile(`^(inbound|outbound)>>>([^>]+)>>>traffic>>>(downlink|uplink)$`)
+	clientTrafficRegex := regexp.MustCompile(`^user>>>([^>]+)>>>traffic>>>(downlink|uplink)$`)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
 	defer cancel()
@@ -568,25 +605,99 @@ func (x *XrayAPI) GetTraffic() ([]*Traffic, []*ClientTraffic, error) {
 		logger.Debug("Failed to query Xray stats:", err)
 		return nil, nil, err
 	}
+	if resp == nil {
+		return nil, nil, fmt.Errorf("empty Xray stats response")
+	}
 
 	tagTrafficMap := make(map[string]*Traffic)
 	emailTrafficMap := make(map[string]*ClientTraffic)
 
+	// Validate the entire relevant response before advancing any baseline.
+	// A duplicate or negative counter makes this poll ambiguous; accepting a
+	// partial response would make its remaining deltas impossible to retry.
+	seen := make(map[string]struct{})
 	for _, stat := range resp.GetStat() {
-		lastValue, ok := x.StatsLastValues[stat.Name]
-		x.StatsLastValues[stat.Name] = stat.Value
-		if !ok || stat.Value < lastValue {
-			// skip first time of seen stat
+		if stat == nil {
+			return nil, nil, fmt.Errorf("nil Xray statistic")
+		}
+		if !trafficRegex.MatchString(stat.Name) && !clientTrafficRegex.MatchString(stat.Name) {
 			continue
 		}
-		value := stat.Value - lastValue
-		if matches := trafficRegex.FindStringSubmatch(stat.Name); len(matches) == 4 {
-			processTraffic(matches, value, tagTrafficMap)
-		} else if matches := clientTrafficRegex.FindStringSubmatch(stat.Name); len(matches) == 3 {
-			processClientTraffic(matches, value, emailTrafficMap)
+		if stat.Value < 0 {
+			return nil, nil, fmt.Errorf("negative Xray traffic counter %q", stat.Name)
+		}
+		if _, ok := seen[stat.Name]; ok {
+			return nil, nil, fmt.Errorf("duplicate Xray traffic counter %q", stat.Name)
+		}
+		seen[stat.Name] = struct{}{}
+		if match := clientTrafficRegex.FindStringSubmatch(stat.Name); len(match) == 3 {
+			if previous, ok := x.StatsLastValues[stat.Name]; ok && stat.Value < previous {
+				return nil, nil, &UserTrafficCounterDecrease{Email: match[1], Direction: match[2], Previous: previous, Observed: stat.Value}
+			}
 		}
 	}
+	// A previously observed user counter disappearing is not a reading of
+	// zero. Preserve every baseline and surface the uncertainty for review.
+	missing := make([]string, 0)
+	for name := range x.StatsLastValues {
+		if _, ok := seen[name]; !ok && clientTrafficRegex.MatchString(name) {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		name := missing[0]
+		match := clientTrafficRegex.FindStringSubmatch(name)
+		return nil, nil, &UserTrafficCounterMissing{Email: match[1], Direction: match[2], Previous: x.StatsLastValues[name]}
+	}
+	for _, stat := range resp.GetStat() {
+		tagMatches := trafficRegex.FindStringSubmatch(stat.Name)
+		clientMatches := clientTrafficRegex.FindStringSubmatch(stat.Name)
+		if len(tagMatches) != 4 && len(clientMatches) != 3 {
+			continue
+		}
+		value, include := x.trafficCounterDelta(stat.Name, stat.Value)
+		if !include {
+			continue
+		}
+		if len(tagMatches) == 4 {
+			processTraffic(tagMatches, value, tagTrafficMap)
+		} else {
+			processClientTraffic(clientMatches, value, emailTrafficMap)
+		}
+	}
+	x.statsBaselineReady = true
 	return mapToSlice(tagTrafficMap), mapToSlice(emailTrafficMap), nil
+}
+
+// ResetTrafficBaseline starts a new counter epoch. Set fromZero only when the
+// caller knows the core process is newly started, not when attaching to an
+// already running process whose counters may have been persisted earlier.
+func (x *XrayAPI) ResetTrafficBaseline(fromZero bool) {
+	x.StatsLastValues = nil
+	x.statsBaselineReady = fromZero
+}
+
+// trafficCounterDelta establishes an initial baseline for a possibly already
+// running core. Counters first appearing on later polls belong to new users or
+// inbounds and their first interval must not be discarded. A counter that
+// decreases has reset: its current nonnegative value is the new interval.
+func (x *XrayAPI) trafficCounterDelta(name string, value int64) (int64, bool) {
+	if value < 0 {
+		return 0, false
+	}
+	if x.StatsLastValues == nil {
+		x.StatsLastValues = make(map[string]int64)
+	}
+	previous, existed := x.StatsLastValues[name]
+	x.StatsLastValues[name] = value
+	if !existed {
+		return value, x.statsBaselineReady
+	}
+	if value < previous {
+		return value, true
+	}
+	return value - previous, true
 }
 
 // OnlineIP is one source address of a live connection, with the unix time (seconds)
@@ -606,6 +717,8 @@ type OnlineUser struct {
 // GetOnlineUsers returns every user with at least one live connection plus their
 // source IPs, via StatsService.GetUsersStats (one RPC covers all users). Requires
 // statsUserOnline enabled in the policy levels; older cores return Unimplemented.
+// Absence from this list is not proof of quiescence: policy/configuration can
+// omit users and Xray's online map excludes localhost source addresses.
 func (x *XrayAPI) GetOnlineUsers() ([]OnlineUser, error) {
 	if x.grpcClient == nil {
 		return nil, common.NewError("xray api is not initialized")

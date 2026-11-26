@@ -76,6 +76,7 @@ func initModels() error {
 		&model.ClientGroup{},
 		&model.InboundFallback{},
 		&model.NodeClientTraffic{},
+		&model.ResellerNodeCounterIncident{},
 		&model.ClientGlobalTraffic{},
 		&model.PPPClientTrafficCounter{},
 		&model.OutboundSubscription{},
@@ -83,9 +84,17 @@ func initModels() error {
 		&model.ResellerInbound{},
 		&model.ResellerClient{},
 		&model.ResellerTransaction{},
+		&model.ResellerSale{},
+		&model.ResellerCreationIntent{},
+		&model.ResellerHistoricalSale{},
+		&model.ResellerTrafficArchive{},
 		&model.BotNotifyState{},
 		&model.ClientInvite{},
 		&model.TuicTrafficReceipt{},
+		&model.XrayTrafficReceipt{},
+		&model.XrayTrafficInFlight{},
+		&model.TrafficSnapshotReceiver{},
+		&model.TrafficSnapshotSender{},
 		&model.UserTemplate{},
 		&model.SupportTicket{},
 		&model.SupportTicketMessage{},
@@ -150,7 +159,13 @@ func dropLegacyForeignKeys() error {
 }
 
 func pruneOrphanedClientInbounds() error {
-	res := db.Exec("DELETE FROM client_inbounds WHERE inbound_id NOT IN (SELECT id FROM inbounds)")
+	// Preserve evidence for reseller-owned clients. An orphaned link may be
+	// the only surviving sign of an unverified runtime association; deleting
+	// it would let quota checks mistake missing evidence for a local client.
+	res := db.Exec(`DELETE FROM client_inbounds WHERE inbound_id NOT IN (SELECT id FROM inbounds)
+		AND NOT EXISTS (SELECT 1 FROM clients c JOIN reseller_clients rc
+			ON LOWER(TRIM(rc.email)) = LOWER(TRIM(c.email))
+			WHERE c.id = client_inbounds.client_id)`)
 	if res.Error != nil {
 		log.Printf("Error pruning orphaned client_inbounds rows: %v", res.Error)
 		return res.Error

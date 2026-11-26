@@ -1,6 +1,8 @@
 package l2tp
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"sort"
 	"strconv"
@@ -55,36 +57,73 @@ func GetManager() *Manager {
 	return manager
 }
 
-func cleanupOrphanData(exceptID int) {
+// orphanDataError conservatively protects runtime evidence left by a previous
+// panel process. A PID file or process name cannot establish ownership (PIDs
+// can be reused, and strongSwan uses a host-global PID directory). Do not
+// signal or delete an untracked group automatically. The tracked directory is
+// exempt only while this Manager still owns its process handles.
+func orphanDataError(trackedID int) error {
 	entries, err := os.ReadDir(l2tpRoot())
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
 	if err != nil {
-		return
+		return fmt.Errorf("inspect L2TP runtime directories: %w", err)
 	}
 	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
 		id, err := strconv.Atoi(entry.Name())
-		if err != nil || id <= 0 || id == exceptID {
+		if err != nil || id <= 0 {
 			continue
 		}
-		stopOrphan(id)
-		GetNetworkManager().Remove(id)
-		removeStrongSwanRuntime(id)
-		_ = os.RemoveAll(dataDirForID(id))
+		if id == trackedID && entry.Name() == strconv.Itoa(trackedID) {
+			continue
+		}
+		return fmt.Errorf("untracked L2TP runtime directory %q requires manual review; refusing automatic cleanup", entry.Name())
 	}
+	return nil
+}
+
+func (m *Manager) orphanDataErrorLocked() error {
+	trackedID := 0
+	if m.proc != nil {
+		trackedID = m.id
+	}
+	return orphanDataError(trackedID)
+}
+
+// CheckUntrackedRuntime reports locally visible orphan or hook evidence
+// without signalling or modifying it. A clean result is not proof of quiescence.
+func (m *Manager) CheckUntrackedRuntime() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.orphanDataErrorLocked(); err != nil {
+		return err
+	}
+	return CheckHookIncidents()
 }
 
 // Ensure brings the daemon and firewall toward one desired instance.
 func (m *Manager) Ensure(inst Instance) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.ensureLocked(inst)
+	err := m.ensureLocked(inst)
+	if err != nil {
+		m.lastError = err.Error()
+	} else {
+		m.lastError = ""
+	}
+	return err
 }
 
 func (m *Manager) ensureLocked(inst Instance) error {
 	if err := ValidateSettings(inst); err != nil {
 		return err
+	}
+	if err := m.orphanDataErrorLocked(); err != nil {
+		return err
+	}
+	if m.proc != nil && m.id != inst.Id {
+		return fmt.Errorf("remove tracked L2TP inbound %d before starting inbound %d", m.id, inst.Id)
 	}
 	fp := inst.fingerprint()
 	if m.proc != nil && m.id == inst.Id && m.proc.fingerprint == fp && m.proc.proc.IsRunning() {
@@ -104,16 +143,15 @@ func (m *Manager) ensureLocked(inst Instance) error {
 		return nil
 	}
 	if m.proc != nil {
-		_ = m.proc.proc.Stop()
+		if err := m.proc.proc.Stop(); err != nil {
+			return fmt.Errorf("stop l2tp daemon group for inbound %d: %w", m.id, err)
+		}
 		GetNetworkManager().Remove(m.id)
 		removeStrongSwanRuntime(m.id)
 		_ = clearSystemChapSecrets()
 		m.proc = nil
 		m.id = 0
 	}
-	// The process group and firewall manager are in-memory. Reclaim any
-	// previous group for this id before writing a fresh config after restart.
-	stopOrphan(inst.Id)
 	if m.proc == nil {
 		if err := clearSystemChapSecrets(); err != nil {
 			return err
@@ -148,9 +186,18 @@ func (m *Manager) ensureLocked(inst Instance) error {
 func (m *Manager) Reconcile(desired []Instance) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := m.orphanDataErrorLocked(); err != nil {
+		m.lastError = err.Error()
+		logger.Warningf("l2tp: reconciliation deferred: %v", err)
+		return
+	}
 	if m.manualStop {
 		if m.proc != nil {
-			_ = m.proc.proc.Stop()
+			if err := m.proc.proc.Stop(); err != nil {
+				m.lastError = err.Error()
+				logger.Warningf("l2tp: cannot reconcile stopped daemon group: %v", err)
+				return
+			}
 			GetNetworkManager().Remove(m.id)
 			removeStrongSwanRuntime(m.id)
 			_ = os.RemoveAll(dataDirForID(m.id))
@@ -158,14 +205,17 @@ func (m *Manager) Reconcile(desired []Instance) {
 			m.id = 0
 			m.ready = false
 		}
-		cleanupOrphanData(0)
 		GetNetworkManager().RemoveAll()
 		return
 	}
 	if len(desired) == 0 {
 		m.lastError = ""
 		if m.proc != nil {
-			_ = m.proc.proc.Stop()
+			if err := m.proc.proc.Stop(); err != nil {
+				m.lastError = err.Error()
+				logger.Warningf("l2tp: cannot reconcile stopped daemon group: %v", err)
+				return
+			}
 			GetNetworkManager().Remove(m.id)
 			removeStrongSwanRuntime(m.id)
 			_ = os.RemoveAll(dataDirForID(m.id))
@@ -173,7 +223,6 @@ func (m *Manager) Reconcile(desired []Instance) {
 			m.id = 0
 			m.ready = false
 		}
-		cleanupOrphanData(0)
 		if err := clearSystemChapSecrets(); err != nil {
 			logger.Warningf("l2tp: failed to clear system PPP chap-secrets: %v", err)
 		}
@@ -184,7 +233,6 @@ func (m *Manager) Reconcile(desired []Instance) {
 	}
 	inst := desired[0]
 	err := m.ensureLocked(inst)
-	cleanupOrphanData(inst.Id)
 	if err != nil {
 		m.lastError = err.Error()
 		if m.proc != nil && time.Since(m.proc.lastErrAt) < time.Minute {
@@ -201,13 +249,20 @@ func (m *Manager) Reconcile(desired []Instance) {
 
 // StopManually stops the L2TP/IPsec daemon group and holds reconciliation
 // until Resume is called by the dashboard.
-func (m *Manager) StopManually() {
+func (m *Manager) StopManually() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.manualStop = true
 	m.lastError = ""
+	if err := m.orphanDataErrorLocked(); err != nil {
+		m.lastError = err.Error()
+		return err
+	}
 	if m.proc != nil {
-		_ = m.proc.proc.Stop()
+		if err := m.proc.proc.Stop(); err != nil {
+			m.lastError = err.Error()
+			return fmt.Errorf("stop l2tp daemon group for inbound %d: %w", m.id, err)
+		}
 		GetNetworkManager().Remove(m.id)
 		removeStrongSwanRuntime(m.id)
 		_ = os.RemoveAll(dataDirForID(m.id))
@@ -215,9 +270,9 @@ func (m *Manager) StopManually() {
 		m.id = 0
 		m.ready = false
 	}
-	cleanupOrphanData(0)
 	GetNetworkManager().RemoveAll()
 	_ = clearSystemChapSecrets()
+	return nil
 }
 
 // Resume clears an explicit dashboard stop request. The next reconcile tick
@@ -230,13 +285,20 @@ func (m *Manager) Resume() {
 }
 
 // Restart stops the current daemon group while leaving reconciliation enabled.
-func (m *Manager) Restart() {
+func (m *Manager) Restart() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.manualStop = false
 	m.lastError = ""
+	if err := m.orphanDataErrorLocked(); err != nil {
+		m.lastError = err.Error()
+		return err
+	}
 	if m.proc != nil {
-		_ = m.proc.proc.Stop()
+		if err := m.proc.proc.Stop(); err != nil {
+			m.lastError = err.Error()
+			return fmt.Errorf("stop l2tp daemon group for inbound %d: %w", m.id, err)
+		}
 		GetNetworkManager().Remove(m.id)
 		removeStrongSwanRuntime(m.id)
 		_ = os.RemoveAll(dataDirForID(m.id))
@@ -244,9 +306,9 @@ func (m *Manager) Restart() {
 		m.id = 0
 		m.ready = false
 	}
-	cleanupOrphanData(0)
 	GetNetworkManager().RemoveAll()
 	_ = clearSystemChapSecrets()
+	return nil
 }
 
 // Status returns the secret-free state used by the dashboard.
@@ -264,11 +326,18 @@ func (m *Manager) Status() RuntimeStatus {
 	return status
 }
 
-func (m *Manager) Remove(id int) {
+func (m *Manager) RemoveChecked(id int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := m.orphanDataErrorLocked(); err != nil {
+		m.lastError = err.Error()
+		return err
+	}
 	if m.proc != nil && (id == 0 || m.id == id) {
-		_ = m.proc.proc.Stop()
+		if err := m.proc.proc.Stop(); err != nil {
+			m.lastError = err.Error()
+			return fmt.Errorf("stop l2tp daemon group for inbound %d: %w", m.id, err)
+		}
 		GetNetworkManager().Remove(m.id)
 		removeStrongSwanRuntime(m.id)
 		_ = os.RemoveAll(dataDirForID(m.id))
@@ -277,14 +346,12 @@ func (m *Manager) Remove(id int) {
 		m.ready = false
 	}
 	if id == 0 {
-		cleanupOrphanData(0)
 		if err := clearSystemChapSecrets(); err != nil {
 			logger.Warningf("l2tp: failed to clear system PPP chap-secrets: %v", err)
 		}
-		return
+		return nil
 	}
 	if m.proc == nil || m.id == id {
-		stopOrphan(id)
 		GetNetworkManager().Remove(id)
 		removeStrongSwanRuntime(id)
 		_ = os.RemoveAll(dataDirForID(id))
@@ -294,6 +361,13 @@ func (m *Manager) Remove(id int) {
 			logger.Warningf("l2tp: failed to clear system PPP chap-secrets: %v", err)
 		}
 	}
+	return nil
+}
+
+func (m *Manager) Remove(id int) {
+	if err := m.RemoveChecked(id); err != nil {
+		logger.Warningf("l2tp: remove inbound %d failed: %v", id, err)
+	}
 }
 
 func (m *Manager) StopAll() {
@@ -301,7 +375,10 @@ func (m *Manager) StopAll() {
 	m.manualStop = false
 	m.lastError = ""
 	m.mu.Unlock()
-	m.Remove(0)
+	if err := m.RemoveChecked(0); err != nil {
+		logger.Warningf("l2tp: stop all failed: %v", err)
+		return
+	}
 	GetNetworkManager().RemoveAll()
 }
 
@@ -311,13 +388,53 @@ func (m *Manager) StopAll() {
 // stable email-to-interface mapping without inventing a profile or requiring a
 // RADIUS accounting server.
 func (m *Manager) CollectTraffic() (inbounds []InboundTraffic, clients []ClientTrafficDelta) {
+	inbounds, clients, _ = m.CollectTrafficChecked()
+	return inbounds, clients
+}
+
+// CollectTrafficChecked reports a failed read without advancing baselines, so
+// the caller can defer a destructive reconciliation until the next sample.
+func (m *Manager) CollectTrafficChecked() (inbounds []InboundTraffic, clients []ClientTrafficDelta, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.proc == nil || !m.proc.proc.IsRunning() {
+	// Do not treat an unowned runtime as an empty sample. Its sessions may
+	// still be consuming traffic even though this manager cannot inspect them.
+	if err := m.orphanDataErrorLocked(); err != nil {
+		var last map[string]interfaceCounter
 		if m.proc != nil {
-			m.proc.online = map[string]bool{}
+			last = m.proc.last
 		}
-		return nil, nil
+		return nil, nil, l2tpReadFailure(m.id, last, err)
+	}
+	if m.proc == nil {
+		if err := CheckHookIncidents(); err != nil {
+			return nil, nil, l2tpReadFailure(m.id, nil, err)
+		}
+		return nil, nil, nil
+	}
+	if m.proc.proc == nil || !m.proc.proc.IsRunning() {
+		// Parent exit is not proof that pppd children stopped or that their
+		// final traffic was recorded. Inspect both prior baselines and visible
+		// sessions that began since the last sample, without adopting counts.
+		current, stale, err := readSessions(m.id)
+		if err != nil {
+			var pending *HookPendingError
+			if errors.As(err, &pending) {
+				// A live hook does not make already lost runtime ownership safe.
+				if missing := missingL2TPSessions(m.id, m.proc.last, nil, nil, "tracked runtime unavailable while hook is pending"); missing != nil {
+					return nil, nil, missing
+				}
+			}
+			return nil, nil, l2tpReadFailure(m.id, m.proc.last, err)
+		}
+		for key := range current {
+			stale = append(stale, key)
+		}
+		if missing := missingL2TPSessions(m.id, m.proc.last, nil, stale, "tracked runtime unavailable"); missing != nil {
+			return nil, nil, missing
+		}
+		m.proc.online = map[string]bool{}
+		return nil, nil, nil
 	}
 	if m.proc.last == nil {
 		m.proc.last = make(map[string]interfaceCounter)
@@ -325,11 +442,31 @@ func (m *Manager) CollectTraffic() (inbounds []InboundTraffic, clients []ClientT
 	if m.proc.online == nil {
 		m.proc.online = make(map[string]bool)
 	}
-	current, countersOK := readSessions(m.id)
-	if !countersOK {
-		// A transient marker/interface read failure must not clear baselines or
-		// report a false zero. Retry on the next polling tick.
-		return nil, nil
+	current, stale, readErr := readSessions(m.id)
+	if readErr != nil {
+		return nil, nil, l2tpReadFailure(m.id, m.proc.last, readErr)
+	}
+	// A missing previously sampled session is not a zero-traffic disconnect:
+	// the down hook discards its marker without recording final counters.
+	if missing := missingL2TPSessions(m.id, m.proc.last, current, stale, "session absent from sample or interface missing"); missing != nil {
+		return nil, nil, missing
+	}
+	// Validate the entire snapshot before changing any baseline. A lower
+	// counter can reflect interface reuse or reset, neither of which proves
+	// the missing interval was zero or that the observed counter is new usage.
+	keys := make([]string, 0, len(current))
+	for key := range current {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		previous, exists := m.proc.last[key]
+		counter := current[key]
+		if exists && (counter.rx < previous.rx || counter.tx < previous.tx) {
+			iface, email, _ := strings.Cut(key, "\x00")
+			return nil, nil, &CounterDecrease{InboundID: m.id, Interface: iface, Email: email,
+				PreviousRx: previous.rx, PreviousTx: previous.tx, ObservedRx: counter.rx, ObservedTx: counter.tx}
+		}
 	}
 	newOnline := make(map[string]bool, len(current))
 	deltaByEmail := make(map[string]ClientTrafficDelta)
@@ -363,7 +500,82 @@ func (m *Manager) CollectTraffic() (inbounds []InboundTraffic, clients []ClientT
 	if totalUp > 0 || totalDown > 0 {
 		inbounds = append(inbounds, InboundTraffic{InboundId: m.id, Tag: m.proc.tag, Up: totalUp, Down: totalDown})
 	}
-	return inbounds, sortedClientDeltas(deltaByEmail)
+	return inbounds, sortedClientDeltas(deltaByEmail), nil
+}
+
+// l2tpReadFailure distinguishes an in-progress hook from a snapshot that
+// needs permanent review; neither case advances or discards any baseline.
+func l2tpReadFailure(id int, last map[string]interfaceCounter, readErr error) error {
+	var pending *HookPendingError
+	if errors.As(readErr, &pending) {
+		return pending
+	}
+	failure := &SessionReadFailure{InboundID: id, Cause: readErr.Error()}
+	keys := make([]string, 0, len(last))
+	for key := range last {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		iface, email, _ := strings.Cut(key, "\x00")
+		counter := last[key]
+		failure.Previous = append(failure.Previous, SessionObservation{Interface: iface, Email: email, PreviousRx: counter.rx, PreviousTx: counter.tx})
+	}
+	return failure
+}
+
+// missingL2TPSessions retains every absent baseline in deterministic order.
+// A nil current map marks all known sessions uncertain when runtime is down.
+func missingL2TPSessions(id int, last, current map[string]interfaceCounter, stale []string, cause string) *SessionDisappeared {
+	keys := make([]string, 0, len(last)+len(stale))
+	seen := make(map[string]bool, len(last)+len(stale))
+	retainedKeys := make([]string, 0, len(last))
+	for key := range last {
+		if _, present := current[key]; !present {
+			keys = append(keys, key)
+			seen[key] = true
+		} else {
+			retainedKeys = append(retainedKeys, key)
+		}
+	}
+	for _, key := range stale {
+		if !seen[key] {
+			keys = append(keys, key)
+			seen[key] = true
+		}
+	}
+	sort.Strings(keys)
+	sort.Strings(retainedKeys)
+	if len(keys) == 0 {
+		return nil
+	}
+	observation := func(key string) SessionObservation {
+		iface, email, _ := strings.Cut(key, "\x00")
+		counter, known := last[key]
+		return SessionObservation{Interface: iface, Email: email, PreviousRx: counter.rx, PreviousTx: counter.tx, NoBaseline: !known}
+	}
+	first := observation(keys[0])
+	missing := &SessionDisappeared{InboundID: id, Interface: first.Interface, Email: first.Email, PreviousRx: first.PreviousRx, PreviousTx: first.PreviousTx, NoBaseline: first.NoBaseline, Cause: cause}
+	for _, key := range keys[1:] {
+		missing.Additional = append(missing.Additional, observation(key))
+	}
+	for _, key := range retainedKeys {
+		retained := observation(key)
+		retained.ObservedRx, retained.ObservedTx = current[key].rx, current[key].tx
+		missing.Retained = append(missing.Retained, retained)
+	}
+	var newKeys []string
+	for key := range current {
+		if _, exists := last[key]; !exists {
+			newKeys = append(newKeys, key)
+		}
+	}
+	sort.Strings(newKeys)
+	for _, key := range newKeys {
+		iface, email, _ := strings.Cut(key, "\x00")
+		missing.New = append(missing.New, SessionObservation{Interface: iface, Email: email, ObservedRx: current[key].rx, ObservedTx: current[key].tx})
+	}
+	return missing
 }
 
 // OnlineEmails returns the currently connected L2TP usernames, deduplicated

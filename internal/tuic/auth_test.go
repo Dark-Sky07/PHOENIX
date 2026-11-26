@@ -4,9 +4,12 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"errors"
+	"math"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -31,6 +34,99 @@ func TestUserRegistryBasic(t *testing.T) {
 	_, err := reg.Authenticate(&tls.ConnectionState{}, unknownUUID, [32]byte{})
 	if !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound, got %v", err)
+	}
+}
+
+func TestTrafficCounterSaturatesAndPreservesInvalidEvidence(t *testing.T) {
+	var counter atomic.Int64
+	counter.Store(math.MaxInt64 - 2)
+	addTrafficCounter(&counter, 3)
+	addTrafficCounter(&counter, 5)
+	if got := counter.Load(); got != math.MaxInt64 {
+		t.Fatalf("counter wrapped: %d", got)
+	}
+	counter.Store(-7)
+	addTrafficCounter(&counter, 10)
+	if got := counter.Load(); got != -7 {
+		t.Fatalf("invalid counter evidence overwritten: %d", got)
+	}
+}
+
+func TestTrafficCounterConcurrentDrainDoesNotLoseIncrements(t *testing.T) {
+	var counter atomic.Int64
+	var workers sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for j := 0; j < 10000; j++ {
+				addTrafficCounter(&counter, 1)
+			}
+		}()
+	}
+	done := make(chan struct{})
+	go func() { workers.Wait(); close(done) }()
+	var total int64
+	for {
+		total += counter.Swap(0)
+		select {
+		case <-done:
+			total += counter.Swap(0)
+			if total != 80000 {
+				t.Fatalf("increment loss across poll: got %d", total)
+			}
+			return
+		default:
+		}
+	}
+}
+
+func TestRetiredUserLastSessionEndSerializesWithCollection(t *testing.T) {
+	reg := NewUserRegistry()
+	id := uuid.New()
+	reg.SetUsers([]TuicClientSettings{{UUID: id.String(), Email: "retired@example.test"}})
+	user := reg.users[id]
+	user.sessions.Add(1)
+	reg.SetUsers(nil)
+
+	// Model a collector between its counter swaps and its retired-user check.
+	reg.mu.Lock()
+	done := make(chan struct{})
+	go func() { reg.sessionEnded(user); close(done) }()
+	select {
+	case <-done:
+		reg.mu.Unlock()
+		t.Fatal("session ended while collector held registry lock")
+	case <-time.After(20 * time.Millisecond):
+	}
+	// A relay can complete a write during collection. The session must remain
+	// visible until the collector finishes so the next poll can drain it.
+	user.Traffic.BytesUp.Add(17)
+	if user.sessions.Load() != 1 {
+		reg.mu.Unlock()
+		t.Fatal("last session disappeared during collection")
+	}
+	reg.mu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("session end did not complete")
+	}
+	got := reg.CollectTrafficDeltas()
+	if len(got) != 1 || got[0].Up != 17 {
+		t.Fatalf("late relay traffic lost: %+v", got)
+	}
+}
+
+func TestUserRegistryPreservesNegativeCounterEvidence(t *testing.T) {
+	reg := NewUserRegistry()
+	reg.SetUsers([]TuicClientSettings{{UUID: uuid.NewString(), Email: "negative@example.test", TrafficID: 5}})
+	if !reg.AddTestTraffic("negative@example.test", -7, -3) {
+		t.Fatal("missing user")
+	}
+	got := reg.CollectTrafficDeltas()
+	if len(got) != 1 || got[0].Up != -7 || got[0].Down != -3 {
+		t.Fatalf("negative counter evidence lost: %+v", got)
 	}
 }
 

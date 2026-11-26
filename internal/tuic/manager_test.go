@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"math"
 	"net"
 	"reflect"
 	"strings"
@@ -16,6 +17,43 @@ import (
 
 	"github.com/Dark-Sky07/phoenix/internal/logger"
 )
+
+func TestEnsureCannotConfuseDelimiterContainingUserSets(t *testing.T) {
+	cert, key := generateTestCert(t)
+	const a = "a0000000-0000-0000-0000-000000000001"
+	const b = "a0000000-0000-0000-0000-000000000002"
+	inst := Instance{Id: 44, Tag: "collision-test", Listen: "127.0.0.1", Port: 0, Certificate: string(cert), PrivateKey: string(key), Clients: []TuicClientSettings{
+		{UUID: a, Email: "a", Password: "p"},
+		{UUID: b, Email: "b", Password: "q"},
+	}}
+	m := &Manager{servers: map[int]*managed{}, lastStartErr: map[int]string{}}
+	t.Cleanup(m.StopAll)
+	if err := m.Ensure(inst); err != nil {
+		t.Fatal(err)
+	}
+	server := m.servers[inst.Id].server
+	changed := inst
+	changed.Clients = []TuicClientSettings{{UUID: a, Email: "a", Password: "p|0:b=" + b + ":q"}}
+	if inst.UsersFingerprint() == changed.UsersFingerprint() {
+		t.Fatal("different user lists have identical fingerprint")
+	}
+	if err := m.Ensure(changed); err != nil {
+		t.Fatal(err)
+	}
+	if server != m.servers[inst.Id].server {
+		t.Fatal("client update restarted listener")
+	}
+	server.users.mu.RLock()
+	defer server.users.mu.RUnlock()
+	if len(server.users.users) != 1 {
+		t.Fatalf("removed user is still registered: %d users", len(server.users.users))
+	}
+	for _, u := range server.users.users {
+		if u.UUIDStr != a || u.Password != changed.Clients[0].Password {
+			t.Fatalf("unexpected retained user: %s", u.UUIDStr)
+		}
+	}
+}
 
 func TestEnsureStartsServerAndReconciles(t *testing.T) {
 	certPEM, keyPEM := generateTestCert(t)
@@ -381,6 +419,34 @@ func TestCollectAllTraffic(t *testing.T) {
 	inbounds2, clients2 := m.CollectAllTraffic()
 	if len(inbounds2) != 0 || len(clients2) != 0 {
 		t.Fatalf("expected empty deltas after drain, got %+v, %+v", inbounds2, clients2)
+	}
+}
+
+func TestManagerRetainsDistinctPendingSourceIdentities(t *testing.T) {
+	m := &Manager{servers: make(map[int]*managed)}
+	original := ClientTrafficDelta{TrafficID: 3, InboundID: 1, UUID: "old", Email: "old@example.test", Up: 10}
+	replacement := ClientTrafficDelta{TrafficID: 3, InboundID: 1, UUID: "new", Email: "new@example.test", Down: 20}
+	m.RequeueClientTraffic([]ClientTrafficDelta{original, replacement})
+	_, got := m.CollectAllTraffic()
+	if len(got) != 2 {
+		t.Fatalf("distinct source evidence merged: %+v", got)
+	}
+	seen := make(map[ClientTrafficDelta]bool)
+	for _, delta := range got {
+		seen[delta] = true
+	}
+	if !seen[original] || !seen[replacement] {
+		t.Fatalf("source identities changed: %+v", got)
+	}
+}
+
+func TestManagerRequeuedTrafficCannotOverflow(t *testing.T) {
+	m := &Manager{servers: make(map[int]*managed)}
+	m.RequeueClientTraffic([]ClientTrafficDelta{{TrafficID: 3, Email: "a", Up: math.MaxInt64 - 1, Down: 5}})
+	m.RequeueClientTraffic([]ClientTrafficDelta{{TrafficID: 3, Email: "a", Up: 100, Down: -1}})
+	_, got := m.CollectAllTraffic()
+	if len(got) != 1 || got[0].Up != math.MaxInt64 || got[0].Down != -1 {
+		t.Fatalf("requeued counters wrapped or discarded invalid input: %+v", got)
 	}
 }
 

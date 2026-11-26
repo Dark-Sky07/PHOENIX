@@ -1,11 +1,16 @@
 package service
 
 import (
+	"fmt"
 	"math"
+	"os"
+	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
+	"github.com/Dark-Sky07/phoenix/internal/pppvpn"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
 )
 
@@ -58,8 +63,9 @@ func TestPPPAbsoluteCountersAreTransactionalAndIdempotent(t *testing.T) {
 
 	// Force an error after the absolute checkpoint is staged in the transaction;
 	// neither the checkpoint nor any usage may survive that rollback.
+	retrySample := &xray.ClientTraffic{Email: client.Email, Enable: true, PPPSessionID: "pptp-session-uuid", PPPInboundID: inbound.Id, PPPRxBytes: 100, PPPTxBytes: 200}
 	if _, _, err := service.AddTraffic(nil, []*xray.ClientTraffic{
-		{Email: client.Email, Enable: true, PPPSessionID: "pptp-session-uuid", PPPInboundID: inbound.Id, PPPRxBytes: 100, PPPTxBytes: 200},
+		retrySample,
 		{Email: "invalid@example.test", Up: -1},
 	}); err == nil {
 		t.Fatal("invalid delta should abort the whole traffic transaction")
@@ -68,8 +74,18 @@ func TestPPPAbsoluteCountersAreTransactionalAndIdempotent(t *testing.T) {
 	if err := database.GetDB().Where("session_id = ?", "pptp-session-uuid").Take(&model.PPPClientTrafficCounter{}).Error; err == nil {
 		t.Fatal("checkpoint update survived a rolled-back usage transaction")
 	}
-	apply(100, 200)
-	assertUsage(100, 200)
+	if retrySample.PPPSessionID != "pptp-session-uuid" || retrySample.PPPRxBytes != 100 || retrySample.PPPTxBytes != 200 || retrySample.Up != 0 || retrySample.Down != 0 {
+		t.Fatalf("failed transaction mutated retryable absolute sample: %+v", retrySample)
+	}
+	for i := 0; i < 2; i++ {
+		if _, _, err := service.AddTraffic(nil, []*xray.ClientTraffic{retrySample}); err != nil {
+			t.Fatalf("retry %d: %v", i, err)
+		}
+		assertUsage(100, 200)
+		if retrySample.PPPSessionID != "pptp-session-uuid" || retrySample.PPPRxBytes != 100 || retrySample.PPPTxBytes != 200 {
+			t.Fatalf("successful write mutated retryable absolute sample: %+v", retrySample)
+		}
+	}
 	var depleted xray.ClientTraffic
 	if err := database.GetDB().Where("email = ?", client.Email).Take(&depleted).Error; err != nil {
 		t.Fatal(err)
@@ -81,15 +97,90 @@ func TestPPPAbsoluteCountersAreTransactionalAndIdempotent(t *testing.T) {
 	assertUsage(100, 200)
 	apply(145, 260)
 	assertUsage(145, 260)
-	apply(10, 5) // a kernel counter reset must not subtract already-accounted usage
-	assertUsage(155, 265)
+	// A lower reading can be a stale replay or a reset. Neither is evidence
+	// for charging a new baseline or discarding already accounted usage.
+	if _, _, err := service.AddTraffic(nil, []*xray.ClientTraffic{{Email: client.Email, Enable: true, PPPSessionID: "pptp-session-uuid", PPPInboundID: inbound.Id, PPPRxBytes: 10, PPPTxBytes: 5}}); err == nil {
+		t.Fatal("counter decrease was accepted as a new session")
+	}
+	assertUsage(145, 260)
 
 	var checkpoint model.PPPClientTrafficCounter
 	if err := database.GetDB().Where("session_id = ?", "pptp-session-uuid").Take(&checkpoint).Error; err != nil {
 		t.Fatalf("read PPP checkpoint: %v", err)
 	}
-	if checkpoint.RxBytes != 10 || checkpoint.TxBytes != 5 || checkpoint.InboundID != inbound.Id || checkpoint.Email != client.Email {
+	if checkpoint.RxBytes != 145 || checkpoint.TxBytes != 260 || checkpoint.InboundID != inbound.Id || checkpoint.Email != client.Email {
 		t.Fatalf("unexpected persisted checkpoint: %+v", checkpoint)
+	}
+}
+
+func TestPPPMissingDestinationRollsBackEveryCheckpoint(t *testing.T) {
+	setupBulkDB(t)
+	db := database.GetDB()
+	known := xray.ClientTraffic{Email: "known@example.test", Enable: true, Up: 30, Down: 40}
+	if err := db.Create(&known).Error; err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := model.PPPClientTrafficCounter{SessionID: "known-session", Email: known.Email, InboundID: 7, RxBytes: 30, TxBytes: 40}
+	if err := db.Create(&checkpoint).Error; err != nil {
+		t.Fatal(err)
+	}
+	samples := []*xray.ClientTraffic{
+		{Email: known.Email, PPPSessionID: "known-session", PPPInboundID: 7, PPPRxBytes: 50, PPPTxBytes: 60},
+		{Email: "missing@example.test", PPPSessionID: "missing-session", PPPInboundID: 7, PPPRxBytes: 100, PPPTxBytes: 200},
+	}
+	if _, _, err := (&InboundService{}).AddTraffic(nil, samples); err == nil {
+		t.Fatal("missing PPP accounting destination was silently accepted")
+	}
+	if err := db.First(&known, known.Id).Error; err != nil || known.Up != 30 || known.Down != 40 {
+		t.Fatalf("known usage changed on failed mixed batch: %+v %v", known, err)
+	}
+	if err := db.Where("session_id = ?", "known-session").Take(&checkpoint).Error; err != nil || checkpoint.RxBytes != 30 || checkpoint.TxBytes != 40 {
+		t.Fatalf("known checkpoint changed on failed mixed batch: %+v %v", checkpoint, err)
+	}
+	var missing int64
+	if err := db.Model(&model.PPPClientTrafficCounter{}).Where("session_id = ?", "missing-session").Count(&missing).Error; err != nil || missing != 0 {
+		t.Fatalf("missing destination checkpoint created: %d %v", missing, err)
+	}
+}
+
+func TestPPPDuplicateSessionBatchRollsBack(t *testing.T) {
+	setupBulkDB(t)
+	db := database.GetDB()
+	row := xray.ClientTraffic{Email: "duplicate@example.test", Enable: true}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	samples := []*xray.ClientTraffic{
+		{Email: row.Email, PPPSessionID: "reused", PPPInboundID: 7, PPPRxBytes: 100, PPPTxBytes: 200},
+		{Email: row.Email, PPPSessionID: "reused", PPPInboundID: 7, PPPRxBytes: 150, PPPTxBytes: 250},
+	}
+	if _, _, err := (&InboundService{}).AddTraffic(nil, samples); err == nil {
+		t.Fatal("duplicate session in one batch was accepted")
+	}
+	if err := db.First(&row, row.Id).Error; err != nil || row.Up != 0 || row.Down != 0 {
+		t.Fatalf("duplicate session changed usage: %+v %v", row, err)
+	}
+	var count int64
+	if err := db.Model(&model.PPPClientTrafficCounter{}).Where("session_id = ?", "reused").Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("duplicate session changed checkpoint: %d %v", count, err)
+	}
+}
+
+func TestPPPAmbiguousNormalizedDestinationIsRejected(t *testing.T) {
+	setupBulkDB(t)
+	db := database.GetDB()
+	for _, email := range []string{"alice@example.test", "ALICE@example.test"} {
+		if err := db.Create(&xray.ClientTraffic{Email: email, Enable: true}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	sample := &xray.ClientTraffic{Email: "Alice@example.test", PPPSessionID: "ambiguous-session", PPPInboundID: 7, PPPRxBytes: 20}
+	if _, _, err := (&InboundService{}).AddTraffic(nil, []*xray.ClientTraffic{sample}); err == nil {
+		t.Fatal("ambiguous PPP usage destination accepted")
+	}
+	var count int64
+	if err := db.Model(&model.PPPClientTrafficCounter{}).Where("session_id = ?", "ambiguous-session").Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("ambiguous checkpoint changed: %d %v", count, err)
 	}
 }
 
@@ -169,5 +260,63 @@ func TestPPPCheckpointCannotBeReassignedToDifferentIdentity(t *testing.T) {
 	}
 	if checkpoint.Email != first.Email || checkpoint.RxBytes != 100 || checkpoint.TxBytes != 200 {
 		t.Fatalf("failed reassignment changed original checkpoint: %+v", checkpoint)
+	}
+}
+
+func TestPPPClosedSessionReplayAfterAcknowledgementDoesNotDoubleCount(t *testing.T) {
+	setupBulkDB(t)
+	t.Setenv("XUI_BIN_FOLDER", t.TempDir())
+	db := database.GetDB()
+	inbound := mkInbound(t, 32126, model.PPTP, `{"clients":[]}`)
+	client := model.Client{Email: "ppp-final@example.test", ID: "d271c1dc-664c-4f48-8f86-8f973c68e70d", Enable: true}
+	inbound.Settings = clientsSettings(t, []model.Client{client})
+	if err := db.Save(inbound).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := (&ClientService{}).SyncInbound(nil, inbound.Id, []model.Client{client}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&xray.ClientTraffic{InboundId: inbound.Id, Email: client.Email, Enable: true}).Error; err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(os.Getenv("XUI_BIN_FOLDER"), "pppvpn", "sessions", "pptp-"+strconv.Itoa(inbound.Id))
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "ppp0.closed.final-session")
+	data := fmt.Sprintf("closed\tppp0\t%s\t120\t150\tfinal-session\t%d\n", client.Email, inbound.Id)
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	first, err := pppvpn.CollectTraffic()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale, err := pppvpn.CollectTraffic()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Clients) != 1 || len(stale.Clients) != 1 {
+		t.Fatal("expected two independent copies of final sample")
+	}
+	if _, _, err := (&InboundService{}).AddTraffic(nil, first.Clients); err != nil {
+		t.Fatal(err)
+	}
+	if err := pppvpn.AckTraffic(first.Token); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("closed spool not acknowledged: %v", err)
+	}
+	if _, _, err := (&InboundService{}).AddTraffic(nil, stale.Clients); err != nil {
+		t.Fatal(err)
+	}
+	var got xray.ClientTraffic
+	if err := db.Where("email = ?", client.Email).Take(&got).Error; err != nil || got.Up != 120 || got.Down != 150 {
+		t.Fatalf("replayed final sample charged twice: %+v %v", got, err)
+	}
+	var checkpoint model.PPPClientTrafficCounter
+	if err := db.Where("session_id = ?", "final-session").Take(&checkpoint).Error; err != nil || checkpoint.RxBytes != 120 || checkpoint.TxBytes != 150 {
+		t.Fatalf("receipt lost: %+v %v", checkpoint, err)
 	}
 }

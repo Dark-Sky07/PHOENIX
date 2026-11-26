@@ -3,13 +3,16 @@ package controller
 import (
 	"encoding/json"
 	"net"
+	"net/http"
 	"strconv"
 	"strings"
 
+	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
 	"github.com/Dark-Sky07/phoenix/internal/web/middleware"
 	"github.com/Dark-Sky07/phoenix/internal/web/service"
 	"github.com/Dark-Sky07/phoenix/internal/web/session"
+	"github.com/Dark-Sky07/phoenix/internal/web/trafficprotocol"
 	"github.com/Dark-Sky07/phoenix/internal/web/websocket"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
 
@@ -95,6 +98,9 @@ func (a *InboundController) initRouter(g *gin.RouterGroup) {
 	g.POST("/import", a.importInbound)
 	g.POST("/:id/fallbacks", a.setFallbacks)
 	g.POST("/pushClientTraffics", a.pushClientTraffics)
+	g.POST("/pushVerifiedClientTraffics", a.pushVerifiedClientTraffics)
+	g.POST("/trafficReadiness", a.trafficReadiness)
+	g.POST("/verifiedNodeSnapshot", a.verifiedNodeSnapshot)
 }
 
 // getInbounds retrieves the list of inbounds for the logged-in user.
@@ -442,6 +448,125 @@ func (a *InboundController) pushClientTraffics(c *gin.Context) {
 		return
 	}
 	if err := a.inboundService.AcceptGlobalTraffic(req.MasterGuid, req.Traffics); err != nil {
+		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
+		return
+	}
+	jsonMsg(c, "success", nil)
+}
+
+// verifiedNodeSnapshot is experimental and serves only a pre-provisioned
+// token-specific sender stream. It never provisions or resets a sequence.
+func (a *InboundController) verifiedNodeSnapshot(c *gin.Context) {
+	if !rejectResellerInboundWrite(c) {
+		return
+	}
+	if !c.GetBool("api_authed") || c.GetInt("api_token_id") <= 0 {
+		c.AbortWithStatus(http.StatusForbidden)
+		return
+	}
+	token, ok := strings.CutPrefix(c.GetHeader("Authorization"), "Bearer ")
+	user := session.GetLoginUser(c)
+	if !ok || user == nil || user.Id <= 0 {
+		c.AbortWithStatus(http.StatusForbidden)
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 4096)
+	var req struct {
+		Challenge []byte `json:"challenge"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || len(req.Challenge) != 32 {
+		c.AbortWithStatus(http.StatusBadRequest)
+		return
+	}
+	envelope, err := a.inboundService.PrepareVerifiedInboundSnapshot(c.GetInt("api_token_id"), user.Id, token, req.Challenge)
+	if err != nil {
+		jsonMsg(c, "verified node snapshot unavailable", err)
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	jsonObj(c, envelope, nil)
+}
+
+// trafficReadiness proves that the bearer token is bound to the requested
+// receiver stream. This is diagnostic, not proof of reconciliation or a lock
+// on the receiver state; it never changes accounting or activates a sender.
+func (a *InboundController) trafficReadiness(c *gin.Context) {
+	if !rejectResellerInboundWrite(c) {
+		return
+	}
+	if !c.GetBool("api_authed") {
+		c.AbortWithStatus(http.StatusForbidden)
+		return
+	}
+	tokenID := c.GetInt("api_token_id")
+	token, ok := strings.CutPrefix(c.GetHeader("Authorization"), "Bearer ")
+	if !ok || tokenID <= 0 {
+		c.AbortWithStatus(http.StatusForbidden)
+		return
+	}
+	key, err := trafficprotocol.KeyFromAPIToken(token)
+	if err != nil {
+		c.AbortWithStatus(http.StatusForbidden)
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 4096)
+	var challenge trafficprotocol.ReadinessChallenge
+	if err := c.ShouldBindJSON(&challenge); err != nil {
+		c.AbortWithStatus(http.StatusBadRequest)
+		return
+	}
+	var state model.TrafficSnapshotReceiver
+	if err := database.GetDB().First(&state, "id = ?", "api-token:"+strconv.Itoa(tokenID)).Error; err != nil || state.LastSequence < 0 {
+		c.AbortWithStatus(http.StatusForbidden)
+		return
+	}
+	response, err := trafficprotocol.AnswerReadiness(challenge, key, trafficprotocol.Expected{Sender: state.Sender, Generation: state.Generation, LastSequence: uint64(state.LastSequence)})
+	if err != nil {
+		c.AbortWithStatus(http.StatusForbidden)
+		return
+	}
+	jsonObj(c, response, nil)
+}
+
+// pushVerifiedClientTraffics accepts only bearer-authenticated peers whose
+// API token ID has a separately provisioned receiver row. The identity and
+// generation are matched against that row inside the accounting transaction.
+// The legacy endpoint remains separate and is not secured by this route.
+func (a *InboundController) pushVerifiedClientTraffics(c *gin.Context) {
+	if !rejectResellerInboundWrite(c) {
+		return
+	}
+	authed, ok := c.Get("api_authed")
+	if !ok || authed != true {
+		c.AbortWithStatus(http.StatusForbidden)
+		return
+	}
+	value, ok := c.Get("api_token_id")
+	tokenID, validID := value.(int)
+	if !ok || !validID || tokenID <= 0 {
+		c.AbortWithStatus(http.StatusForbidden)
+		return
+	}
+	token, ok := strings.CutPrefix(c.GetHeader("Authorization"), "Bearer ")
+	if !ok {
+		c.AbortWithStatus(http.StatusForbidden)
+		return
+	}
+	key, err := trafficprotocol.KeyFromAPIToken(token)
+	if err != nil {
+		c.AbortWithStatus(http.StatusForbidden)
+		return
+	}
+	// JSON base64-encodes the snapshot, so allow its encoding plus modest
+	// envelope overhead while bounding allocations before JSON parsing.
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, int64((trafficprotocol.MaxSnapshotBytes+2)/3*4+8192))
+	var envelope trafficprotocol.Envelope
+	if err := c.ShouldBindJSON(&envelope); err != nil {
+		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
+		return
+	}
+	receiverID := "api-token:" + strconv.Itoa(tokenID)
+	if err := a.inboundService.AcceptVerifiedGlobalTraffic(receiverID, key, envelope); err != nil {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 		return
 	}

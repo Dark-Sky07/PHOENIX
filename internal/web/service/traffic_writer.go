@@ -26,6 +26,9 @@ var (
 	twCtx    context.Context
 	twCancel context.CancelFunc
 	twDone   chan struct{}
+	// Inline writes (before start/after stop) must obey the same in-process
+	// serialization as the writer goroutine.
+	twApplyMu sync.Mutex
 )
 
 // StartTrafficWriter spins up the serial writer goroutine. Safe to call again
@@ -110,6 +113,8 @@ func runTrafficWriter(ctx context.Context, queue chan *trafficWriteRequest, done
 }
 
 func safeApply(fn func() error) (err error) {
+	twApplyMu.Lock()
+	defer twApplyMu.Unlock()
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("traffic writer panic: %v", r)
@@ -134,6 +139,8 @@ func submitTrafficWrite(fn func() error) error {
 	select {
 	case <-ctx.Done():
 		twMu.Unlock()
+		// Do not overtake already queued work while the writer drains.
+		<-done
 		return safeApply(fn)
 	default:
 	}

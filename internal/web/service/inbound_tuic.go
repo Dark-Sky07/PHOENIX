@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 
 	"gorm.io/gorm"
 
@@ -81,22 +82,29 @@ func (s *InboundService) DesiredTuicInstances() ([]tuic.Instance, error) {
 	return served, nil
 }
 
-func (s *InboundService) applyLocalTuic(inboundId int) {
+func (s *InboundService) applyLocalTuic(inboundId int) (err error) {
+	defer func() {
+		if err != nil {
+			logger.Warningf("tuic: immediate client apply failed for inbound %d: %v", inboundId, err)
+		}
+	}()
 	inbound, err := s.GetInbound(inboundId)
-	if err != nil || inbound == nil || inbound.Protocol != model.TUIC || inbound.NodeID != nil {
-		return
+	if err != nil {
+		return err
+	}
+	if inbound == nil || inbound.Protocol != model.TUIC || inbound.NodeID != nil {
+		return nil
 	}
 	rt, err := s.runtimeFor(inbound)
 	if err != nil {
-		return
+		return err
 	}
 	payload := inbound
 	if inbound.Enable {
-		if built, bErr := s.buildInboundForLocalRuntime(database.GetDB(), inbound); bErr == nil {
-			payload = built
+		payload, err = s.buildInboundForLocalRuntime(database.GetDB(), inbound)
+		if err != nil {
+			return fmt.Errorf("build filtered runtime settings: %w", err)
 		}
 	}
-	if err := rt.UpdateInbound(context.Background(), inbound, payload); err != nil {
-		logger.Debug("tuic: immediate client apply failed for inbound", inboundId, ":", err)
-	}
+	return rt.UpdateInbound(context.Background(), inbound, payload)
 }

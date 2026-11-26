@@ -30,6 +30,8 @@ import { useMediaQuery } from '@/hooks/useMediaQuery';
 import { useTheme } from '@/hooks/useTheme';
 import type { ResellerReport } from '@/api/queries/useSession';
 import ResellerWalletChart from './ResellerWalletChart';
+import ResellerSalesSection from './ResellerSalesSection';
+import ResellerTrafficArchives from './ResellerTrafficArchives';
 import './ResellersPage.css';
 
 export default function ResellerReportPage() {
@@ -117,6 +119,15 @@ export default function ResellerReportPage() {
                 )}
               />
 
+              {stat && (stat.processingRenewals ?? 0) > 0 && (
+                <Alert type="warning" showIcon message={t('resellers.processingRenewalTitle', 'Client renewal is processing or needs reconciliation')} description={t('resellers.processingRenewalReseller', 'Some operations are temporarily blocked. Contact your administrator if the renewal remains in progress.')} />
+              )}
+              {stat?.hasUnlimitedClient && stat.reseller.trafficLimit > 0 && (
+                <Alert type="warning" showIcon message={t('resellers.unlimitedClientWarning', 'A client has unlimited traffic under a limited reseller. New allocations and renewals are blocked until an administrator resolves this.')} />
+              )}
+              {stat && (stat.pendingCreations ?? 0) > 0 && (
+                <Alert type="warning" showIcon message={t('resellers.pendingCreationTitle', 'Client operations need reconciliation')} description={t('resellers.pendingCreationReseller', 'Some client operations are temporarily blocked. Contact your administrator; do not retry the interrupted operation.')} />
+              )}
               <StatStrip size={isMobile ? 'compact' : 'default'} items={reportStats} />
 
               <Row gutter={[isMobile ? 8 : 16, isMobile ? 8 : 12]}>
@@ -185,6 +196,19 @@ export default function ResellerReportPage() {
 
                 <Col span={24}>
                   <ResellerWalletChart transactions={reportQuery.data?.transactions || []} currency={stat?.currency || 'USD'} />
+                </Col>
+
+                {stat && (
+                  <Col span={24}>
+                    <ResellerSalesSection resellerId={stat.reseller.id} self />
+                  </Col>
+                )}
+
+                <Col span={24}>
+                  <Alert type="info" showIcon message={t('resellers.renewalQuotaNotice', 'Automatic renewal requires an active reseller account and enough remaining traffic allocation. A client may remain expired until quota is available.')} />
+                </Col>
+                <Col span={24}>
+                  <ResellerTrafficArchives rows={reportQuery.data?.trafficArchives ?? []} />
                 </Col>
 
                 <Col span={24}>

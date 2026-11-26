@@ -62,7 +62,9 @@ func (s *ClientService) persistTunnelAllowedIPs(inboundSvc *InboundService, inbo
 		return err
 	}
 	if inbound.Protocol == model.AmneziaWG && inbound.NodeID == nil {
-		inboundSvc.applyLocalAmneziaWG(inboundID)
+		if err := inboundSvc.applyLocalAmneziaWG(inboundID); err != nil {
+			return fmt.Errorf("tunnel settings saved but runtime apply failed: %w", err)
+		}
 	}
 	return nil
 }

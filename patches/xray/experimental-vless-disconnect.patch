@@ -1,0 +1,340 @@
+--- a/proxy/vless/inbound/inbound.go
++++ b/proxy/vless/inbound/inbound.go
+@@ -11,0 +12 @@
++	"sync"
+@@ -76,0 +78,6 @@
++	// Experimental per-user active connection tracking. This is not a
++	// cross-process fence or an accounting/quiescence certificate.
++	userSessionMu          sync.Mutex
++	userSessions           map[*protocol.MemoryUser]map[*trackedUserConnection]struct{}
++	retiringEmails         map[string]struct{}
++	retiringIDs            map[[16]byte]struct{}
+@@ -240,0 +248,12 @@
++	h.userSessionMu.Lock()
++	defer h.userSessionMu.Unlock()
++	if _, blocked := h.retiringEmails[strings.ToLower(u.Email)]; blocked {
++		return errors.New("VLESS user is being removed or removal failed: ", u.Email)
++	}
++	account, ok := u.Account.(*vless.MemoryAccount)
++	if !ok || account.ID == nil {
++		return errors.New("invalid VLESS account")
++	}
++	if _, blocked := h.retiringIDs[vless.ProcessUUID(account.ID.UUID())]; blocked {
++		return errors.New("VLESS credential is being removed or removal failed")
++	}
+@@ -246,2 +265,48 @@
+-	h.RemoveReverse(h.validator.GetByEmail(e))
+-	return h.validator.Del(e)
++	h.userSessionMu.Lock()
++	u := h.validator.GetByEmail(e)
++	err := h.validator.Del(e)
++	if err != nil {
++		h.userSessionMu.Unlock()
++		return err
++	}
++	// Keep an email fence while the detached handlers drain. On any failure it
++	// remains in place; no failed removal can be mistaken for safe reuse.
++	if h.retiringEmails == nil {
++		h.retiringEmails = make(map[string]struct{})
++	}
++	key := strings.ToLower(e)
++	id := vless.ProcessUUID(u.Account.(*vless.MemoryAccount).ID.UUID())
++	if h.retiringIDs == nil {
++		h.retiringIDs = make(map[[16]byte]struct{})
++	}
++	h.retiringEmails[key] = struct{}{}
++	h.retiringIDs[id] = struct{}{}
++	connections := make([]*trackedUserConnection, 0, len(h.userSessions[u]))
++	for c := range h.userSessions[u] {
++		connections = append(connections, c)
++	}
++	h.userSessionMu.Unlock()
++	h.RemoveReverse(u)
++	var closeErr error
++	for _, c := range connections {
++		if err := c.connection.Close(); err != nil && closeErr == nil {
++			closeErr = err
++		}
++	}
++	if closeErr != nil {
++		return errors.New("failed to close removed VLESS user connection").Base(closeErr)
++	}
++	// Wait for the inbound handlers' tracked scopes, bounded by the caller's
++	// deadline. This is not a drain of asynchronous outbound writers.
++	for _, c := range connections {
++		select {
++		case <-c.done:
++		case <-ctx.Done():
++			return errors.New("timed out waiting for removed VLESS handlers").Base(ctx.Err())
++		}
++	}
++	h.userSessionMu.Lock()
++	delete(h.retiringEmails, key)
++	delete(h.retiringIDs, id)
++	h.userSessionMu.Unlock()
++	return nil
+@@ -525,0 +591,8 @@
++
++	// Reject a request authenticated before a concurrent removal or credential
++	// replacement. Track before dispatch so removal cannot miss this connection.
++	untrack, ok := h.trackUserConnection(request.User, connection)
++	if !ok {
++		return errors.New("VLESS user removed during authentication")
++	}
++	defer untrack()
+--- /dev/null
++++ b/proxy/vless/inbound/phoenix_user_sessions.go
+@@ -0,0 +1,51 @@
++package inbound
++
++import (
++	"net"
++	"sync"
++
++	"github.com/xtls/xray-core/common/protocol"
++)
++
++// trackedUserConnection holds the exact authenticated transport. It is not
++// a count of substreams, a persistent epoch, or proof that traffic was flushed.
++type trackedUserConnection struct {
++	connection net.Conn
++	done       chan struct{}
++	once       sync.Once
++}
++
++func (h *Handler) trackUserConnection(user *protocol.MemoryUser, conn net.Conn) (func(), bool) {
++	if user == nil || conn == nil {
++		return nil, false
++	}
++	// Users without email cannot be addressed by RemoveUser. Preserve upstream
++	// behavior, but never claim this experimental facility covers them.
++	if user.Email == "" {
++		return func() {}, true
++	}
++	h.userSessionMu.Lock()
++	defer h.userSessionMu.Unlock()
++	if h.validator.GetByEmail(user.Email) != user {
++		return nil, false
++	}
++	if h.userSessions == nil {
++		h.userSessions = make(map[*protocol.MemoryUser]map[*trackedUserConnection]struct{})
++	}
++	if h.userSessions[user] == nil {
++		h.userSessions[user] = make(map[*trackedUserConnection]struct{})
++	}
++	entry := &trackedUserConnection{connection: conn, done: make(chan struct{})}
++	h.userSessions[user][entry] = struct{}{}
++	return func() {
++		entry.once.Do(func() {
++			h.userSessionMu.Lock()
++			defer h.userSessionMu.Unlock()
++			delete(h.userSessions[user], entry)
++			if len(h.userSessions[user]) == 0 {
++				delete(h.userSessions, user)
++			}
++			close(entry.done)
++		})
++	}, true
++}
+--- /dev/null
++++ b/proxy/vless/inbound/phoenix_user_sessions_test.go
+@@ -0,0 +1,199 @@
++package inbound
++
++import (
++	"context"
++	"io"
++	"net"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/xtls/xray-core/common/protocol"
++	"github.com/xtls/xray-core/common/uuid"
++	"github.com/xtls/xray-core/proxy/vless"
++)
++
++func testPhoenixUser(email string) *protocol.MemoryUser {
++	id := uuid.New()
++	return &protocol.MemoryUser{Email: email, Account: &vless.MemoryAccount{ID: protocol.NewID(id)}}
++}
++
++func TestPhoenixVlessRemovalClosesOnlyRemovedUserAndRejectsStaleAuthentication(t *testing.T) {
++	h := &Handler{validator: new(vless.MemoryValidator)}
++	a, b := testPhoenixUser("a@test"), testPhoenixUser("b@test")
++	for _, u := range []*protocol.MemoryUser{a, b} {
++		if err := h.AddUser(context.Background(), u); err != nil {
++			t.Fatal(err)
++		}
++	}
++	aConn, aPeer := net.Pipe()
++	defer aPeer.Close()
++	bConn, bPeer := net.Pipe()
++	defer bConn.Close()
++	defer bPeer.Close()
++	doneA, ok := h.trackUserConnection(a, aConn)
++	if !ok {
++		t.Fatal("failed tracking a")
++	}
++	defer doneA()
++	second, secondPeer := net.Pipe()
++	defer secondPeer.Close()
++	doneSecond, ok := h.trackUserConnection(a, second)
++	if !ok {
++		t.Fatal("failed tracking second a session")
++	}
++	defer doneSecond()
++	doneB, ok := h.trackUserConnection(b, bConn)
++	if !ok {
++		t.Fatal("failed tracking b")
++	}
++	defer doneB()
++	removed := make(chan error, 1)
++	go func() { removed <- h.RemoveUser(context.Background(), "a@test") }()
++	_ = aPeer.SetReadDeadline(time.Now().Add(time.Second))
++	var buf [1]byte
++	if _, err := aPeer.Read(buf[:]); err != io.EOF {
++		t.Fatalf("removed session remains open: %v", err)
++	}
++	_ = secondPeer.SetReadDeadline(time.Now().Add(time.Second))
++	if _, err := secondPeer.Read(buf[:]); err != io.EOF {
++		t.Fatalf("second removed session remains open: %v", err)
++	}
++	// Re-adding the same normalized email while the old handler is still
++	// tracked must be rejected, even with a new credential.
++	if err := h.AddUser(context.Background(), testPhoenixUser("A@TEST")); err == nil {
++		t.Fatal("re-add succeeded during removal")
++	}
++	if err := h.AddUser(context.Background(), &protocol.MemoryUser{Email: "different@test", Account: a.Account}); err == nil {
++		t.Fatal("same credential was re-added under another email")
++	}
++	// The validator ignores UUID bytes six and seven for VLESS routing.
++	// Those variants must remain fenced too, not only byte-identical IDs.
++	variantID := a.Account.(*vless.MemoryAccount).ID.UUID()
++	variantID[6] ^= 1
++	variantID[7] ^= 1
++	variant := &protocol.MemoryUser{Email: "variant@test", Account: &vless.MemoryAccount{ID: protocol.NewID(variantID)}}
++	if err := h.AddUser(context.Background(), variant); err == nil {
++		t.Fatal("normalized credential variant bypassed removal fence")
++	}
++	// Closing transports alone must not complete the handler-scope barrier.
++	select {
++	case err := <-removed:
++		t.Fatalf("removal completed before handlers returned: %v", err)
++	default:
++	}
++	doneA()
++	doneSecond()
++	if err := <-removed; err != nil {
++		t.Fatal(err)
++	}
++	_ = bPeer.SetReadDeadline(time.Now().Add(25 * time.Millisecond))
++	if _, err := bPeer.Read(buf[:]); err == nil {
++		t.Fatal("unexpected data")
++	} else if nerr, ok := err.(net.Error); !ok || !nerr.Timeout() {
++		t.Fatalf("other user's session closed: %v", err)
++	}
++	// Re-adding the email does not admit a connection authenticated against
++	// the old user object before it was removed.
++	replacement := testPhoenixUser("a@test")
++	if err := h.AddUser(context.Background(), replacement); err != nil {
++		t.Fatal(err)
++	}
++	stale, stalePeer := net.Pipe()
++	defer stale.Close()
++	defer stalePeer.Close()
++	if _, ok := h.trackUserConnection(a, stale); ok {
++		t.Fatal("stale authentication accepted")
++	}
++}
++
++func TestPhoenixVlessRemovalRacesWithConnectionRegistration(t *testing.T) {
++	for round := 0; round < 100; round++ {
++		h := &Handler{validator: new(vless.MemoryValidator)}
++		u := testPhoenixUser("race@test")
++		if err := h.AddUser(context.Background(), u); err != nil {
++			t.Fatal(err)
++		}
++		conn, peer := net.Pipe()
++		var wg sync.WaitGroup
++		wg.Add(2)
++		go func() {
++			defer wg.Done()
++			if untrack, ok := h.trackUserConnection(u, conn); ok {
++				defer untrack()
++				_ = conn.SetReadDeadline(time.Now().Add(time.Second))
++				var b [1]byte
++				_, _ = conn.Read(b[:])
++			}
++		}()
++		go func() { defer wg.Done(); _ = h.RemoveUser(context.Background(), u.Email) }()
++		wg.Wait()
++		_ = conn.Close()
++		_ = peer.Close()
++		check, checkPeer := net.Pipe()
++		if _, ok := h.trackUserConnection(u, check); ok {
++			t.Fatal("removed user admitted")
++		}
++		_ = check.Close()
++		_ = checkPeer.Close()
++	}
++}
++
++func TestPhoenixVlessBarrierTimeoutDoesNotClaimSuccess(t *testing.T) {
++	h := &Handler{validator: new(vless.MemoryValidator)}
++	u := testPhoenixUser("timeout@test")
++	if err := h.AddUser(context.Background(), u); err != nil {
++		t.Fatal(err)
++	}
++	conn, peer := net.Pipe()
++	defer peer.Close()
++	done, ok := h.trackUserConnection(u, conn)
++	if !ok {
++		t.Fatal("track failed")
++	}
++	defer done()
++	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
++	defer cancel()
++	if err := h.RemoveUser(ctx, u.Email); err == nil {
++		t.Fatal("unfinished handler reported as removed")
++	}
++	if h.validator.GetByEmail(u.Email) != nil {
++		t.Fatal("user was re-enabled after timeout")
++	}
++	done()
++	if err := h.AddUser(context.Background(), testPhoenixUser("TIMEOUT@TEST")); err == nil {
++		t.Fatal("failed removal allowed re-addition after handler completion")
++	}
++	if err := h.AddUser(context.Background(), &protocol.MemoryUser{Email: "different@test", Account: u.Account}); err == nil {
++		t.Fatal("failed removal allowed credential re-addition under another email")
++	}
++}
++
++type phoenixFailCloseConn struct{ net.Conn }
++
++func (c *phoenixFailCloseConn) Close() error { return io.ErrUnexpectedEOF }
++
++func TestPhoenixVlessCloseFailureKeepsFence(t *testing.T) {
++	h := &Handler{validator: new(vless.MemoryValidator)}
++	u := testPhoenixUser("failure@test")
++	if err := h.AddUser(context.Background(), u); err != nil {
++		t.Fatal(err)
++	}
++	conn, peer := net.Pipe()
++	defer conn.Close()
++	defer peer.Close()
++	done, ok := h.trackUserConnection(u, &phoenixFailCloseConn{conn})
++	if !ok {
++		t.Fatal("track failed")
++	}
++	if err := h.RemoveUser(context.Background(), u.Email); err == nil {
++		t.Fatal("close failure reported as success")
++	}
++	done()
++	if err := h.AddUser(context.Background(), testPhoenixUser("FAILURE@test")); err == nil {
++		t.Fatal("close failure allowed email reuse")
++	}
++	if err := h.AddUser(context.Background(), &protocol.MemoryUser{Email: "different@test", Account: u.Account}); err == nil {
++		t.Fatal("close failure allowed credential reuse")
++	}
++}

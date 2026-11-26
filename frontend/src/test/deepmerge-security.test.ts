@@ -1,4 +1,4 @@
-// @ts-expect-error The frontend tsconfig excludes Node types; Vitest executes tests in Node.
+// Tests execute in Node; Node types are enabled so subprocess security checks can be typechecked.
 import { createRequire } from 'node:module';
 import { describe, expect, it } from 'vitest';
 

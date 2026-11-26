@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/web/websocket"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 func notifyClientsChanged() {
@@ -118,22 +120,22 @@ func (a *ClientController) initRouter(g *gin.RouterGroup) {
 	g.GET("/openvpn/:email", a.getOpenvpnProfile)
 	g.GET("/export", a.exportClients)
 
-	g.POST("/add", a.create)
-	g.POST("/import", a.importClients)
-	g.POST("/update/:email", a.update)
-	g.POST("/del/:email", a.delete)
-	g.POST("/:email/attach", a.attach)
-	g.POST("/:email/detach", a.detach)
-	g.POST("/resetAllTraffics", a.resetAllTraffics)
-	g.POST("/delDepleted", a.delDepleted)
-	g.POST("/bulkAdjust", a.bulkAdjust)
-	g.POST("/bulkDel", a.bulkDelete)
-	g.POST("/bulkCreate", a.bulkCreate)
-	g.POST("/bulkAttach", a.bulkAttach)
-	g.POST("/bulkDetach", a.bulkDetach)
-	g.POST("/bulkResetTraffic", a.bulkResetTraffic)
-	g.POST("/resetTraffic/:email", a.resetTrafficByEmail)
-	g.POST("/updateTraffic/:email", a.updateTrafficByEmail)
+	g.POST("/add", withResellerAllocationLock(a.create))
+	g.POST("/import", withResellerAllocationLock(a.importClients))
+	g.POST("/update/:email", withResellerAllocationLock(a.update))
+	g.POST("/del/:email", withResellerAllocationLock(a.delete))
+	g.POST("/:email/attach", withResellerAllocationLock(a.attach))
+	g.POST("/:email/detach", withResellerAllocationLock(a.detach))
+	g.POST("/resetAllTraffics", withResellerAllocationLock(a.resetAllTraffics))
+	g.POST("/delDepleted", withResellerAllocationLock(a.delDepleted))
+	g.POST("/bulkAdjust", withResellerAllocationLock(a.bulkAdjust))
+	g.POST("/bulkDel", withResellerAllocationLock(a.bulkDelete))
+	g.POST("/bulkCreate", withResellerAllocationLock(a.bulkCreate))
+	g.POST("/bulkAttach", withResellerAllocationLock(a.bulkAttach))
+	g.POST("/bulkDetach", withResellerAllocationLock(a.bulkDetach))
+	g.POST("/bulkResetTraffic", withResellerAllocationLock(a.bulkResetTraffic))
+	g.POST("/resetTraffic/:email", withResellerAllocationLock(a.resetTrafficByEmail))
+	g.POST("/updateTraffic/:email", withResellerAllocationLock(a.updateTrafficByEmail))
 	g.POST("/ips/:email", a.getIps)
 	g.POST("/clearIps/:email", a.clearIps)
 	g.GET("/devices/:email", a.getClientDevices)
@@ -280,8 +282,26 @@ func (a *ClientController) importClients(c *gin.Context) {
 		return
 	}
 	if reseller != nil {
+		for _, entry := range envelope.Clients {
+			if err := service.ValidateResellerAllocation(reseller, entry.Client.TotalGB); err != nil {
+				jsonMsgObj(c, "Client transfer quota validation failed", preflight, err)
+				return
+			}
+		}
 		if err := a.resellerService.CheckClientQuota(reseller, preflight.NewClients, preflight.AdditionalQuota); err != nil {
 			jsonMsgObj(c, "Client transfer quota validation failed", preflight, err)
+			return
+		}
+	}
+	var intent *model.ResellerCreationIntent
+	if reseller != nil && len(envelope.Clients) > 0 {
+		entries := make([]service.ResellerBatchIntentEntry, 0, len(envelope.Clients))
+		for _, entry := range envelope.Clients {
+			entries = append(entries, service.ResellerBatchIntentEntry{Email: entry.Client.Email, SubID: entry.Client.SubID, RequestedBytes: entry.Client.TotalGB, InboundIDs: entry.InboundIds, InboundRefs: entry.InboundRefs})
+		}
+		intent, err = service.BeginResellerBatchOperation(reseller.Id, "import", entries)
+		if err != nil {
+			jsonMsg(c, "import could not be recorded", err)
 			return
 		}
 	}
@@ -290,11 +310,27 @@ func (a *ClientController) importClients(c *gin.Context) {
 		if report != nil && report.NeedRestart {
 			a.xrayService.SetToNeedRestart()
 		}
+		if intent != nil {
+			notifyClientsChanged()
+			jsonMsgObj(c, "import may be incomplete; manual reconciliation required", report, err)
+			return
+		}
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 		return
 	}
 	if report.NeedRestart {
 		a.xrayService.SetToNeedRestart()
+	}
+	if intent != nil {
+		if report.Failed > 0 || report.Preflight {
+			notifyClientsChanged()
+			jsonMsgObj(c, "import may be incomplete; manual reconciliation required", report, errors.New("reseller import requires manual reconciliation"))
+			return
+		}
+		if err := service.DiscardResellerClientCreation(intent); err != nil {
+			jsonMsgObj(c, "import completed; manual reconciliation required", report, err)
+			return
+		}
 	}
 	notifyClientsChanged()
 	jsonObj(c, report, nil)
@@ -383,25 +419,100 @@ func (a *ClientController) create(c *gin.Context) {
 			return
 		}
 	}
+	generatedIdentity := newResellerClient && strings.TrimSpace(payload.Client.SubID) == ""
+	var intent *model.ResellerCreationIntent
+	if newResellerClient {
+		if generatedIdentity {
+			payload.Client.SubID = uuid.NewString()
+		}
+		var intentErr error
+		intent, intentErr = service.BeginResellerClientCreation(resellerSession(c).Id, &payload)
+		if intentErr != nil {
+			jsonMsg(c, "client creation could not be recorded", intentErr)
+			return
+		}
+	}
 	needRestart, err := a.clientService.Create(&a.inboundService, &payload)
 	if err != nil {
+		if generatedIdentity {
+			rollbackRestart, rollbackErr := a.clientService.RollbackNewClientCreate(&a.inboundService, payload.Client.Email, payload.Client.SubID)
+			needRestart = needRestart || rollbackRestart
+			if rollbackErr != nil {
+				if needRestart {
+					a.xrayService.SetToNeedRestart()
+				}
+				jsonMsg(c, "client creation failed; rollback also failed", fmt.Errorf("%w (rollback: %v)", err, rollbackErr))
+				return
+			}
+		}
+		if generatedIdentity {
+			if discardErr := service.DiscardResellerClientCreation(intent); discardErr != nil {
+				if needRestart {
+					a.xrayService.SetToNeedRestart()
+				}
+				jsonMsg(c, "client creation failed; manual reconciliation required", fmt.Errorf("%w (intent: %v)", err, discardErr))
+				return
+			}
+		}
+		if needRestart {
+			a.xrayService.SetToNeedRestart()
+		}
+		if newResellerClient && !generatedIdentity {
+			jsonMsg(c, "client creation failed; verify custom-identity client manually", err)
+			return
+		}
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 		return
 	}
 	if reseller := resellerSession(c); reseller != nil {
 		// Reseller-created clients must remain visible under explicit-only
 		// ownership, even when the target inbound is also reseller-owned.
-		if err := a.resellerService.AssignClient(reseller.Id, strings.TrimSpace(payload.Client.Email)); err != nil {
+		var assignErr error
+		if newResellerClient {
+			assignErr = a.resellerService.CompleteResellerClientCreation(reseller.Id, payload.Client.Email, intent.Id, payload.SalePrice)
+		} else {
+			assignErr = a.resellerService.AssignClient(reseller.Id, strings.TrimSpace(payload.Client.Email))
+		}
+		if err := assignErr; err != nil {
 			// Create and ownership are separate service layers because the
 			// daemon/runtime mutation cannot run inside the reseller mapping
 			// transaction. If this was a new client, compensate the persisted
 			// client/attachment mutation so a mapping failure cannot leave an
 			// invisible orphan behind. Existing clients are never deleted.
-			if newResellerClient {
-				if _, rollbackErr := a.clientService.DeleteByEmail(&a.inboundService, payload.Client.Email, false); rollbackErr != nil {
+			if newResellerClient && generatedIdentity {
+				exists, lookupErr := service.ResellerCreationIntentExists(intent)
+				if lookupErr != nil || !exists {
+					if needRestart {
+						a.xrayService.SetToNeedRestart()
+					}
+					jsonMsg(c, "client ownership outcome uncertain; manual reconciliation required", err)
+					return
+				}
+				rollbackRestart, rollbackErr := a.clientService.RollbackNewClientCreate(&a.inboundService, payload.Client.Email, payload.Client.SubID)
+				needRestart = needRestart || rollbackRestart
+				if rollbackErr != nil {
+					if needRestart {
+						a.xrayService.SetToNeedRestart()
+					}
 					jsonMsg(c, "client ownership failed; rollback also failed", fmt.Errorf("%w (rollback: %v)", err, rollbackErr))
 					return
 				}
+				if discardErr := service.DiscardResellerClientCreation(intent); discardErr != nil {
+					if needRestart {
+						a.xrayService.SetToNeedRestart()
+					}
+					jsonMsg(c, "client ownership failed; manual reconciliation required", fmt.Errorf("%w (intent: %v)", err, discardErr))
+					return
+				}
+			} else if newResellerClient {
+				if needRestart {
+					a.xrayService.SetToNeedRestart()
+				}
+				jsonMsg(c, "client ownership failed; verify custom-identity client manually", err)
+				return
+			}
+			if needRestart {
+				a.xrayService.SetToNeedRestart()
 			}
 			jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 			return
@@ -498,6 +609,9 @@ func (a *ClientController) update(c *gin.Context) {
 }
 
 func (a *ClientController) delete(c *gin.Context) {
+	if !rejectResellerUnverifiedRemoval(c) {
+		return
+	}
 	email := c.Param("email")
 	keepTraffic := c.Query("keepTraffic") == "1"
 	var needRestart bool
@@ -521,14 +635,14 @@ func (a *ClientController) delete(c *gin.Context) {
 	} else {
 		needRestart, err = a.clientService.DeleteByEmail(&a.inboundService, email, keepTraffic)
 	}
+	if needRestart {
+		a.xrayService.SetToNeedRestart()
+	}
 	if err != nil {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 		return
 	}
 	jsonMsg(c, I18nWeb(c, "pages.inbounds.toasts.inboundClientDeleteSuccess"), nil)
-	if needRestart {
-		a.xrayService.SetToNeedRestart()
-	}
 	notifyClientsChanged()
 }
 
@@ -576,6 +690,9 @@ func (a *ClientController) attach(c *gin.Context) {
 }
 
 func (a *ClientController) resetAllTraffics(c *gin.Context) {
+	if !rejectResellerTrafficCounterMutation(c) {
+		return
+	}
 	if reseller := resellerSession(c); reseller != nil {
 		mapped, err := newResellerService().OwnedEmails(reseller.Id)
 		if err != nil {
@@ -626,6 +743,16 @@ type bulkAdjustRequest struct {
 	AddBytes int64    `json:"addBytes"`
 }
 
+func resellerBulkAllocation(count int, addBytes int64) (int64, error) {
+	if count < 0 || addBytes < 0 {
+		return 0, errors.New("traffic allocation cannot be negative")
+	}
+	if addBytes > 0 && int64(count) > math.MaxInt64/addBytes {
+		return 0, errors.New("bulk traffic allocation exceeds supported range")
+	}
+	return int64(count) * addBytes, nil
+}
+
 func (a *ClientController) bulkAdjust(c *gin.Context) {
 	var req bulkAdjustRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -651,7 +778,12 @@ func (a *ClientController) bulkAdjust(c *gin.Context) {
 				return
 			}
 		}
-		if err := a.resellerService.CheckTrafficQuota(reseller, int64(len(req.Emails))*req.AddBytes); err != nil {
+		allocation, allocationErr := resellerBulkAllocation(len(req.Emails), req.AddBytes)
+		if allocationErr != nil {
+			jsonMsg(c, I18nWeb(c, "somethingWentWrong"), allocationErr)
+			return
+		}
+		if err := a.resellerService.CheckTrafficQuota(reseller, allocation); err != nil {
 			jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 			return
 		}
@@ -737,6 +869,9 @@ type bulkDetachRequest struct {
 }
 
 func (a *ClientController) bulkDetach(c *gin.Context) {
+	if !rejectResellerUnverifiedRemoval(c) {
+		return
+	}
 	var req bulkDetachRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
@@ -767,6 +902,9 @@ func (a *ClientController) bulkDetach(c *gin.Context) {
 }
 
 func (a *ClientController) bulkDelete(c *gin.Context) {
+	if !rejectResellerUnverifiedRemoval(c) {
+		return
+	}
 	var req bulkDeleteRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
@@ -796,14 +934,14 @@ func (a *ClientController) bulkDelete(c *gin.Context) {
 	} else {
 		result, needRestart, err = a.clientService.BulkDelete(&a.inboundService, req.Emails, req.KeepTraffic)
 	}
+	if needRestart {
+		a.xrayService.SetToNeedRestart()
+	}
 	if err != nil {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 		return
 	}
 	jsonObj(c, result, nil)
-	if needRestart {
-		a.xrayService.SetToNeedRestart()
-	}
 	notifyClientsChanged()
 }
 
@@ -829,30 +967,67 @@ func (a *ClientController) bulkCreate(c *gin.Context) {
 			}
 		}
 	}
+	var intent *model.ResellerCreationIntent
+	if reseller := resellerSession(c); reseller != nil && len(payloads) > 0 {
+		entries := make([]service.ResellerBatchIntentEntry, 0, len(payloads))
+		for _, payload := range payloads {
+			entries = append(entries, service.ResellerBatchIntentEntry{Email: payload.Client.Email, SubID: payload.Client.SubID, RequestedBytes: payload.Client.TotalGB, InboundIDs: payload.InboundIds})
+		}
+		var intentErr error
+		intent, intentErr = service.BeginResellerBatchOperation(reseller.Id, "bulk_create", entries)
+		if intentErr != nil {
+			jsonMsg(c, "bulk creation could not be recorded", intentErr)
+			return
+		}
+	}
 	result, needRestart, err := a.clientService.BulkCreate(&a.inboundService, payloads)
 	if err != nil {
+		if needRestart {
+			a.xrayService.SetToNeedRestart()
+		}
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 		return
 	}
 	if reseller := resellerSession(c); reseller != nil && len(result.CreatedEmails) > 0 {
-		// Persist all explicit visibility mappings in one transaction. Do not
-		// loop over one-request assignments: a late failure must not leave a
-		// partially visible bulk create.
-		if err := a.resellerService.AssignClients(reseller.Id, result.CreatedEmails); err != nil {
-			var rollbackErr error
-			for _, email := range result.CreatedEmails {
-				if _, isNew := newResellerClients[strings.ToLower(strings.TrimSpace(email))]; !isNew {
-					continue
-				}
-				if _, err := a.clientService.DeleteByEmail(&a.inboundService, email, false); err != nil && rollbackErr == nil {
-					rollbackErr = err
-				}
+		// Persist all explicit visibility mappings and sales snapshots in one
+		// transaction so the quota/report is current as soon as creation succeeds.
+		newSales := make([]string, 0, len(result.CreatedEmails))
+		pricesByEmail := make(map[string]*service.ResellerSalePrice, len(payloads))
+		for _, payload := range payloads {
+			pricesByEmail[strings.ToLower(strings.TrimSpace(payload.Client.Email))] = payload.SalePrice
+		}
+		salePrices := make(map[string]*service.ResellerSalePrice)
+		for _, email := range result.CreatedEmails {
+			if _, isNew := newResellerClients[strings.ToLower(strings.TrimSpace(email))]; isNew {
+				newSales = append(newSales, email)
+				salePrices[email] = pricesByEmail[strings.ToLower(strings.TrimSpace(email))]
 			}
-			if rollbackErr != nil {
-				jsonMsg(c, "client ownership failed; rollback also failed", fmt.Errorf("%w (rollback: %v)", err, rollbackErr))
-				return
+		}
+		if err := a.resellerService.AssignClientsWithSales(reseller.Id, result.CreatedEmails, newSales, salePrices); err != nil {
+			// The mapping commit may be ambiguous. Do not compensate blindly;
+			// the batch intent preserves the operation for reconciliation.
+			if needRestart {
+				a.xrayService.SetToNeedRestart()
 			}
-			jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
+			notifyClientsChanged()
+			jsonMsgObj(c, "bulk client ownership failed; manual reconciliation required", result, err)
+			return
+		}
+	}
+	if intent != nil {
+		if len(result.Skipped) > 0 {
+			if needRestart {
+				a.xrayService.SetToNeedRestart()
+			}
+			notifyClientsChanged()
+			jsonMsgObj(c, "bulk creation may be incomplete; manual reconciliation required", result, errors.New("reseller bulk creation requires manual reconciliation"))
+			return
+		}
+		if err := service.DiscardResellerClientCreation(intent); err != nil {
+			if needRestart {
+				a.xrayService.SetToNeedRestart()
+			}
+			jsonMsgObj(c, "bulk creation completed; manual reconciliation required", result, err)
 			return
 		}
 	}
@@ -864,32 +1039,38 @@ func (a *ClientController) bulkCreate(c *gin.Context) {
 }
 
 func (a *ClientController) delDepleted(c *gin.Context) {
+	if !rejectResellerUnverifiedRemoval(c) {
+		return
+	}
 	if reseller := resellerSession(c); reseller != nil {
 		deleted, needRestart, err := a.delDepletedForReseller(reseller)
+		if needRestart {
+			a.xrayService.SetToNeedRestart()
+		}
 		if err != nil {
 			jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 			return
 		}
 		jsonObj(c, gin.H{"deleted": deleted}, nil)
-		if needRestart {
-			a.xrayService.SetToNeedRestart()
-		}
 		notifyClientsChanged()
 		return
 	}
 	deleted, needRestart, err := a.clientService.DelDepleted(&a.inboundService)
+	if needRestart {
+		a.xrayService.SetToNeedRestart()
+	}
 	if err != nil {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
 		return
 	}
 	jsonObj(c, gin.H{"deleted": deleted}, nil)
-	if needRestart {
-		a.xrayService.SetToNeedRestart()
-	}
 	notifyClientsChanged()
 }
 
 func (a *ClientController) resetTrafficByEmail(c *gin.Context) {
+	if !rejectResellerTrafficCounterMutation(c) {
+		return
+	}
 	email := c.Param("email")
 	var needRestart bool
 	var err error
@@ -932,6 +1113,9 @@ type trafficUpdateRequest struct {
 }
 
 func (a *ClientController) updateTrafficByEmail(c *gin.Context) {
+	if !rejectResellerTrafficCounterMutation(c) {
+		return
+	}
 	email := c.Param("email")
 	var req trafficUpdateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -1321,6 +1505,9 @@ func (a *ClientController) getOpenvpnProfile(c *gin.Context) {
 }
 
 func (a *ClientController) detach(c *gin.Context) {
+	if !rejectResellerUnverifiedRemoval(c) {
+		return
+	}
 	email := c.Param("email")
 	var body attachDetachBody
 	if err := c.ShouldBindJSON(&body); err != nil {
@@ -1355,6 +1542,9 @@ type bulkResetRequest struct {
 }
 
 func (a *ClientController) bulkResetTraffic(c *gin.Context) {
+	if !rejectResellerTrafficCounterMutation(c) {
+		return
+	}
 	var req bulkResetRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
@@ -1404,9 +1594,26 @@ func (a *ClientController) scopeResellerClientWrite(reseller *model.Reseller, pa
 		return err
 	}
 	var addBytes int64
+	seenEmails := make(map[string]bool, len(payloads))
 	for _, payload := range payloads {
+		key := strings.ToLower(strings.TrimSpace(payload.Client.Email))
+		if key != "" {
+			if previouslyPriced, exists := seenEmails[key]; exists && (previouslyPriced || payload.SalePrice != nil) {
+				return errors.New("duplicate clients with declared sale prices are not allowed")
+			}
+			seenEmails[key] = seenEmails[key] || payload.SalePrice != nil
+		}
+		if err := service.ValidateResellerSalePrice(payload.SalePrice); err != nil {
+			return err
+		}
 		if email := strings.TrimSpace(payload.Client.Email); email != "" {
-			if _, err := a.clientService.GetRecordByEmail(nil, email); err == nil {
+			if current, err := a.clientService.GetRecordByEmail(nil, email); err == nil {
+				if (current.TotalGB == 0 && payload.Client.TotalGB > 0) || (current.TotalGB > 0 && payload.Client.TotalGB > 0 && payload.Client.TotalGB < current.TotalGB) {
+					return errors.New(errResellerUnverifiedRemoval)
+				}
+				if payload.SalePrice != nil {
+					return errors.New("a sale price can only be declared for a new client")
+				}
 				owned, ownerErr := a.resellerService.OwnsClient(reseller.Id, email)
 				if ownerErr != nil {
 					return ownerErr
@@ -1434,19 +1641,34 @@ func (a *ClientController) scopeResellerClientWrite(reseller *model.Reseller, pa
 				return errors.New("inbound not found")
 			}
 		}
-		addBytes += payload.Client.TotalGB
+		allocation := payload.Client.TotalGB
+		if err := service.ValidateResellerAllocation(reseller, allocation); err != nil {
+			return err
+		}
+		if addBytes > math.MaxInt64-allocation {
+			// Saturating would let an overflowing batch fit a reseller with a
+			// MaxInt64 limit; reject before any client or runtime mutation.
+			return errors.New("combined client allocation exceeds supported range")
+		}
+		addBytes += allocation
 	}
 	return a.resellerService.CheckClientQuota(reseller, len(payloads), addBytes)
 }
 
-// checkResellerClientQuotaDelta charges only the growth of a single client's
-// quota, so lowering it is always allowed.
+// checkResellerClientQuotaDelta rejects quota reductions until final usage is
+// verified and charges any increase against the reseller allocation.
 func (a *ClientController) checkResellerClientQuotaDelta(reseller *model.Reseller, email string, newTotalBytes int64) error {
+	if err := service.ValidateResellerAllocation(reseller, newTotalBytes); err != nil {
+		return err
+	}
 	current, err := a.clientService.GetRecordByEmail(nil, email)
 	if err != nil || current == nil {
 		return err
 	}
-	if newTotalBytes <= current.TotalGB {
+	if (current.TotalGB == 0 && newTotalBytes > 0) || (current.TotalGB > 0 && newTotalBytes > 0 && newTotalBytes < current.TotalGB) {
+		return errors.New(errResellerUnverifiedRemoval)
+	}
+	if newTotalBytes == current.TotalGB {
 		return nil
 	}
 	return a.resellerService.CheckTrafficQuota(reseller, newTotalBytes-current.TotalGB)
@@ -1462,15 +1684,25 @@ func (a *ClientController) delDepletedForReseller(reseller *model.Reseller) (int
 	if err != nil {
 		return 0, false, err
 	}
+	// Use the same fail-closed, normalized local/global usage as quota checks.
+	// List's display overlay may omit global-only users and is not an
+	// authoritative source for this destructive operation.
+	emails := make([]string, 0, len(owned))
+	for email := range owned {
+		emails = append(emails, email)
+	}
+	usage, err := a.resellerService.ClientUsage(emails)
+	if err != nil {
+		return 0, false, err
+	}
 	depleted := make([]string, 0)
 	for _, row := range rows {
-		if _, ok := owned[strings.ToLower(strings.TrimSpace(row.Email))]; !ok {
+		key := strings.ToLower(strings.TrimSpace(row.Email))
+		if _, ok := owned[key]; !ok || row.TotalGB <= 0 {
 			continue
 		}
-		if row.TotalGB <= 0 || row.Traffic == nil {
-			continue
-		}
-		if row.Traffic.Up+row.Traffic.Down >= row.TotalGB {
+		traffic := usage[key]
+		if traffic != nil && (traffic.Up >= row.TotalGB || traffic.Down >= row.TotalGB-traffic.Up) {
 			depleted = append(depleted, row.Email)
 		}
 	}

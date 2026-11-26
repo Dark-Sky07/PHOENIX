@@ -1,6 +1,8 @@
 package service
 
 import (
+	"encoding/csv"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -112,5 +114,43 @@ func TestRenderResellerListCSV(t *testing.T) {
 	}
 	if lines[2] != "8,reseller2,,,false,0,,0,0.000,0.000,,USD,0.00,0.00," {
 		t.Fatalf("second row = %q", lines[2])
+	}
+}
+
+func TestResellerCSVNeutralizesSpreadsheetFormulas(t *testing.T) {
+	parse := func(data []byte) [][]string {
+		t.Helper()
+		r := csv.NewReader(strings.NewReader(strings.TrimPrefix(string(data), "\xEF\xBB\xBF")))
+		rows, err := r.ReadAll()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rows
+	}
+	for _, value := range []string{"=1+1", "+cmd", "-1+2", "@SUM(A1)", "  =1+1", "\u00a0=1+1", "\tplain", "\rplain", "\nplain", "\ufeff=1+1", `=HYPERLINK("https://example.test/a,b")`} {
+		t.Run(fmt.Sprintf("%q", value), func(t *testing.T) {
+			rows := parse(RenderResellerClientsCSV(&ResellerReport{Clients: []ResellerClientRow{{Email: value, Comment: value, Group: value, SubID: value}}}))
+			for _, col := range []int{0, 1, 2, 12} {
+				if rows[1][col] != "'"+value {
+					t.Fatalf("column %d unsafe: %q", col, rows[1][col])
+				}
+			}
+			rows = parse(RenderResellerListCSV([]*ResellerStat{{Reseller: &model.Reseller{Username: value, Name: value, Comment: value}}}))
+			for _, col := range []int{1, 2, 3} {
+				if rows[1][col] != "'"+value {
+					t.Fatalf("column %d unsafe: %q", col, rows[1][col])
+				}
+			}
+		})
+	}
+}
+
+func TestResellerCSVLeavesOrdinaryTextUnchanged(t *testing.T) {
+	for _, value := range []string{"  safe text", "مشتری ویژه\nline two", "user@example.test", "note, with comma"} {
+		reader := csv.NewReader(strings.NewReader(csvEscape(value)))
+		row, err := reader.Read()
+		if err != nil || len(row) != 1 || row[0] != value {
+			t.Fatalf("value %q changed to %q: %v", value, row, err)
+		}
 	}
 }

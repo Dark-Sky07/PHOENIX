@@ -58,6 +58,8 @@ import type { ResellerReport, ResellerStat } from '@/api/queries/useSession';
 import { PageHeader } from '@/components/ui';
 import ResellersOverview from './ResellersOverview';
 import ResellerWalletChart from './ResellerWalletChart';
+import ResellerSalesSection from './ResellerSalesSection';
+import ResellerTrafficArchives from './ResellerTrafficArchives';
 import SupportTicketsModal from './SupportTicketsModal';
 import VouchersModal from './VouchersModal';
 import './ResellersPage.css';
@@ -909,6 +911,30 @@ export default function ResellersPage() {
                       />
                     </Col>
                   </Row>
+                  {(reportQuery.data.stat.processingRenewals ?? 0) > 0 && (
+                    <Alert type="warning" showIcon message={t('resellers.processingRenewalTitle', 'Client renewal is processing or needs reconciliation')}
+                      description={<Space orientation="vertical"><span>{t('resellers.processingRenewalAdmin', 'A renewal may still be running. If interrupted, verify payment and client state before taking action; do not retry blindly.')}</span>{(reportQuery.data.renewalIssues ?? []).map((issue) => <span key={issue.orderId}>{issue.orderId} · {issue.targetRef} · {new Date(issue.createdAt).toLocaleString()}</span>)}</Space>} />
+                  )}
+                  {reportQuery.data.stat.hasUnlimitedClient && reportQuery.data.stat.reseller.trafficLimit > 0 && (
+                    <Alert type="warning" showIcon message={t('resellers.unlimitedClientWarning', 'A client has unlimited traffic under a limited reseller. New allocations and renewals are blocked until an administrator resolves this.')} />
+                  )}
+                  {(reportQuery.data.stat.pendingCreations ?? 0) > 0 && (
+                    <Alert
+                      type="warning"
+                      showIcon
+                      message={t('resellers.pendingCreationTitle', 'Client operations need reconciliation')}
+                      description={(
+                        <Space orientation="vertical">
+                          <span>{t('resellers.pendingCreationAdmin', 'Client operations are blocked until an administrator investigates. Do not blindly retry or remove the records.')}</span>
+                          {(reportQuery.data.creationIssues ?? []).map((issue) => (
+                            <span key={issue.id}>{issue.operation || 'single_create'} · {issue.email} · {new Date(issue.createdAt).toLocaleString()} · {issue.id}</span>
+                          ))}
+                        </Space>
+                      )}
+                    />
+                  )}
+                  <ResellerSalesSection resellerId={reportQuery.data.stat.reseller.id} />
+                  <ResellerTrafficArchives rows={reportQuery.data.trafficArchives ?? []} />
                   <Descriptions size="small" bordered column={isMobile ? 1 : 2}>
                     <Descriptions.Item label={t('resellers.clientLimit')}>
                       {reportQuery.data.stat.clientCount} / {reportQuery.data.stat.reseller.clientLimit || t('resellers.unlimited')}

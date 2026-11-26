@@ -5,24 +5,29 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 
-	"github.com/Dark-Sky07/phoenix/internal/config"
 	"github.com/Dark-Sky07/phoenix/internal/tuic"
+	"github.com/Dark-Sky07/phoenix/internal/web/service"
+	"github.com/Dark-Sky07/phoenix/internal/web/websocket"
 )
 
 var tuicJournalMu sync.Mutex
 
 type tuicTrafficBatch struct {
-	ID     string                    `json:"id"`
-	Deltas []tuic.ClientTrafficDelta `json:"deltas"`
+	ID           string                    `json:"id"`
+	Deltas       []tuic.ClientTrafficDelta `json:"deltas"`
+	PollMarker   bool                      `json:"pollMarker,omitempty"`
+	ManualReview bool                      `json:"manualReview,omitempty"`
 }
 
-func tuicJournalDir() string { return filepath.Join(config.GetDBFolderPath(), "tuic-traffic-journal") }
+func tuicJournalDir() string { return service.TuicTrafficJournalDir() }
 
 func syncJournalDir(dir string) error {
 	if runtime.GOOS == "windows" {
@@ -36,7 +41,35 @@ func syncJournalDir(dir string) error {
 	return file.Sync()
 }
 
+// Accept existing legacy IDs without allowing them to escape the directory.
+func validTuicBatchID(id string) bool {
+	if len(id) == 0 || len(id) > 128 {
+		return false
+	}
+	return strings.IndexFunc(id, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_')
+	}) == -1
+}
+
+func verifyStoredTuicBatch(dir, name string, wanted tuicTrafficBatch) error {
+	data, err := readXrayJournal(dir, name)
+	if err != nil {
+		return err
+	}
+	var saved tuicTrafficBatch
+	if err := json.Unmarshal(data, &saved); err != nil {
+		return fmt.Errorf("invalid existing TUIC journal %q: %w", name, err)
+	}
+	if !reflect.DeepEqual(saved, wanted) {
+		return fmt.Errorf("TUIC journal %q differs from retry payload; manual reconciliation required", name)
+	}
+	return nil
+}
+
 func storeTuicBatch(batch tuicTrafficBatch) (string, error) {
+	if !validTuicBatchID(batch.ID) {
+		return "", fmt.Errorf("invalid TUIC batch ID")
+	}
 	dir := tuicJournalDir()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
@@ -46,6 +79,21 @@ func storeTuicBatch(batch tuicTrafficBatch) (string, error) {
 	}
 	data, err := json.Marshal(batch)
 	if err != nil {
+		return "", err
+	}
+	if len(data) > maxXrayJournalBytes {
+		return "", fmt.Errorf("TUIC batch exceeds journal size limit")
+	}
+	name := batch.ID + ".json"
+	if batch.ManualReview {
+		// Older binaries reject unknown entries instead of replaying a batch
+		// whose ownership was never captured behind an allocation fence.
+		name = batch.ID + ".manual"
+	}
+	path := filepath.Join(dir, name)
+	if err := verifyStoredTuicBatch(dir, name, batch); err == nil {
+		return path, syncJournalDir(dir)
+	} else if !os.IsNotExist(err) {
 		return "", err
 	}
 	file, err := os.CreateTemp(dir, ".pending-")
@@ -65,9 +113,18 @@ func storeTuicBatch(batch tuicTrafficBatch) (string, error) {
 	if err := file.Close(); err != nil {
 		return "", err
 	}
-	path := filepath.Join(dir, batch.ID+".json")
-	if err := os.Rename(tmp, path); err != nil {
-		return "", err
+	if err := os.Link(tmp, path); err != nil {
+		if !os.IsExist(err) {
+			return "", err
+		}
+		if err := verifyStoredTuicBatch(dir, name, batch); err != nil {
+			return "", err
+		}
+	}
+	// Once published, return the path even if cleanup or sync fails so the
+	// caller does not also requeue the same deltas in memory.
+	if err := os.Remove(tmp); err != nil {
+		return path, err
 	}
 	return path, syncJournalDir(dir)
 }
@@ -82,10 +139,10 @@ func (j *TuicJob) replayTuicJournal() error {
 	}
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
-			continue
+			return fmt.Errorf("unexpected TUIC journal entry %q; manual reconciliation required", entry.Name())
 		}
 		path := filepath.Join(tuicJournalDir(), entry.Name())
-		data, err := os.ReadFile(path)
+		data, err := readXrayJournal(tuicJournalDir(), entry.Name())
 		if err != nil {
 			return err
 		}
@@ -93,10 +150,24 @@ func (j *TuicJob) replayTuicJournal() error {
 		if err := json.Unmarshal(data, &batch); err != nil {
 			return fmt.Errorf("TUIC journal %s: %w", entry.Name(), err)
 		}
-		if batch.ID+".json" != entry.Name() {
+		if !validTuicBatchID(batch.ID) || batch.ID+".json" != entry.Name() {
 			return fmt.Errorf("TUIC journal batch ID mismatch")
 		}
-		if err := j.inboundService.AddTuicTrafficBatch(batch.ID, aggregateTuicClientTraffic(batch.Deltas, nil)); err != nil {
+		if batch.ManualReview {
+			return fmt.Errorf("TUIC journal %s requires manual reconciliation", entry.Name())
+		}
+		if batch.PollMarker {
+			if err := j.recoverCommittedTuicPoll(batch); err != nil {
+				return fmt.Errorf("recover TUIC periodic journal %s: %w", entry.Name(), err)
+			}
+			continue
+		}
+		for _, delta := range batch.Deltas {
+			if delta.Up < 0 || delta.Down < 0 {
+				return fmt.Errorf("TUIC journal %s has negative traffic", entry.Name())
+			}
+		}
+		if err := j.inboundService.AddTuicTrafficBatch(batch.ID, batch.Deltas); err != nil {
 			return err
 		}
 		if err := os.Remove(path); err != nil {
@@ -109,9 +180,43 @@ func (j *TuicJob) replayTuicJournal() error {
 	return nil
 }
 
+// recoverCommittedTuicPoll only cleans up a journal if the shared receipt
+// proves that this exact payload already committed. Uncommitted samples lack a
+// durable ownership snapshot and must not be applied automatically on restart.
+// The caller holds tuicJournalMu; on a later cleanup failure the same process
+// retains state for retry and keeps the lock only for an uncertain deletion.
+func (j *TuicJob) recoverCommittedTuicPoll(batch tuicTrafficBatch) error {
+	if sharedTuicPoll.batch != nil {
+		return fmt.Errorf("another TUIC poll is pending")
+	}
+	unlock, err := service.LockResellerAllocationForXrayRecovery()
+	if err != nil {
+		return err
+	}
+	if err := service.VerifyExclusiveXrayPollMarker(batch.ID); err != nil {
+		unlock()
+		return fmt.Errorf("verify TUIC poll marker: %w", err)
+	}
+	if err := service.VerifyCommittedTuicTrafficBatch(batch.ID, batch.Deltas); err != nil {
+		unlock()
+		return err
+	}
+	sharedTuicPoll = tuicPollState{unlock: unlock, batch: &batch, committed: true}
+	_, _, disabled, err := collectAndCommitTuic(&sharedTuicPoll, nil, &j.inboundService)
+	if disabled {
+		websocket.BroadcastInvalidate(websocket.MessageTypeInbounds)
+	}
+	return err
+}
+
 func (j *TuicJob) flushTuicJournal() error {
 	tuicJournalMu.Lock()
 	defer tuicJournalMu.Unlock()
+	if sharedTuicPoll.batch != nil {
+		if _, _, _, err := collectAndCommitTuic(&sharedTuicPoll, nil, &j.inboundService); err != nil {
+			return fmt.Errorf("finish pending TUIC poll before shutdown: %w", err)
+		}
+	}
 	manager := tuic.GetManager()
 	_, deltas := manager.CollectAllTraffic()
 	if len(deltas) > 0 {

@@ -1,0 +1,38 @@
+--- a/shadowaead_2022/service_multi.go
++++ b/shadowaead_2022/service_multi.go
+@@ -13,0 +14 @@
++	"sync"
+@@ -33,0 +35 @@
++	usersMu  sync.RWMutex
+@@ -96,0 +99 @@
++	s.usersMu.Lock()
+@@ -99,0 +103 @@
++	s.usersMu.Unlock()
+@@ -164,6 +168,5 @@
+-	var user U
+-	var uPSK []byte
+-	if u, loaded := s.uPSKHash[_eiHeader]; loaded {
+-		user = u
+-		uPSK = s.uPSK[u]
+-	} else {
++	s.usersMu.RLock()
++	user, loaded := s.uPSKHash[_eiHeader]
++	uPSK := s.uPSK[user]
++	s.usersMu.RUnlock()
++	if !loaded {
+@@ -282,6 +285,6 @@
+-	var user U
+-	var uPSK []byte
+-	if u, loaded := s.uPSKHash[_eiHeader]; loaded {
+-		user = u
+-		uPSK = s.uPSK[u]
+-	} else {
++	s.usersMu.RLock()
++	user, userLoaded := s.uPSKHash[_eiHeader]
++	uPSK := s.uPSK[user]
++	userCipher := s.uCipher[user]
++	s.usersMu.RUnlock()
++	if !userLoaded {
+@@ -378 +381 @@
+-		return auth.ContextWithUser(ctx, user), &serverPacketWriter{s.Service, conn, natConn, session, s.uCipher[user]}
++		return auth.ContextWithUser(ctx, user), &serverPacketWriter{s.Service, conn, natConn, session, userCipher}

@@ -569,6 +569,7 @@ export const NodeSchema = z.object({
   transitive: z.boolean().optional(),
   updatedAt: z.number().int(),
   uptimeSecs: z.number().int(),
+  verifiedGlobalPush: z.boolean(),
   xrayError: z.string(),
   xrayState: z.string(),
   xrayVersion: z.string(),

@@ -327,6 +327,9 @@ func (m *NetworkManager) applyRelay(iptables string, id int, previous networkSta
 // daemon can complete TLS without these rules, which otherwise leaves both
 // Windows and Android connected with no working web traffic.
 func (m *NetworkManager) Apply(inst Instance) error {
+	if !validInboundID(inst.Id) {
+		return fmt.Errorf("openvpn: inbound ID %d cannot be assigned a unique legacy subnet", inst.Id)
+	}
 	if inst.Port < 1 || inst.Port > 65535 {
 		return fmt.Errorf("openvpn: invalid port %d", inst.Port)
 	}

@@ -1,4 +1,5 @@
 import { NumberFormatter } from '@/utils';
+import { CounterIncidentStatusSchema, NodeSnapshotSafetyStatusSchema } from '@/schemas/status';
 
 export class CurTotal {
   current: number;
@@ -65,7 +66,22 @@ export interface DaemonInfo {
   color: string;
 }
 
+export interface CounterIncidentStatus {
+  available: boolean;
+  databaseCount: number;
+  fallbackPresent: boolean;
+  pendingInProcess: boolean;
+  daemonIdentityCount?: number;
+}
+
+export interface NodeSnapshotSafetyStatus {
+  available: boolean;
+  nodeCount: number;
+}
+
 interface StatusInput {
+  counterIncidents?: CounterIncidentStatus;
+  nodeSnapshotSafety?: NodeSnapshotSafetyStatus;
   cpu?: number;
   cpuCores?: number;
   logicalPro?: number;
@@ -88,6 +104,8 @@ interface StatusInput {
 }
 
 export class Status {
+  counterIncidents?: CounterIncidentStatus;
+  nodeSnapshotSafety?: NodeSnapshotSafetyStatus;
   cpu: CurTotal = new CurTotal(0, 0);
   cpuCores = 0;
   logicalPro = 0;
@@ -110,6 +128,13 @@ export class Status {
 
   constructor(data?: StatusInput | null) {
     if (data == null) return;
+    // parseMsg deliberately returns raw data on schema failure. Validate this
+    // safety signal independently so malformed or older responses are unknown,
+    // never silently interpreted as a clean incident status.
+    const incidents = CounterIncidentStatusSchema.safeParse(data.counterIncidents);
+    this.counterIncidents = incidents.success ? incidents.data : undefined;
+    const nodeSafety = NodeSnapshotSafetyStatusSchema.safeParse(data.nodeSnapshotSafety);
+    this.nodeSnapshotSafety = nodeSafety.success ? nodeSafety.data : undefined;
 
     this.cpu = new CurTotal(data.cpu ?? 0, 100);
     this.cpuCores = data.cpuCores ?? 0;

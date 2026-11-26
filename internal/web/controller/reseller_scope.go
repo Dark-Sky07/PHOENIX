@@ -35,14 +35,36 @@ func abortForbidden(c *gin.Context, msg string) {
 }
 
 const (
-	errNotYourInbound = "inbound not found"
-	errNotYourClient  = "client not found"
+	errResellerTrafficResetUnavailable = "reseller traffic counter reset is temporarily unavailable until usage accounting supports resets; contact the administrator"
+	errResellerUnverifiedRemoval       = "reseller client removal and quota reduction require administrator verification of final traffic; contact the administrator"
+	errNotYourInbound                  = "inbound not found"
+	errNotYourClient                   = "client not found"
 	// errResellerInboundReadOnly is reported when a reseller session reaches
 	// an inbound write endpoint. Inbounds are assigned by the admin and are
 	// read-only for resellers — unlike a wrong-owner access this is not a
 	// probe-able fact, so the message says so plainly.
 	errResellerInboundReadOnly = "inbounds are read-only for reseller accounts"
 )
+
+// Runtime counters can still contain unpolled traffic. Keep the reseller's
+// allocation and ownership intact until an administrator reconciles it.
+func rejectResellerUnverifiedRemoval(c *gin.Context) bool {
+	if resellerSession(c) != nil {
+		abortForbidden(c, errResellerUnverifiedRemoval)
+		return false
+	}
+	return true
+}
+
+// rejectResellerTrafficCounterMutation fails closed while resetting counters
+// would otherwise allow a reseller to erase measured usage before deletion.
+func rejectResellerTrafficCounterMutation(c *gin.Context) bool {
+	if resellerSession(c) != nil {
+		abortForbidden(c, errResellerTrafficResetUnavailable)
+		return false
+	}
+	return true
+}
 
 // rejectResellerInboundWrite is the guard every inbound POST handler calls
 // first, before parsing any parameter or body. Reseller sessions are answered
@@ -159,4 +181,41 @@ func filterInboundIDs(ids []int, owned map[int]struct{}) []int {
 		}
 	}
 	return out
+}
+
+// Serialize participating HTTP mutations with reseller quota checks, including
+// administrator changes and deletion/unassignment. Revalidate a reseller
+// session after waiting: revocation while blocked must never turn the request
+// into an administrator request merely because the session lookup returns nil.
+func withResellerAllocationLock(handler gin.HandlerFunc) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		reseller := resellerSession(c)
+		unlock, err := service.LockResellerAllocation()
+		if err != nil {
+			jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
+			return
+		}
+		defer unlock()
+		if reseller != nil {
+			current := session.GetCurrentLoginReseller(c)
+			if current == nil || current.Id != reseller.Id {
+				abortForbidden(c, "reseller session is no longer valid")
+				return
+			}
+			if err := newResellerService().EnsureActive(current); err != nil {
+				abortForbidden(c, err.Error())
+				return
+			}
+			if err := service.CheckPendingResellerCreations(current.Id); err != nil {
+				abortForbidden(c, err.Error())
+				return
+			}
+			if err := service.CheckResellerProcessingClientRenewals(current.Id); err != nil {
+				abortForbidden(c, err.Error())
+				return
+			}
+			session.PinLoginReseller(c, current)
+		}
+		handler(c)
+	}
 }

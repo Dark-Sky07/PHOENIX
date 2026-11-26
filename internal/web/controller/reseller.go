@@ -3,9 +3,11 @@ package controller
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
@@ -27,6 +29,7 @@ type resellerForm struct {
 type ResellerController struct {
 	BaseController
 	resellerService service.ResellerService
+	xrayService     service.XrayService
 	ticketService   service.TicketService
 	webhookService  service.PaymentWebhookService
 	voucherService  service.VoucherService
@@ -45,21 +48,25 @@ func (a *ResellerController) initRouter(g *gin.RouterGroup) {
 	g.GET("/assignments", a.assignments)
 	g.GET("/report/:id", a.report)
 	g.GET("/report/:id/export", a.reportExport)
+	g.GET("/report/:id/sales", a.salesReport)
+	g.GET("/report/:id/sales/export", a.salesReportExport)
+	g.GET("/report/:id/sales/history", a.historicalSales)
+	g.POST("/report/:id/sales/history", a.recordHistoricalSale)
 	g.GET("/export", a.export)
 	g.POST("/add", a.add)
-	g.POST("/update/:id", a.update)
-	g.POST("/del/:id", a.del)
-	g.POST("/setEnable/:id", a.setEnable)
-	g.POST("/resetPassword/:id", a.resetPassword)
-	g.POST("/assignInbound", a.assignInbound)
-	g.POST("/unassignInbound", a.unassignInbound)
-	g.POST("/assignInbounds", a.assignInbounds)
-	g.POST("/unassignInbounds", a.unassignInbounds)
-	g.POST("/setInbounds", a.setInbounds)
-	g.POST("/assignClient", a.assignClient)
-	g.POST("/unassignClient", a.unassignClient)
-	g.POST("/assignClients", a.assignClients)
-	g.POST("/unassignClients", a.unassignClients)
+	g.POST("/update/:id", withResellerAllocationLock(a.update))
+	g.POST("/del/:id", withResellerAllocationLock(a.del))
+	g.POST("/setEnable/:id", withResellerAllocationLock(a.setEnable))
+	g.POST("/resetPassword/:id", withResellerAllocationLock(a.resetPassword))
+	g.POST("/assignInbound", withResellerAllocationLock(a.assignInbound))
+	g.POST("/unassignInbound", withResellerAllocationLock(a.unassignInbound))
+	g.POST("/assignInbounds", withResellerAllocationLock(a.assignInbounds))
+	g.POST("/unassignInbounds", withResellerAllocationLock(a.unassignInbounds))
+	g.POST("/setInbounds", withResellerAllocationLock(a.setInbounds))
+	g.POST("/assignClient", withResellerAllocationLock(a.assignClient))
+	g.POST("/unassignClient", withResellerAllocationLock(a.unassignClient))
+	g.POST("/assignClients", withResellerAllocationLock(a.assignClients))
+	g.POST("/unassignClients", withResellerAllocationLock(a.unassignClients))
 	g.POST("/balance", a.balance)
 	g.GET("/tickets", a.listTickets)
 	g.GET("/tickets/:id", a.getTicket)
@@ -106,6 +113,16 @@ func (a *ResellerController) report(c *gin.Context) {
 		jsonMsg(c, "", err)
 		return
 	}
+	report.CreationIssues, err = a.resellerService.CreationIssues(id)
+	if err != nil {
+		jsonMsg(c, "", err)
+		return
+	}
+	report.RenewalIssues, err = a.resellerService.ProcessingRenewalIssues(id)
+	if err != nil {
+		jsonMsg(c, "", err)
+		return
+	}
 	jsonObj(c, report, nil)
 }
 
@@ -126,6 +143,120 @@ func (a *ResellerController) reportExport(c *gin.Context) {
 		name = "reseller-" + report.Stat.Reseller.Username + "-clients"
 	}
 	serveCSV(c, name, service.RenderResellerClientsCSV(report))
+}
+
+func (a *ResellerController) salesReport(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		jsonMsg(c, "", errors.New("invalid reseller id"))
+		return
+	}
+	period, from, to, err := parseResellerSalesQuery(c)
+	if err != nil {
+		jsonMsg(c, "", err)
+		return
+	}
+	report, err := a.resellerService.SalesReport(id, period, from, to)
+	if err != nil {
+		jsonMsg(c, "", err)
+		return
+	}
+	jsonObj(c, report, nil)
+}
+
+func (a *ResellerController) salesReportExport(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		jsonMsg(c, "", errors.New("invalid reseller id"))
+		return
+	}
+	period, from, to, err := parseResellerSalesQuery(c)
+	if err != nil {
+		jsonMsg(c, "", err)
+		return
+	}
+	report, err := a.resellerService.SalesReport(id, period, from, to)
+	if err != nil {
+		jsonMsg(c, "", err)
+		return
+	}
+	name := "reseller-" + strconv.Itoa(id) + "-sales-" + period
+	if reseller, getErr := a.resellerService.Get(id); getErr == nil && reseller.Username != "" {
+		name = "reseller-" + reseller.Username + "-sales-" + period
+	}
+	serveCSV(c, name, service.RenderResellerSalesCSV(report))
+}
+
+func (a *ResellerController) historicalSales(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		jsonMsg(c, "", errors.New("invalid reseller id"))
+		return
+	}
+	rows, err := a.resellerService.HistoricalSales(id)
+	jsonObj(c, rows, err)
+}
+
+func (a *ResellerController) recordHistoricalSale(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		jsonMsg(c, "", errors.New("invalid reseller id"))
+		return
+	}
+	var req struct {
+		Reference    string `json:"reference"`
+		Source       string `json:"source"`
+		Email        string `json:"email"`
+		TrafficBytes int64  `json:"trafficBytes"`
+		AmountMinor  *int64 `json:"amountMinor"`
+		Currency     string `json:"currency"`
+		SoldAt       int64  `json:"soldAt"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		jsonMsg(c, "", err)
+		return
+	}
+	row := model.ResellerHistoricalSale{ResellerId: id, Reference: req.Reference, Source: req.Source, Email: req.Email, TrafficBytes: req.TrafficBytes, AmountMinor: req.AmountMinor, Currency: req.Currency, SoldAt: req.SoldAt}
+	if c.GetBool("api_authed") {
+		row.ActorType, row.ActorId, row.ActorName = "api_token", c.GetInt("api_token_id"), c.GetString("api_token_name")
+		if row.ActorName == "" {
+			row.ActorName = "api_token"
+		}
+	} else if user := session.GetLoginUser(c); user != nil && resellerSession(c) == nil {
+		row.ActorType, row.ActorId, row.ActorName = "admin", user.Id, user.Username
+	} else {
+		abortForbidden(c, "administrator required")
+		return
+	}
+	if err := a.resellerService.RecordHistoricalSale(&row); err != nil {
+		jsonMsg(c, "", err)
+		return
+	}
+	jsonObj(c, row, nil)
+}
+
+func parseResellerSalesQuery(c *gin.Context) (string, int64, int64, error) {
+	period := c.DefaultQuery("period", "monthly")
+	parseBound := func(name string) (int64, error) {
+		value := strings.TrimSpace(c.Query(name))
+		if value == "" {
+			return 0, nil
+		}
+		bound, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || bound <= 0 {
+			return 0, fmt.Errorf("%s must be a positive Unix-millisecond timestamp", name)
+		}
+		return bound, nil
+	}
+	from, err := parseBound("from")
+	if err != nil {
+		return "", 0, 0, err
+	}
+	to, err := parseBound("to")
+	if err != nil {
+		return "", 0, 0, err
+	}
+	return period, from, to, nil
 }
 
 // export streams the full resellers list with live usage numbers as CSV.
@@ -250,7 +381,12 @@ func (a *ResellerController) setEnable(c *gin.Context) {
 		jsonMsg(c, "", err)
 		return
 	}
-	if _, err := a.resellerService.SetEnable(id, form.Enable); err != nil {
+	needRestart, err := a.resellerService.SetEnable(id, form.Enable)
+	// A failed enforcement can still have mutated the running core.
+	if needRestart {
+		a.xrayService.SetToNeedRestart()
+	}
+	if err != nil {
 		jsonMsg(c, "", err)
 		return
 	}

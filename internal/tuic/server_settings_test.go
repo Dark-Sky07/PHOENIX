@@ -105,7 +105,7 @@ func TestEnsureStartupFailureHonorsInboundLogThreshold(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.level, func(t *testing.T) {
 			marker := fmt.Sprintf("tuic-start-failure-%s-%d", test.level, time.Now().UnixNano())
-			manager := &Manager{servers: map[int]*managed{}, lastStartErr: map[int]string{}, pendingTraffic: map[string]ClientTrafficDelta{}}
+			manager := &Manager{servers: map[int]*managed{}, lastStartErr: map[int]string{}, pendingTraffic: map[pendingTrafficKey]ClientTrafficDelta{}}
 			err := manager.Ensure(Instance{
 				Id:                99031,
 				Tag:               marker,

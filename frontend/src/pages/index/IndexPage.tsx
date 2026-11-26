@@ -1,6 +1,7 @@
 import { lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
+  Alert,
   Button,
   Card,
   ConfigProvider,
@@ -330,6 +331,58 @@ export default function IndexPage() {
                       </Tooltip>
                     </div>
                   </header>
+
+                  <Alert
+                    className="reseller-traffic-warning"
+                    type="warning"
+                    showIcon
+                    message={t('pages.index.resellerTrafficWarningTitle')}
+                    description={t('pages.index.resellerTrafficWarningDescription')}
+                  />
+
+                  <Alert
+                    className="openvpn-credential-warning"
+                    type="warning"
+                    showIcon
+                    message={t('pages.index.openvpnCredentialWarningTitle')}
+                    description={t('pages.index.openvpnCredentialWarningDescription')}
+                  />
+
+                  {(!status.counterIncidents?.available || status.counterIncidents.databaseCount > 0 || status.counterIncidents.fallbackPresent || status.counterIncidents.pendingInProcess) && (
+                    <Alert
+                      className="reseller-traffic-warning"
+                      type="error"
+                      showIcon
+                      message={t('pages.index.counterIncidentTitle')}
+                      description={status.counterIncidents?.available
+                        ? t('pages.index.counterIncidentDescription', { count: status.counterIncidents.databaseCount })
+                        : t('pages.index.counterIncidentUnavailable')}
+                    />
+                  )}
+
+                  {status.counterIncidents?.available && (status.counterIncidents.daemonIdentityCount === undefined || status.counterIncidents.daemonIdentityCount > 0) && (
+                    <Alert
+                      className="daemon-identity-warning"
+                      type="warning"
+                      showIcon
+                      message={t('pages.index.daemonIdentityTitle')}
+                      description={status.counterIncidents.daemonIdentityCount === undefined
+                        ? t('pages.index.daemonIdentityUnavailable')
+                        : t('pages.index.daemonIdentityDescription', { count: status.counterIncidents.daemonIdentityCount })}
+                    />
+                  )}
+
+                  {(!status.nodeSnapshotSafety?.available || status.nodeSnapshotSafety.nodeCount > 0) && (
+                    <Alert
+                      className="node-traffic-safety-warning"
+                      type="warning"
+                      showIcon
+                      message={t('pages.index.nodeSnapshotSafetyTitle')}
+                      description={status.nodeSnapshotSafety?.available
+                        ? t('pages.index.nodeSnapshotSafetyDescription', { count: status.nodeSnapshotSafety.nodeCount })
+                        : t('pages.index.nodeSnapshotSafetyUnavailable')}
+                    />
+                  )}
 
                   <section className="dash-resources phoenix-rise phoenix-rise-1" aria-label={t('pages.index.resources', 'Resources')}>
                     <ResourceTile

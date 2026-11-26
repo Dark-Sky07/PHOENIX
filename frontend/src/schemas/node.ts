@@ -32,6 +32,7 @@ export const NodeRecordSchema = z.object({
   tlsVerifyMode: z.enum(['verify', 'skip', 'pin']).optional(),
   pinnedCertSha256: z.string().optional(),
   inboundSyncMode: z.enum(['all', 'selected']).optional(),
+  verifiedGlobalPush: z.boolean().optional(),
   // Backend serializes a nil []string as null for nodes saved before #5178.
   inboundTags: z.array(z.string()).nullish(),
   // Multi-hop node tree (#4983): a node's stable GUID, its parent's GUID, and

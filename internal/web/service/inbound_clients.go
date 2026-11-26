@@ -125,10 +125,13 @@ func (s *InboundService) backfillClientStats(db *gorm.DB, inbounds []*model.Inbo
 // emailUsedByOtherInbounds reports whether email lives in any inbound other
 // than exceptInboundId. Empty email returns false.
 func (s *InboundService) emailUsedByOtherInbounds(email string, exceptInboundId int) (bool, error) {
+	return emailUsedByOtherInboundsDB(database.GetDB(), email, exceptInboundId)
+}
+
+func emailUsedByOtherInboundsDB(db *gorm.DB, email string, exceptInboundId int) (bool, error) {
 	if email == "" {
 		return false, nil
 	}
-	db := database.GetDB()
 	var count int64
 	query := fmt.Sprintf(
 		"SELECT COUNT(*) %s WHERE inbounds.id != ? AND LOWER(TRIM(%s)) = LOWER(TRIM(?))",
@@ -142,6 +145,10 @@ func (s *InboundService) emailUsedByOtherInbounds(email string, exceptInboundId 
 }
 
 func (s *InboundService) emailsUsedByOtherInbounds(emails []string, exceptInboundId int) (map[string]bool, error) {
+	return emailsUsedByOtherInboundsDB(database.GetDB(), emails, exceptInboundId)
+}
+
+func emailsUsedByOtherInboundsDB(db *gorm.DB, emails []string, exceptInboundId int) (map[string]bool, error) {
 	shared := make(map[string]bool, len(emails))
 	want := make(map[string]struct{}, len(emails))
 	for _, e := range emails {
@@ -153,7 +160,6 @@ func (s *InboundService) emailsUsedByOtherInbounds(emails []string, exceptInboun
 	if len(want) == 0 {
 		return shared, nil
 	}
-	db := database.GetDB()
 	var rows []string
 	query := fmt.Sprintf(
 		"SELECT DISTINCT LOWER(TRIM(%s)) %s WHERE inbounds.id != ?",

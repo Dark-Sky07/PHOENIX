@@ -86,6 +86,7 @@ function StatePill({ state, errorMsg, onOpenLogs }: { state: string; errorMsg?: 
 }
 
 function ServiceRow({ icon, name, state, errorMsg, meta, actions, onOpenLogs }: ServiceRowProps) {
+  const { t } = useTranslation();
   const kind = stateKind(state);
   return (
     <div className={`service-row is-${kind}`}>
@@ -101,6 +102,11 @@ function ServiceRow({ icon, name, state, errorMsg, meta, actions, onOpenLogs }: 
               <span key={i} className="service-row-meta-item">{item}</span>
             ))}
           </div>
+          {kind !== 'error' && errorMsg?.trim() && (
+            <div className="service-row-warning" role="alert">
+              {t('pages.index.daemonWarning', 'Warning')}: {errorMsg}
+            </div>
+          )}
         </div>
       </div>
       <div className="service-row-actions">

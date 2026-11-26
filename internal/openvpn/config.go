@@ -21,6 +21,12 @@ func pidPathForID(id int) string  { return filepath.Join(dataDirForID(id), "open
 func logPathForID(id int) string  { return filepath.Join(dataDirForID(id), "openvpn.log") }
 func devNameForID(id int) string  { return "tun" + strconv.Itoa(id) }
 
+// quoteConfigPath quotes a single OpenVPN configuration argument. Control
+// characters are rejected by validateRuntimeConfig before the file is written.
+func quoteConfigPath(path string) string {
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(path) + `"`
+}
+
 // renderServerConf builds the openvpn.conf for one inbound. Directives are
 // deliberately limited to ones present since OpenVPN 2.4 so the generated
 // file works on both 2.4/2.5 and 2.6 installations.
@@ -40,9 +46,9 @@ func renderServerConf(inst Instance, mgmtPort int) string {
 	fmt.Fprintf(&b, "port %d\n", inst.Port)
 	fmt.Fprintf(&b, "proto %s\n", proto)
 	fmt.Fprintf(&b, "dev %s\n", devNameForID(inst.Id))
-	fmt.Fprintf(&b, "ca %s\n", filepath.Join(dir, "ca.crt"))
-	fmt.Fprintf(&b, "cert %s\n", filepath.Join(dir, "server.crt"))
-	fmt.Fprintf(&b, "key %s\n", filepath.Join(dir, "server.key"))
+	fmt.Fprintf(&b, "ca %s\n", quoteConfigPath(filepath.Join(dir, "ca.crt")))
+	fmt.Fprintf(&b, "cert %s\n", quoteConfigPath(filepath.Join(dir, "server.crt")))
+	fmt.Fprintf(&b, "key %s\n", quoteConfigPath(filepath.Join(dir, "server.key")))
 	b.WriteString("tls-server\ntls-version-min 1.2\n")
 	// The generated server certificate is ECDSA P-256. OpenVPN 2.5 still
 	// requires an explicit DH setting; `dh none` selects the ECDHE path instead
@@ -61,8 +67,8 @@ func renderServerConf(inst Instance, mgmtPort int) string {
 	}
 	b.WriteString("persist-key\npersist-tun\n")
 	b.WriteString("mute-replay-warnings\nstatus-version 2\nverb 3\n")
-	fmt.Fprintf(&b, "writepid %s\n", pidPathForID(inst.Id))
-	fmt.Fprintf(&b, "log %s\n", logPathForID(inst.Id))
+	fmt.Fprintf(&b, "writepid %s\n", quoteConfigPath(pidPathForID(inst.Id)))
+	fmt.Fprintf(&b, "log %s\n", quoteConfigPath(logPathForID(inst.Id)))
 	fmt.Fprintf(&b, "management 127.0.0.1 %d\n", mgmtPort)
 	if inst.RedirectGw {
 		b.WriteString(`push "redirect-gateway def1 bypass-dns"` + "\n")
@@ -76,6 +82,9 @@ func renderServerConf(inst Instance, mgmtPort int) string {
 
 // writeConfig renders the server config into the inbound's data directory.
 func writeConfig(inst Instance, mgmtPort int) error {
+	if err := inst.validateRuntimeConfig(); err != nil {
+		return err
+	}
 	dir := dataDirForID(inst.Id)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err

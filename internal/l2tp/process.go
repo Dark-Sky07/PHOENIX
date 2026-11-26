@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -125,66 +124,6 @@ func strongSwanPath() string {
 func xl2tpdPath() string {
 	path, _ := exec.LookPath("xl2tpd")
 	return path
-}
-
-func compiledStrongSwanPIDDir() string {
-	ipsec := strongSwanPath()
-	if ipsec == "" {
-		return ""
-	}
-	output, err := exec.Command(ipsec, "--piddir").Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(output))
-}
-
-func stopPIDFile(path, expected string) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || pid <= 1 {
-		return
-	}
-	cmdline, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
-	if err != nil || !strings.Contains(strings.ToLower(string(cmdline)), expected) {
-		return
-	}
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return
-	}
-	_ = process.Signal(syscall.SIGTERM)
-	deadline := time.Now().Add(gracefulStopTimeout)
-	for time.Now().Before(deadline) {
-		if err := process.Signal(syscall.Signal(0)); err != nil {
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	_ = process.Kill()
-}
-
-// stopOrphan stops a daemon group left behind by a previous panel process.
-// The manager is in-memory, so PID/config discovery is required after a host
-// or panel restart; without it an old xl2tpd would keep UDP 1701 occupied and
-// the old strongSwan starter would own the IKE sockets.
-func stopOrphan(id int) {
-	if runtime.GOOS == "windows" {
-		return
-	}
-	stopPIDFile(xl2tpdPIDPath(id), "xl2tpd")
-	// The distro ipsec wrapper overwrites IPSEC_PIDDIR, so its stop command
-	// cannot address the per-inbound path used by the old implementation. Ask
-	// the wrapper for its compiled PID directory and stop only processes whose
-	// command lines are actually starter/charon; this also reclaims a daemon
-	// left behind after the panel itself was restarted.
-	if pidDir := compiledStrongSwanPIDDir(); pidDir != "" {
-		stopPIDFile(filepath.Join(pidDir, "starter.charon.pid"), "starter")
-		stopPIDFile(filepath.Join(pidDir, "charon.pid"), "charon")
-	}
 }
 
 // Available reports whether both daemon entry points are installed.
@@ -365,6 +304,8 @@ func (p *Process) wait(cmd *exec.Cmd, done chan struct{}, writer *procLogWriter,
 	}
 }
 
+// Stop verifies the two tracked parent daemons exited. It does not prove that
+// pppd descendants or final traffic accounting have drained.
 func (p *Process) Stop() error {
 	p.mu.Lock()
 	p.intentional.Store(true)
@@ -372,45 +313,53 @@ func (p *Process) Stop() error {
 	xl2tpdCmd, xl2tpdDone := p.xl2tpdCmd, p.xl2tpdDone
 	p.mu.Unlock()
 
-	if runtime.GOOS == "windows" {
-		if xl2tpdCmd != nil && xl2tpdCmd.Process != nil {
-			_ = xl2tpdCmd.Process.Kill()
+	type daemon struct {
+		name string
+		cmd  *exec.Cmd
+		done chan struct{}
+	}
+	daemons := []daemon{{"xl2tpd", xl2tpdCmd, xl2tpdDone}, {"strongSwan", ipsecCmd, ipsecDone}}
+	for _, d := range daemons {
+		if d.cmd == nil || d.cmd.Process == nil {
+			continue
 		}
-		if ipsecCmd != nil && ipsecCmd.Process != nil {
-			_ = ipsecCmd.Process.Kill()
+		if runtime.GOOS == "windows" {
+			_ = d.cmd.Process.Kill()
+		} else {
+			_ = d.cmd.Process.Signal(syscall.SIGTERM)
 		}
-		return nil
 	}
-	if xl2tpdCmd != nil && xl2tpdCmd.Process != nil {
-		_ = xl2tpdCmd.Process.Signal(syscall.SIGTERM)
+	var failures []error
+	for _, d := range daemons {
+		if d.cmd == nil || d.cmd.Process == nil {
+			continue
+		}
+		if d.done == nil {
+			_ = d.cmd.Process.Kill()
+			failures = append(failures, fmt.Errorf("%s: cannot verify daemon exit without a wait signal", d.name))
+			continue
+		}
+		if waitForDone(d.done, gracefulStopTimeout) {
+			continue
+		}
+		_ = d.cmd.Process.Kill()
+		if !waitForDone(d.done, forceStopTimeout) {
+			failures = append(failures, fmt.Errorf("%s: daemon exit was not observed after forced stop", d.name))
+		}
 	}
-	if ipsecCmd != nil && ipsecCmd.Process != nil {
-		_ = ipsecCmd.Process.Signal(syscall.SIGTERM)
-	}
-	waitForDone(xl2tpdDone, gracefulStopTimeout)
-	waitForDone(ipsecDone, gracefulStopTimeout)
-
-	p.mu.Lock()
-	stillXL2TPD := commandRunning(p.xl2tpdCmd, p.xl2tpdDone)
-	stillIPsec := commandRunning(p.ipsecCmd, p.ipsecDone)
-	if stillXL2TPD && p.xl2tpdCmd != nil && p.xl2tpdCmd.Process != nil {
-		_ = p.xl2tpdCmd.Process.Kill()
-	}
-	if stillIPsec && p.ipsecCmd != nil && p.ipsecCmd.Process != nil {
-		_ = p.ipsecCmd.Process.Kill()
-	}
-	p.mu.Unlock()
-	waitForDone(xl2tpdDone, forceStopTimeout)
-	waitForDone(ipsecDone, forceStopTimeout)
-	return nil
+	return errors.Join(failures...)
 }
 
-func waitForDone(done chan struct{}, timeout time.Duration) {
+func waitForDone(done chan struct{}, timeout time.Duration) bool {
 	if done == nil {
-		return
+		return false
 	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
 	case <-done:
-	case <-time.After(timeout):
+		return true
+	case <-timer.C:
+		return false
 	}
 }

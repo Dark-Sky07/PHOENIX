@@ -1,0 +1,246 @@
+package service
+
+import (
+	"fmt"
+	"sort"
+
+	"github.com/Dark-Sky07/phoenix/internal/database"
+	"github.com/Dark-Sky07/phoenix/internal/database/model"
+	"github.com/Dark-Sky07/phoenix/internal/xray"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+)
+
+// XrayTrafficIdentity binds a journaled delta to the database identities and
+// ownership observed when the batch was prepared. It is not a distributed lock.
+type XrayTrafficIdentity struct {
+	Email       string `json:"email"`
+	ClientIDs   []int  `json:"clientIds"`
+	TrafficIDs  []int  `json:"trafficIds"`
+	ResellerIDs []int  `json:"resellerIds"`
+}
+
+func (s *InboundService) CaptureXrayTrafficIdentities(traffic []*xray.ClientTraffic) ([]XrayTrafficIdentity, error) {
+	return captureXrayTrafficIdentities(database.GetDB(), traffic, false)
+}
+
+func captureXrayTrafficIdentities(db *gorm.DB, traffic []*xray.ClientTraffic, lockRows bool) ([]XrayTrafficIdentity, error) {
+	set := map[string]struct{}{}
+	for _, row := range traffic {
+		if row != nil && (row.Up != 0 || row.Down != 0) {
+			if key := transferEmailKey(row.Email); key != "" {
+				set[key] = struct{}{}
+			}
+		}
+	}
+	keys := make([]string, 0, len(set))
+	for key := range set {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	identities := make([]XrayTrafficIdentity, len(keys))
+	byEmail := make(map[string]*XrayTrafficIdentity, len(keys))
+	for i, key := range keys {
+		identities[i] = XrayTrafficIdentity{Email: key}
+		byEmail[key] = &identities[i]
+	}
+	for _, batch := range chunkStrings(keys, sqlInChunk) {
+		// PostgreSQL must keep existing identities stable until accounting
+		// commits. The capture before journaling is deliberately unlocked.
+		query := func() *gorm.DB {
+			q := db.Session(&gorm.Session{})
+			if lockRows {
+				q = q.Clauses(clause.Locking{Strength: "UPDATE"})
+			}
+			return q
+		}
+		var clients []model.ClientRecord
+		if err := query().Select("id", "email").Where("LOWER(TRIM(email)) IN ?", batch).Order("id").Find(&clients).Error; err != nil {
+			return nil, err
+		}
+		for _, c := range clients {
+			identity := byEmail[transferEmailKey(c.Email)]
+			if identity == nil {
+				return nil, fmt.Errorf("SQL and Go client identity normalization disagree; manual reconciliation required")
+			}
+			identity.ClientIDs = append(identity.ClientIDs, c.Id)
+		}
+		var counters []xray.ClientTraffic
+		if err := query().Select("id", "email").Where("LOWER(TRIM(email)) IN ?", batch).Order("id").Find(&counters).Error; err != nil {
+			return nil, err
+		}
+		for _, c := range counters {
+			identity := byEmail[transferEmailKey(c.Email)]
+			if identity == nil {
+				return nil, fmt.Errorf("SQL and Go traffic identity normalization disagree; manual reconciliation required")
+			}
+			identity.TrafficIDs = append(identity.TrafficIDs, c.Id)
+		}
+		var owners []model.ResellerClient
+		if err := query().Select("email", "reseller_id").Where("LOWER(TRIM(email)) IN ?", batch).Order("reseller_id, email").Find(&owners).Error; err != nil {
+			return nil, err
+		}
+		for _, c := range owners {
+			identity := byEmail[transferEmailKey(c.Email)]
+			if identity == nil {
+				return nil, fmt.Errorf("SQL and Go owner identity normalization disagree; manual reconciliation required")
+			}
+			identity.ResellerIDs = append(identity.ResellerIDs, c.ResellerId)
+		}
+	}
+	for i := range identities {
+		sort.Ints(identities[i].ClientIDs)
+		sort.Ints(identities[i].TrafficIDs)
+		sort.Ints(identities[i].ResellerIDs)
+	}
+	return identities, nil
+}
+
+// verifyXrayNormalizedIdentityCoverage refuses to apply a journal if SQL's
+// LOWER/TRIM lookup omitted any Go-normalized matching identity. The scans are
+// point-in-time observations; they do not lock against phantom insertions.
+func verifyXrayNormalizedIdentityCoverage(db *gorm.DB, identities []XrayTrafficIdentity) error {
+	if len(identities) == 0 {
+		return nil
+	}
+	seen := make(map[string]*XrayTrafficIdentity, len(identities))
+	for _, identity := range identities {
+		seen[identity.Email] = &XrayTrafficIdentity{Email: identity.Email}
+	}
+	var clients []model.ClientRecord
+	if err := db.Select("id", "email").Find(&clients).Error; err != nil {
+		return err
+	}
+	for _, row := range clients {
+		if i := seen[transferEmailKey(row.Email)]; i != nil {
+			i.ClientIDs = append(i.ClientIDs, row.Id)
+		}
+	}
+	var traffic []xray.ClientTraffic
+	if err := db.Select("id", "email").Find(&traffic).Error; err != nil {
+		return err
+	}
+	for _, row := range traffic {
+		if i := seen[transferEmailKey(row.Email)]; i != nil {
+			i.TrafficIDs = append(i.TrafficIDs, row.Id)
+		}
+	}
+	var owners []model.ResellerClient
+	if err := db.Select("email", "reseller_id").Find(&owners).Error; err != nil {
+		return err
+	}
+	for _, row := range owners {
+		if i := seen[transferEmailKey(row.Email)]; i != nil {
+			i.ResellerIDs = append(i.ResellerIDs, row.ResellerId)
+		}
+	}
+	for _, identity := range identities {
+		i := seen[identity.Email]
+		sort.Ints(i.ClientIDs)
+		sort.Ints(i.TrafficIDs)
+		sort.Ints(i.ResellerIDs)
+		if !equalIDs(i.ClientIDs, identity.ClientIDs) || !equalIDs(i.TrafficIDs, identity.TrafficIDs) || !equalIDs(i.ResellerIDs, identity.ResellerIDs) {
+			return fmt.Errorf("SQL and Go accounting identity normalization disagree for %q; manual reconciliation required", identity.Email)
+		}
+	}
+	return nil
+}
+
+// reconcileXrayTrafficIdentities keeps ordinary live deltas attached to their
+// observed identity. If a client was removed or transferred after the batch
+// was captured, a unique archived owner can safely receive the late bytes.
+// Ambiguous identities remain in the journal for manual reconciliation.
+func reconcileXrayTrafficIdentities(tx *gorm.DB, traffic []*xray.ClientTraffic, expected []XrayTrafficIdentity) ([]*xray.ClientTraffic, error) {
+	for _, row := range traffic {
+		if row != nil && (row.Up != 0 || row.Down != 0) && transferEmailKey(row.Email) == "" {
+			return nil, fmt.Errorf("Xray traffic has no accounting identity; manual reconciliation required")
+		}
+	}
+	actual, err := captureXrayTrafficIdentities(tx, traffic, true)
+	if err != nil {
+		return nil, err
+	}
+	if err := verifyXrayNormalizedIdentityCoverage(tx, actual); err != nil {
+		return nil, err
+	}
+	if len(actual) != len(expected) {
+		return nil, fmt.Errorf("Xray traffic identity set changed; manual reconciliation required")
+	}
+	deltas := make(map[string]int64, len(expected))
+	for _, row := range traffic {
+		if row == nil {
+			continue
+		}
+		if row.Up < 0 || row.Down < 0 {
+			return nil, fmt.Errorf("negative Xray traffic delta")
+		}
+		key := transferEmailKey(row.Email)
+		deltas[key] = saturatingAddBytes(deltas[key], saturatingAddBytes(row.Up, row.Down))
+	}
+	retired := make(map[string]struct{})
+	for i := range actual {
+		old, current := expected[i], actual[i]
+		if old.Email != current.Email {
+			return nil, fmt.Errorf("Xray traffic identity set changed; manual reconciliation required")
+		}
+		// Unchanged does not mean unambiguous: multiple case variants or a
+		// missing counter would otherwise double-charge or silently discard a
+		// reseller's usage. Keep the journal for manual reconciliation instead.
+		for _, identity := range []XrayTrafficIdentity{old, current} {
+			if len(identity.ResellerIDs) > 0 && (len(identity.ResellerIDs) != 1 || len(identity.ClientIDs) != 1 || len(identity.TrafficIDs) != 1) {
+				return nil, fmt.Errorf("ambiguous Xray reseller traffic identity for %q; manual reconciliation required", identity.Email)
+			}
+		}
+		if equalIDs(current.ClientIDs, old.ClientIDs) && equalIDs(current.TrafficIDs, old.TrafficIDs) && equalIDs(current.ResellerIDs, old.ResellerIDs) {
+			// A stable identity with zero or multiple destinations is still
+			// unsafe for non-reseller clients: addClientTraffic would discard
+			// the delta or apply it to every case variant.
+			if len(current.TrafficIDs) != 1 {
+				return nil, fmt.Errorf("ambiguous Xray traffic destination for %q; manual reconciliation required", current.Email)
+			}
+			continue
+		}
+		if len(old.ClientIDs) != 1 || len(old.TrafficIDs) != 1 || len(old.ResellerIDs) != 1 {
+			return nil, fmt.Errorf("Xray traffic identity or ownership changed for %q; manual reconciliation required", current.Email)
+		}
+		var archive model.ResellerTrafficArchive
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("reseller_id = ? AND client_record_id = ?", old.ResellerIDs[0], old.ClientIDs[0]).Take(&archive).Error; err != nil {
+			if err == gorm.ErrRecordNotFound {
+				return nil, fmt.Errorf("Xray traffic archive for %q missing; manual reconciliation required", current.Email)
+			}
+			return nil, err
+		}
+		if transferEmailKey(archive.Email) != old.Email {
+			return nil, fmt.Errorf("Xray traffic archive identity mismatch for %q; manual reconciliation required", current.Email)
+		}
+		if err := tx.Model(&model.ResellerTrafficArchive{}).Where("id = ?", archive.Id).Update("prior_consumed_bytes", saturatingAddBytes(archive.PriorConsumedBytes, deltas[current.Email])).Error; err != nil {
+			return nil, err
+		}
+		retired[current.Email] = struct{}{}
+	}
+	if len(retired) == 0 {
+		return traffic, nil
+	}
+	live := make([]*xray.ClientTraffic, 0, len(traffic))
+	for _, row := range traffic {
+		if row == nil {
+			continue
+		}
+		if _, ok := retired[transferEmailKey(row.Email)]; !ok {
+			live = append(live, row)
+		}
+	}
+	return live, nil
+}
+
+func equalIDs(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}

@@ -3,17 +3,20 @@ package pppvpn
 import (
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/Dark-Sky07/phoenix/internal/logger"
+)
+
+var (
+	pppGracefulStopTimeout = 5 * time.Second
+	pppForceStopTimeout    = 2 * time.Second
 )
 
 type lineLogger struct {
@@ -50,49 +53,6 @@ type Process struct {
 	log  *lineLogger
 }
 
-func stopOrphan(protocol Protocol, configPath string) {
-	if runtime.GOOS != "linux" {
-		return
-	}
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return
-	}
-	name := "pptpd"
-	if protocol == SSTP {
-		name = "sstpd"
-	}
-	for _, entry := range entries {
-		pid, err := strconv.Atoi(entry.Name())
-		if err != nil || pid <= 1 || pid == os.Getpid() {
-			continue
-		}
-		cmdline, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
-		if err != nil {
-			continue
-		}
-		line := string(cmdline)
-		if !strings.Contains(line, name) || !strings.Contains(line, configPath) {
-			continue
-		}
-		process, err := os.FindProcess(pid)
-		if err != nil {
-			continue
-		}
-		_ = process.Signal(syscall.SIGTERM)
-		deadline := time.Now().Add(3 * time.Second)
-		for time.Now().Before(deadline) {
-			if process.Signal(syscall.Signal(0)) != nil {
-				break
-			}
-			time.Sleep(50 * time.Millisecond)
-		}
-		if process.Signal(syscall.Signal(0)) == nil {
-			_ = process.Kill()
-		}
-	}
-}
-
 func daemonPath(protocol Protocol) (string, error) {
 	name := "pptpd"
 	if protocol == SSTP {
@@ -115,7 +75,21 @@ func (p *Process) Start(i Instance, configPath string) error {
 	if err != nil {
 		return err
 	}
-	stopOrphan(i.Protocol, configPath)
+	if runtime.GOOS == "linux" {
+		// The hooks intentionally use a fixed PATH, not the panel's PATH.
+		// Test those exact locations so a different executable in the panel
+		// environment cannot satisfy startup while hooks cannot find flock.
+		found := false
+		for _, dir := range []string{"/usr/sbin", "/usr/bin", "/sbin", "/bin"} {
+			if _, err := exec.LookPath(filepath.Join(dir, "flock")); err == nil {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return errors.New("pppvpn: flock is required for accounting hooks")
+		}
+	}
 	var cmd *exec.Cmd
 	if i.Protocol == PPTP {
 		cmd = exec.Command(bin, "--fg", "--conf", configPath)
@@ -165,12 +139,23 @@ func (p *Process) runningLocked() bool {
 }
 func (p *Process) IsRunning() bool { p.mu.Lock(); defer p.mu.Unlock(); return p.runningLocked() }
 
+// Stop waits for the supervised daemon's Wait goroutine, not merely for a
+// signal to be sent. This only covers the parent process; it is not evidence
+// that every pppd child, session, counter writer or traffic checkpoint drained.
 func (p *Process) Stop() error {
 	p.mu.Lock()
 	cmd, done := p.cmd, p.done
 	p.mu.Unlock()
-	if cmd == nil || cmd.Process == nil || done == nil {
+	if cmd == nil || cmd.Process == nil {
 		return nil
+	}
+	if done == nil {
+		return errors.New("pppvpn: cannot verify daemon exit without a wait signal")
+	}
+	select {
+	case <-done:
+		return nil
+	default:
 	}
 	if runtime.GOOS == "windows" {
 		_ = cmd.Process.Kill()
@@ -180,14 +165,15 @@ func (p *Process) Stop() error {
 	select {
 	case <-done:
 		return nil
-	case <-time.After(5 * time.Second):
+	case <-time.After(pppGracefulStopTimeout):
 		_ = cmd.Process.Kill()
 	}
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
+		return nil
+	case <-time.After(pppForceStopTimeout):
+		return errors.New("pppvpn: daemon exit was not observed after forced stop")
 	}
-	return nil
 }
 
 func processConfigPath(i Instance) string {

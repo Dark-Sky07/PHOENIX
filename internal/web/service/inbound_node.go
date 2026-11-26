@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"math/bits"
 	"sort"
 	"strings"
 	"sync"
@@ -158,6 +160,13 @@ func nodeEmailKey(email string) string {
 	return transferEmailKey(email)
 }
 
+// Compare nonnegative counter sums without overflowing int64.
+func nodeTrafficTotalLE(up, down, otherUp, otherDown int64) bool {
+	low, carry := bits.Add64(uint64(up), uint64(down), 0)
+	otherLow, otherCarry := bits.Add64(uint64(otherUp), uint64(otherDown), 0)
+	return carry < otherCarry || (carry == otherCarry && low <= otherLow)
+}
+
 func (s *InboundService) upsertNodeBaseline(tx *gorm.DB, nodeID int, email string, up, down int64) error {
 	email = strings.TrimSpace(email)
 	if email == "" {
@@ -181,19 +190,94 @@ func (s *InboundService) upsertNodeBaseline(tx *gorm.DB, nodeID int, email strin
 func (s *InboundService) SetRemoteTraffic(nodeID int, snap *runtime.TrafficSnapshot, dirty bool) (bool, error) {
 	var structuralChange bool
 	err := submitTrafficWrite(func() error {
+		if err := persistPendingNodeCounterIncident(database.GetDB(), nodeID); err != nil {
+			return err
+		}
+		if err := diskCounterIncidentError(); err != nil {
+			return err
+		}
 		var inner error
 		structuralChange, inner = s.setRemoteTrafficLocked(nodeID, snap, dirty)
+		var decrease *resellerNodeCounterDecrease
+		if errors.As(inner, &decrease) {
+			rememberNodeCounterDecrease(decrease)
+			return persistPendingNodeCounterIncident(database.GetDB(), nodeID)
+		}
 		return inner
 	})
 	return structuralChange, err
 }
 
 func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.TrafficSnapshot, dirty bool) (bool, error) {
+	return s.setRemoteTrafficTransaction(nodeID, snap, dirty, nil)
+}
+
+// beforeMerge is used by the authenticated path to advance its sequence in
+// the same transaction as the accounting writes. A failure rolls back both.
+func (s *InboundService) setRemoteTrafficTransaction(nodeID int, snap *runtime.TrafficSnapshot, dirty bool, beforeMerge func(*gorm.DB) error) (bool, error) {
 	if snap == nil || nodeID <= 0 {
 		return false, nil
 	}
-	db := database.GetDB()
+	// Baselines, mirrored rows, and their associated writes must see the same
+	// transaction. The allocation lock remains required for cross-process
+	// serialization with other participating accounting paths.
+	tx := database.GetDB().Begin()
+	if tx.Error != nil {
+		return false, tx.Error
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			tx.Rollback()
+		}
+	}()
+	if beforeMerge == nil {
+		// Once a node receiver is provisioned, no legacy call may bypass it,
+		// including stale job state or a caller outside the sync job.
+		var registered int64
+		if err := tx.Model(&model.TrafficSnapshotReceiver{}).Where("id = ?", fmt.Sprintf("node-inbound:%d", nodeID)).Count(&registered).Error; err != nil {
+			return false, err
+		}
+		if registered != 0 {
+			return false, errors.New("legacy node snapshot rejected for registered verified receiver")
+		}
+	}
+	if beforeMerge != nil {
+		if err := beforeMerge(tx); err != nil {
+			return false, err
+		}
+	}
 	now := time.Now().UnixMilli()
+	// Validate the whole snapshot before any baseline or database mutation.
+	// A malformed counter must not turn into a reset or partially advance a
+	// node's baseline, since doing so could erase or double-charge usage.
+	snapshotEmails := make(map[string]bool)
+	reported := make(map[string]nodeTrafficCounter)
+	for _, inbound := range snap.Inbounds {
+		if inbound == nil {
+			return false, errors.New("nil node inbound snapshot")
+		}
+		if inbound.Up < 0 || inbound.Down < 0 {
+			return false, fmt.Errorf("negative node inbound traffic for %q", inbound.Tag)
+		}
+		seen := make(map[string]bool)
+		for _, traffic := range inbound.ClientStats {
+			key := nodeEmailKey(traffic.Email)
+			if key == "" || traffic.Up < 0 || traffic.Down < 0 {
+				return false, fmt.Errorf("invalid node client traffic for inbound %q", inbound.Tag)
+			}
+			if seen[key] {
+				return false, fmt.Errorf("duplicate node client traffic for %q", key)
+			}
+			seen[key] = true
+			counter := nodeTrafficCounter{Up: traffic.Up, Down: traffic.Down}
+			if previous, exists := reported[key]; exists && previous != counter {
+				return false, fmt.Errorf("conflicting node counters for %q require reconciliation", key)
+			}
+			reported[key] = counter
+			snapshotEmails[key] = true
+		}
+	}
 
 	// originGuidFor attributes a synced inbound to the panel that physically
 	// hosts it: inbounds the node forwards from its own sub-nodes already carry
@@ -202,7 +286,7 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 	// empty result (old-build node with no GUID yet) leaves attribution to the
 	// node_id fallback downstream (#4983).
 	var nodeRow model.Node
-	db.Select("guid").Where("id = ?", nodeID).First(&nodeRow)
+	tx.Select("guid").Where("id = ?", nodeID).First(&nodeRow)
 	originGuidFor := func(snapIb *model.Inbound) string {
 		if snapIb.OriginNodeGuid != "" {
 			return snapIb.OriginNodeGuid
@@ -211,7 +295,7 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 	}
 
 	var central []model.Inbound
-	if err := db.Model(model.Inbound{}).
+	if err := tx.Model(model.Inbound{}).
 		Where("node_id = ?", nodeID).
 		Find(&central).Error; err != nil {
 		return false, err
@@ -238,7 +322,7 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 		for i := range central {
 			ids = append(ids, central[i].Id)
 		}
-		if err := db.Model(xray.ClientTraffic{}).
+		if err := tx.Model(xray.ClientTraffic{}).
 			Where("inbound_id IN ?", ids).
 			Find(&centralClientStats).Error; err != nil {
 			return false, err
@@ -258,22 +342,40 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 
 	nodeBaselines := make(map[string]nodeTrafficCounter)
 	var baselineRows []model.NodeClientTraffic
-	if err := db.Model(&model.NodeClientTraffic{}).
+	if err := tx.Model(&model.NodeClientTraffic{}).
 		Where("node_id = ?", nodeID).
 		Find(&baselineRows).Error; err != nil {
 		return false, err
 	}
 	for i := range baselineRows {
-		nodeBaselines[nodeEmailKey(baselineRows[i].Email)] = nodeTrafficCounter{Up: baselineRows[i].Up, Down: baselineRows[i].Down}
+		key := nodeEmailKey(baselineRows[i].Email)
+		if snapshotEmails[key] {
+			if baselineRows[i].Up < 0 || baselineRows[i].Down < 0 {
+				return false, fmt.Errorf("negative node baseline for %q requires reconciliation", key)
+			}
+			if _, exists := nodeBaselines[key]; exists {
+				return false, fmt.Errorf("ambiguous node baseline for %q requires reconciliation", key)
+			}
+		}
+		nodeBaselines[key] = nodeTrafficCounter{Up: baselineRows[i].Up, Down: baselineRows[i].Down}
 	}
 
-	var existingEmailsList []string
-	if err := db.Model(xray.ClientTraffic{}).Pluck("email", &existingEmailsList).Error; err != nil {
+	var existingRows []xray.ClientTraffic
+	if err := tx.Model(xray.ClientTraffic{}).Select("email", "up", "down").Find(&existingRows).Error; err != nil {
 		return false, err
 	}
-	existingEmails := make(map[string]struct{}, len(existingEmailsList))
-	for _, e := range existingEmailsList {
-		existingEmails[nodeEmailKey(e)] = struct{}{}
+	existingEmails := make(map[string]struct{}, len(existingRows))
+	for _, row := range existingRows {
+		key := nodeEmailKey(row.Email)
+		if snapshotEmails[key] {
+			if row.Up < 0 || row.Down < 0 {
+				return false, fmt.Errorf("negative client traffic for %q requires reconciliation", key)
+			}
+			if _, exists := existingEmails[key]; exists {
+				return false, fmt.Errorf("ambiguous client traffic for %q requires reconciliation", key)
+			}
+		}
+		existingEmails[key] = struct{}{}
 	}
 
 	var defaultUserId int
@@ -281,7 +383,7 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 		defaultUserId = central[0].UserId
 	} else {
 		var u model.User
-		if err := db.Model(model.User{}).Order("id asc").First(&u).Error; err == nil {
+		if err := tx.Model(model.User{}).Order("id asc").First(&u).Error; err == nil {
 			defaultUserId = u.Id
 		} else {
 			defaultUserId = 1
@@ -306,13 +408,9 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 		}
 	}
 
-	tx := db.Begin()
-	committed := false
-	defer func() {
-		if !committed {
-			tx.Rollback()
-		}
-	}()
+	if err := validateNodeResellerSnapshot(tx, nodeID, snap, tagToCentral, dirty); err != nil {
+		return false, err
+	}
 
 	structuralChange := false
 
@@ -358,10 +456,16 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 			}
 			chosenTag, err := pickFreeTag()
 			if err != nil {
+				if beforeMerge != nil {
+					return false, err
+				}
 				logger.Warningf("setRemoteTraffic: check tag %q failed: %v", snapIb.Tag, err)
 				continue
 			}
 			if chosenTag == "" {
+				if beforeMerge != nil {
+					return false, fmt.Errorf("node inbound tag %q conflicts", snapIb.Tag)
+				}
 				key := fmt.Sprintf("%d:%s", nodeID, snapIb.Tag)
 				if _, seen := reportedRemoteTagConflict.LoadOrStore(key, struct{}{}); !seen {
 					logger.Warningf(
@@ -394,6 +498,9 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 				ShareAddrStrategy:    "node",
 			}
 			if err := tx.Create(&newIb).Error; err != nil {
+				if beforeMerge != nil {
+					return false, err
+				}
 				logger.Warningf("setRemoteTraffic: create central inbound for tag %q failed: %v", snapIb.Tag, err)
 				continue
 			}
@@ -423,7 +530,10 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 			updates["traffic_reset"] = snapIb.TrafficReset
 			updates["last_traffic_reset_time"] = snapIb.LastTrafficResetTime
 		}
-		if !inGrace || (snapIb.Up+snapIb.Down) <= (c.Up+c.Down) {
+		if inGrace && (c.Up < 0 || c.Down < 0) {
+			return false, fmt.Errorf("negative stored inbound traffic for %q requires reconciliation", c.Tag)
+		}
+		if !inGrace || nodeTrafficTotalLE(snapIb.Up, snapIb.Down, c.Up, c.Down) {
 			updates["up"] = snapIb.Up
 			updates["down"] = snapIb.Down
 		}
@@ -489,7 +599,7 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 			// email's last inbound — wiping it while a sibling still feeds it
 			// loses the summed history, and the next node sync would re-seed the
 			// row with that node's counter alone.
-			sharedEmails, sErr := s.emailsUsedByOtherInbounds(goneEmails, c.Id)
+			sharedEmails, sErr := emailsUsedByOtherInboundsDB(tx, goneEmails, c.Id)
 			if sErr != nil {
 				return false, sErr
 			}
@@ -588,13 +698,16 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 			if err := tx.Exec(
 				fmt.Sprintf(
 					`UPDATE client_traffics
-					 SET up = up + ?, down = down + ?, enable = %s, total = ?, expiry_time = ?, reset = ?,
+					 SET up = CASE WHEN up < 0 OR up > ? THEN ? ELSE up + ? END,
+					     down = CASE WHEN down < 0 OR down > ? THEN ? ELSE down + ? END,
+					     enable = %s, total = ?, expiry_time = ?, reset = ?,
 					     last_online = %s
 					 WHERE LOWER(TRIM(email)) = LOWER(?)`,
 					enableExpr,
 					database.GreatestExpr("last_online", "?"),
 				),
-				deltaUp, deltaDown, cs.Enable, cs.Total, cs.ExpiryTime, cs.Reset,
+				int64(math.MaxInt64)-deltaUp, int64(math.MaxInt64), deltaUp,
+				int64(math.MaxInt64)-deltaDown, int64(math.MaxInt64), deltaDown, cs.Enable, cs.Total, cs.ExpiryTime, cs.Reset,
 				cs.LastOnline, email,
 			).Error; err != nil {
 				return false, err
@@ -628,7 +741,7 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 			}
 			// Same shared-accumulator rule as the inbound-removal sweep above:
 			// keep the row while another inbound still references the email.
-			stillUsed, uErr := s.emailUsedByOtherInbounds(existing.Email, c.Id)
+			stillUsed, uErr := emailUsedByOtherInboundsDB(tx, existing.Email, c.Id)
 			if uErr != nil {
 				return false, uErr
 			}
@@ -670,10 +783,15 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 				}
 			}
 			perInboundOld = append(perInboundOld, oldSet{inboundID: c.Id, emails: oldEmails})
+		} else if beforeMerge != nil {
+			return false, err
 		}
 
 		clients, gcErr := s.GetClients(snapIb)
 		if gcErr != nil {
+			if beforeMerge != nil {
+				return false, gcErr
+			}
 			logger.Warningf("setRemoteTraffic: parse clients for tag %q failed: %v", snapIb.Tag, gcErr)
 			continue
 		}
@@ -715,10 +833,12 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 						filtered[i].Comment = cmt
 					}
 				}
+			} else if beforeMerge != nil {
+				return false, err
 			}
 		}
-		if err := s.clientService.SyncInbound(tx, c.Id, filtered); err != nil {
-			logger.Warningf("setRemoteTraffic: sync clients for tag %q failed: %v", snapIb.Tag, err)
+		if err := s.clientService.syncNodeInbound(tx, c.Id, filtered); err != nil {
+			return false, fmt.Errorf("sync node clients for tag %q: %w", snapIb.Tag, err)
 		}
 	}
 
@@ -728,6 +848,9 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 			Joins("JOIN client_inbounds ON client_inbounds.client_id = clients.id").
 			Where("client_inbounds.inbound_id = ?", old.inboundID).
 			Pluck("email", &stillAttached).Error; err != nil {
+			if beforeMerge != nil {
+				return false, err
+			}
 			continue
 		}
 		stillSet := make(map[string]struct{}, len(stillAttached))
@@ -745,18 +868,40 @@ func (s *InboundService) setRemoteTrafficLocked(nodeID int, snap *runtime.Traffi
 				Joins("JOIN clients ON clients.id = client_inbounds.client_id").
 				Where("LOWER(TRIM(clients.email)) = LOWER(?)", email).
 				Count(&attachmentCount).Error; err != nil {
+				if beforeMerge != nil {
+					return false, err
+				}
 				continue
 			}
 			if attachmentCount > 0 {
 				continue
 			}
+			// A missing link is not proof that a reseller client can be
+			// discarded. In particular the following baseline deletion spans
+			// all nodes, including nodes not represented by this snapshot.
+			var ownerCount int64
+			if err := tx.Model(&model.ResellerClient{}).Where("LOWER(TRIM(email)) = LOWER(?)", email).Count(&ownerCount).Error; err != nil {
+				return false, err
+			}
+			if ownerCount > 0 {
+				return false, fmt.Errorf("detached reseller client %q requires manual reconciliation", email)
+			}
 			if err := tx.Where("LOWER(TRIM(email)) = LOWER(?)", email).Delete(&model.ClientRecord{}).Error; err != nil {
+				if beforeMerge != nil {
+					return false, err
+				}
 				logger.Warningf("setRemoteTraffic: delete ClientRecord %q failed: %v", email, err)
 			}
 			if err := tx.Where("LOWER(TRIM(email)) = LOWER(?)", email).Delete(&xray.ClientTraffic{}).Error; err != nil {
+				if beforeMerge != nil {
+					return false, err
+				}
 				logger.Warningf("setRemoteTraffic: delete ClientTraffic %q failed: %v", email, err)
 			}
 			if err := tx.Where("LOWER(TRIM(email)) = LOWER(?)", email).Delete(&model.NodeClientTraffic{}).Error; err != nil {
+				if beforeMerge != nil {
+					return false, err
+				}
 				logger.Warningf("setRemoteTraffic: delete NodeClientTraffic %q failed: %v", email, err)
 			}
 			structuralChange = true

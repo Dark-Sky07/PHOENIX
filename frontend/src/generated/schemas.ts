@@ -2417,6 +2417,10 @@ export const SCHEMAS: Record<string, unknown> = {
         "example": 86400,
         "type": "integer"
       },
+      "verifiedGlobalPush": {
+        "description": "Experimental rollout mode; ordinary node edits do not alter it. When\nenabled the sender never falls back to unversioned global traffic.",
+        "type": "boolean"
+      },
       "xrayError": {
         "type": "string"
       },
@@ -2461,6 +2465,7 @@ export const SCHEMAS: Record<string, unknown> = {
       "tlsVerifyMode",
       "updatedAt",
       "uptimeSecs",
+      "verifiedGlobalPush",
       "xrayError",
       "xrayState",
       "xrayVersion"

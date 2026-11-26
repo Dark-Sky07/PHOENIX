@@ -11,10 +11,14 @@
 package openvpn
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
+	"net"
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
 )
@@ -60,16 +64,14 @@ func (inst Instance) fingerprint() string {
 	clients := make([]string, len(inst.Clients))
 	copy(clients, inst.Clients)
 	sort.Strings(clients)
-	return strings.Join([]string{
-		strconv.Itoa(inst.Port),
-		inst.listenFor(),
-		inst.protoFor(),
-		strconv.FormatBool(inst.RedirectGw),
-		strconv.FormatBool(inst.PushDNS),
-		inst.dns1For(),
-		inst.dns2For(),
-		strings.Join(clients, ","),
-	}, "|")
+	encoded, _ := json.Marshal(struct {
+		Port                int
+		Listen, Proto       string
+		RedirectGw, PushDNS bool
+		DNS1, DNS2          string
+		Clients             []string
+	}{inst.Port, inst.listenFor(), inst.protoFor(), inst.RedirectGw, inst.PushDNS, inst.dns1For(), inst.dns2For(), clients})
+	return fmt.Sprintf("%x", sha256.Sum256(encoded))
 }
 
 func (inst Instance) listenFor() string {
@@ -100,8 +102,61 @@ func (inst Instance) dns2For() string {
 	return "8.8.8.8"
 }
 
-// serverSubnet returns the deterministic /24 client pool for this inbound so
-// two inbounds on the same host never hand out overlapping addresses.
+// safeConfigHost restricts unquoted OpenVPN host operands to IP literals or
+// ASCII DNS-like names. This rejects whitespace, comments, quotes and control
+// characters rather than trying to escape attacker-controlled directives.
+func safeConfigHost(host string) bool {
+	if host == "" || len(host) > 253 {
+		return false
+	}
+	ipHost := host
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		ipHost = host[1 : len(host)-1]
+	}
+	if net.ParseIP(ipHost) != nil {
+		return true
+	}
+	dnsHost := strings.TrimSuffix(host, ".") // permit fully qualified DNS names
+	for _, label := range strings.Split(dnsHost, ".") {
+		if len(label) == 0 || len(label) > 63 {
+			return false
+		}
+		for _, ch := range label {
+			if !(ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || ch == '-' || ch == '_') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func (inst Instance) validateRuntimeConfig() error {
+	if !validInboundID(inst.Id) {
+		return fmt.Errorf("openvpn: inbound ID %d cannot be assigned a unique legacy subnet", inst.Id)
+	}
+	if inst.Port < 1 || inst.Port > 65535 {
+		return fmt.Errorf("openvpn: invalid port %d", inst.Port)
+	}
+	for _, ch := range dataDirForID(inst.Id) {
+		if unicode.IsControl(ch) {
+			return fmt.Errorf("openvpn: control character in data directory")
+		}
+	}
+	if inst.listenFor() != "" && !safeConfigHost(inst.listenFor()) {
+		return fmt.Errorf("openvpn: invalid listen address")
+	}
+	if inst.PushDNS && (net.ParseIP(inst.dns1For()) == nil || net.ParseIP(inst.dns2For()) == nil) {
+		return fmt.Errorf("openvpn: DNS servers must be IP addresses")
+	}
+	return nil
+}
+
+// The legacy subnet scheme is injective only below 64000. Higher IDs alias
+// an earlier subnet because the third octet was historically clamped to 255.
+// Reject them instead of silently changing existing deployments' addresses.
+func validInboundID(id int) bool { return id > 0 && id < 64000 }
+
+// serverSubnet returns the legacy /24 for a validated inbound ID.
 func (inst Instance) serverSubnet() (network string, mask string) {
 	n := inst.Id % 250
 	o := inst.Id / 250
@@ -119,7 +174,7 @@ func (inst Instance) serverSubnetCIDR() string {
 // InstanceFromInbound derives a desired Instance from an openvpn inbound.
 // Returns false when the inbound is not a usable openvpn inbound.
 func InstanceFromInbound(ib *model.Inbound, clients []string) (Instance, bool) {
-	if ib == nil || ib.Protocol != model.OpenVPN {
+	if ib == nil || ib.Protocol != model.OpenVPN || !validInboundID(ib.Id) {
 		return Instance{}, false
 	}
 	var parsed struct {
@@ -144,7 +199,7 @@ func InstanceFromInbound(ib *model.Inbound, clients []string) (Instance, bool) {
 	if parsed.PushDNS != nil {
 		pushDNS = *parsed.PushDNS
 	}
-	return Instance{
+	inst := Instance{
 		Id:         ib.Id,
 		Tag:        ib.Tag,
 		Listen:     ib.Listen,
@@ -155,5 +210,9 @@ func InstanceFromInbound(ib *model.Inbound, clients []string) (Instance, bool) {
 		DNS1:       parsed.DNS1,
 		DNS2:       parsed.DNS2,
 		Clients:    clients,
-	}, true
+	}
+	if inst.validateRuntimeConfig() != nil {
+		return Instance{}, false
+	}
+	return inst, true
 }
