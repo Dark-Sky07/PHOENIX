@@ -454,3 +454,26 @@ func TestTrafficEvidenceMigrationPostgres(t *testing.T) {
 		t.Fatalf("OpenVPN checkpoint: %+v %v", ovpn, err)
 	}
 }
+
+func TestSourceMigrationQuiescence(t *testing.T) {
+	srcPath := t.TempDir() + "/source.db"
+	db, err := gorm.Open(sqlite.Open(srcPath), &gorm.Config{Logger: logger.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&model.XrayTrafficInFlight{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := SourceMigrationQuiescence(srcPath); err != nil {
+		t.Fatalf("empty source must be quiescent: %v", err)
+	}
+	if err := db.Create(&model.XrayTrafficInFlight{ID: "in-flight-batch"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if pool, err := db.DB(); err == nil {
+		_ = pool.Close()
+	}
+	if err := SourceMigrationQuiescence(srcPath); err == nil {
+		t.Fatal("active poll marker did not block migration")
+	}
+}
