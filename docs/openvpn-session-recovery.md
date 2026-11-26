@@ -36,8 +36,8 @@ disconnect hook resolves that record by common name, peer address/port and
 generation; duplicate or missing admission records fail closed. The `.close`
 record contains the final absolute received/sent counters. Files are fsynced,
 published with a hard link and never overwritten. `.connect.*` /
-`.disconnect.*` files mean a hook was interrupted; keep them as evidence until
-reviewed. The allowlist contains
+`.disconnect.*` files mean a hook was interrupted; they also fence
+quota-sensitive operations until reviewed, and must be kept as evidence. The allowlist contains
 colon-separated certificate SHA-256 digests accepted for **new** client
 authentication. The revision-independent `client-revocations` deny list is
 written before the allowlist and survives a daemon restart or re-attachment;

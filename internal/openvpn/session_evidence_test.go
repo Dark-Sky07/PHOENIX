@@ -347,3 +347,35 @@ func TestSessionEvidenceDuplicateAdmissionFailsClosed(t *testing.T) {
 		t.Fatal("duplicate admission left no incident")
 	}
 }
+
+func TestSessionEvidenceStagingAndRevocationFaultsFailClosed(t *testing.T) {
+	dir, _ := setupEvidenceTest(t, 749, "hana@example.test")
+	records := filepath.Join(dir, evidenceRoot, evidenceRecords)
+	staged := filepath.Join(records, ".connect.interrupted")
+	if err := os.WriteFile(staged, []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if sessions, err := CollectSessionEvidence(); err == nil || len(sessions) != 0 {
+		t.Fatalf("interrupted staging file was ignored: %v %v", sessions, err)
+	}
+	if err := CheckClientSessionEvidence([]string{"hana@example.test"}); err == nil {
+		t.Fatal("interrupted staging file did not fence client operations")
+	}
+	if err := os.Remove(staged); err != nil {
+		t.Fatal(err)
+	}
+	if sessions, err := CollectSessionEvidence(); err != nil || len(sessions) != 0 {
+		t.Fatalf("cleanup did not restore evidence collection: %v %v", sessions, err)
+	}
+
+	inst := Instance{Id: 749, Port: 1194, Clients: []string{"hana@example.test"}}
+	if err := os.WriteFile(confPathForID(inst.Id), []byte(renderServerConf(inst, 12345)), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "client-revocations"), []byte("not-a-digest\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckSessionEvidenceIncidents(); err == nil {
+		t.Fatal("malformed revocation state was treated as clear")
+	}
+}

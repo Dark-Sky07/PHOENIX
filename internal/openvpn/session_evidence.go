@@ -563,6 +563,21 @@ func CheckSessionEvidenceIncidents() error {
 		if len(files) > 0 {
 			return fmt.Errorf("openvpn: %d unresolved session evidence incident(s) for inbound %s require manual review", len(files), entry.Name())
 		}
+		// A hook interrupted while staging a record leaves a visible file.
+		// Quota-sensitive checks must see it even when accounting collection
+		// has not run yet, and must not interpret it as a completed session.
+		records := filepath.Join(entry.Name(), evidenceRoot, evidenceRecords)
+		staged, err := fs.ReadDir(root.FS(), records)
+		if errors.Is(err, os.ErrNotExist) {
+			staged = nil
+		} else if err != nil {
+			return err
+		}
+		for _, file := range staged {
+			if strings.HasPrefix(file.Name(), ".connect.") || strings.HasPrefix(file.Name(), ".disconnect.") || strings.HasPrefix(file.Name(), ".tmp.") {
+				return fmt.Errorf("openvpn: inbound %s has unfinished hook evidence %s; manual review required", entry.Name(), file.Name())
+			}
+		}
 		// A configured daemon whose authorization files disappeared must be
 		// visible to operators even though tls-verify itself fails closed.
 		conf := filepath.Join(entry.Name(), "openvpn.conf")
