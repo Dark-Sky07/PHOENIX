@@ -5379,6 +5379,126 @@
         }
       }
     },
+    "/panel/api/server/stopPPPVPNService": {
+      "post": {
+        "tags": [
+          "Server"
+        ],
+        "summary": "Stop all managed SSTP/PPTP daemons and hold reconciliation until the service is started again.",
+        "operationId": "post_panel_api_server_stopPPPVPNService",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/server/startPPPVPNService": {
+      "post": {
+        "tags": [
+          "Server"
+        ],
+        "summary": "Resume managed SSTP/PPTP reconciliation and reconcile enabled inbounds immediately.",
+        "operationId": "post_panel_api_server_startPPPVPNService",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/server/restartPPPVPNService": {
+      "post": {
+        "tags": [
+          "Server"
+        ],
+        "summary": "Stop and start the managed SSTP/PPTP daemons using the current inbound configuration.",
+        "operationId": "post_panel_api_server_restartPPPVPNService",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/server/updatePPPVPNService": {
+      "post": {
+        "tags": [
+          "Server"
+        ],
+        "summary": "Resume SSTP/PPTP reconciliation and apply the current inbound configuration.",
+        "operationId": "post_panel_api_server_updatePPPVPNService",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/panel/api/server/installXray/{version}": {
       "post": {
         "tags": [

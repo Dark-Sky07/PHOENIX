@@ -141,6 +141,7 @@ interface ServicePanelProps {
   onOpenLogs: () => void;
   openvpn: DaemonHandlers;
   l2tp: DaemonHandlers;
+  pppvpn: DaemonHandlers;
 }
 
 export interface DaemonHandlers {
@@ -163,7 +164,7 @@ function daemonActions(t: Translate, info: DaemonInfo, handlers: DaemonHandlers)
   ];
 }
 
-/** Xray / OpenVPN / L2TP at a glance, with the same controls the old cards had. */
+/** Xray / OpenVPN / L2TP / SSTP-PPTP at a glance, with the same controls the old cards had. */
 export default function ServicePanel({
   status,
   accessLogEnable,
@@ -175,6 +176,7 @@ export default function ServicePanel({
   onOpenLogs,
   openvpn,
   l2tp,
+  pppvpn,
 }: ServicePanelProps) {
   const { t } = useTranslation();
   const tr: Translate = (key, fallback) => t(key, fallback);
@@ -242,6 +244,15 @@ export default function ServicePanel({
         errorMsg={status.l2tp.errorMsg}
         meta={daemonMeta(status.l2tp)}
         actions={daemonActions(tr, status.l2tp, l2tp)}
+        onOpenLogs={onOpenLogs}
+      />
+      <ServiceRow
+        icon={<ApiOutlined />}
+        name="SSTP / PPTP"
+        state={status.pppvpn.state}
+        errorMsg={status.pppvpn.errorMsg}
+        meta={daemonMeta(status.pppvpn)}
+        actions={daemonActions(tr, status.pppvpn, pppvpn)}
         onOpenLogs={onOpenLogs}
       />
     </Card>

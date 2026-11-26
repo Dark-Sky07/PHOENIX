@@ -200,6 +200,26 @@ export default function IndexPage() {
     await refresh();
   }, [refresh]);
 
+  const stopPPPVPN = useCallback(async () => {
+    await HttpUtil.post('/panel/api/server/stopPPPVPNService');
+    await refresh();
+  }, [refresh]);
+
+  const startPPPVPN = useCallback(async () => {
+    await HttpUtil.post('/panel/api/server/startPPPVPNService');
+    await refresh();
+  }, [refresh]);
+
+  const restartPPPVPN = useCallback(async () => {
+    await HttpUtil.post('/panel/api/server/restartPPPVPNService');
+    await refresh();
+  }, [refresh]);
+
+  const updatePPPVPN = useCallback(async () => {
+    await HttpUtil.post('/panel/api/server/updatePPPVPNService');
+    await refresh();
+  }, [refresh]);
+
   function openPanelVersion() {
     setPanelUpdateOpen(true);
   }
@@ -252,12 +272,16 @@ export default function IndexPage() {
   const l2tpHandlers = useMemo(() => ({
     onStart: startL2TP, onStop: stopL2TP, onRestart: restartL2TP, onUpdate: updateL2TP,
   }), [startL2TP, stopL2TP, restartL2TP, updateL2TP]);
+  const pppvpnHandlers = useMemo(() => ({
+    onStart: startPPPVPN, onStop: stopPPPVPN, onRestart: restartPPPVPN, onUpdate: updatePPPVPN,
+  }), [startPPPVPN, stopPPPVPN, restartPPPVPN, updatePPPVPN]);
 
   const xrayVersionLabel = status.xray.version && status.xray.version !== 'Unknown' ? `v${status.xray.version}` : '';
   const services: { key: string; name: string; state: string }[] = [
     { key: 'xray', name: 'Xray', state: status.xray.state },
     { key: 'openvpn', name: 'OpenVPN', state: status.openvpn.state },
     { key: 'l2tp', name: 'L2TP', state: status.l2tp.state },
+    { key: 'pppvpn', name: 'SSTP / PPTP', state: status.pppvpn.state },
   ];
 
   const cpuDetails = (
@@ -432,6 +456,7 @@ export default function IndexPage() {
                       onOpenLogs={() => setLogsOpen(true)}
                       openvpn={openvpnHandlers}
                       l2tp={l2tpHandlers}
+                      pppvpn={pppvpnHandlers}
                     />
                     <NetworkPanel
                       status={status}

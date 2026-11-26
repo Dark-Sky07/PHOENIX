@@ -76,6 +76,7 @@ export const StatusSchema = z.object({
   xray: XrayInfoSchema.optional(),
   openvpn: DaemonInfoSchema.optional(),
   l2tp: DaemonInfoSchema.optional(),
+  pppvpn: DaemonInfoSchema.optional(),
 });
 
 export type StatusInput = z.infer<typeof StatusSchema>;
