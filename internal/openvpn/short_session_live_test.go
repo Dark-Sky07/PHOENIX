@@ -32,6 +32,7 @@ func TestRealOpenVPNShortSessionBetweenPolls(t *testing.T) {
 	if err := writeConfig(inst, 31395); err != nil {
 		t.Fatal(err)
 	}
+	stripProductionHooks(t, inst)
 	dir := t.TempDir()
 	record := filepath.Join(dir, "disconnect")
 	hook := filepath.Join(dir, "hook")

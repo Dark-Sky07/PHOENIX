@@ -35,6 +35,9 @@ type managed struct {
 	fingerprint string
 	mgmtPort    int
 	clients     []string
+	// generation identifies this daemon epoch; hook evidence is bound to it
+	// so a reused CID or session value cannot be attributed to a new daemon.
+	generation string
 
 	// Last observed cumulative counters per client CN; deltas are computed
 	// against these each round. Reset handling (daemon restart zeroes the
@@ -157,7 +160,11 @@ func (m *Manager) ensureLocked(inst Instance) error {
 	}
 
 	if err := pruneClientCertsLocked(dir, inst.Clients); err != nil {
-		logger.Warningf("openvpn: inbound %d: prune client certs failed: %v", inst.Id, err)
+		return fmt.Errorf("archive and prune client certificates: %w", err)
+	}
+	generation, err := rotateDaemonGeneration(dir)
+	if err != nil {
+		return fmt.Errorf("create daemon generation: %w", err)
 	}
 
 	mgmtPort, err := FreeLocalPort()
@@ -189,6 +196,7 @@ func (m *Manager) ensureLocked(inst Instance) error {
 		fingerprint: fp,
 		mgmtPort:    mgmtPort,
 		clients:     inst.Clients,
+		generation:  generation,
 		lastRx:      map[string]int64{},
 		lastTx:      map[string]int64{},
 		online:      map[string]bool{},
@@ -364,6 +372,19 @@ func (m *Manager) Status() RuntimeStatus {
 		}
 		status.Error += "OpenVPN daemon stopped or session changed, disappeared or counters decreased; final usage is unverified"
 	}
+	// Durable hook evidence survives a panel restart; process-local warnings
+	// do not. Do not expose filesystem paths or client identities in status.
+	if err := CheckSessionEvidenceIncidents(); err != nil {
+		if status.Error != "" {
+			status.Error += "\n"
+		}
+		status.Error += "OpenVPN session evidence incident requires manual review"
+	} else if pending, err := PendingSessionEvidence(); err == nil && pending > 0 {
+		if status.Error != "" {
+			status.Error += "\n"
+		}
+		status.Error += "OpenVPN sessions without final usage evidence require review"
+	}
 	seen := make(map[string]struct{})
 	for _, cur := range m.procs {
 		if cur.proc != nil && cur.proc.IsRunning() {
@@ -480,6 +501,12 @@ func (m *Manager) CollectTrafficWithErrors() (inbounds []InboundTraffic, clients
 	}
 	m.mu.Unlock()
 
+	// A session with durable hook evidence is billed from its final absolute
+	// counters, not from management deltas. Counting both would charge the
+	// same bytes twice; a session whose final evidence never arrives remains
+	// an incident rather than being reconstructed from a guess.
+	activeSessions := ActiveSessionEmails()
+
 	for _, p := range probes {
 		// The socket query deliberately runs without m.mu. Once it returns,
 		// reacquire m.mu and verify that reconcile has not replaced this managed
@@ -557,12 +584,15 @@ func (m *Manager) CollectTrafficWithErrors() (inbounds []InboundTraffic, clients
 			}
 			up += dRx
 			down += dTx
+			newRx[cn], newTx[cn], newID[cn] = c.Rx, c.Tx, c.ID
+			if activeSessions[cn] {
+				continue
+			}
 			if dRx > 0 || dTx > 0 {
 				stagedClients = append(stagedClients, ClientTrafficDelta{
 					InboundId: p.id, Email: cn, Up: dRx, Down: dTx,
 				})
 			}
-			newRx[cn], newTx[cn], newID[cn] = c.Rx, c.Tx, c.ID
 		}
 		if overflow {
 			pollErr = errors.Join(pollErr, fmt.Errorf("inbound %d: management traffic delta sum exceeds supported range", p.id))

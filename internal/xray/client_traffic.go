@@ -24,4 +24,11 @@ type ClientTraffic struct {
 	PPPInboundID int    `json:"-" gorm:"-"`
 	PPPRxBytes   int64  `json:"-" gorm:"-"`
 	PPPTxBytes   int64  `json:"-" gorm:"-"`
+	// OpenVPN fields carry absolute counters from durable disconnect hooks.
+	// They are checkpointed by session ID in the traffic transaction and are
+	// never stored on client_traffics.
+	OpenVPNSessionID string `json:"-" gorm:"-"`
+	OpenVPNInboundID int    `json:"-" gorm:"-"`
+	OpenVPNRxBytes   int64  `json:"-" gorm:"-"`
+	OpenVPNTxBytes   int64  `json:"-" gorm:"-"`
 }

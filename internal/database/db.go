@@ -79,6 +79,7 @@ func initModels() error {
 		&model.ResellerNodeCounterIncident{},
 		&model.ClientGlobalTraffic{},
 		&model.PPPClientTrafficCounter{},
+		&model.OpenVPNSessionCounter{},
 		&model.OutboundSubscription{},
 		&model.Reseller{},
 		&model.ResellerInbound{},

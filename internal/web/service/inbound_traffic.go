@@ -39,6 +39,21 @@ func (s *InboundService) AddPPPTrafficUnderAllocationLock(markerID string, clien
 	return s.addTrafficBatchWithMarker("", nil, clients, nil, true, markerID)
 }
 
+// AddOpenVPNSessionTrafficUnderAllocationLock commits absolute counters from
+// a durable OpenVPN disconnect record. The caller must hold the allocation
+// lock and an in-flight poll marker until this method returns.
+func (s *InboundService) AddOpenVPNSessionTrafficUnderAllocationLock(markerID string, clients []*xray.ClientTraffic) (bool, bool, error) {
+	if markerID == "" {
+		return false, false, errors.New("OpenVPN session poll marker required")
+	}
+	for _, client := range clients {
+		if client == nil || client.OpenVPNSessionID == "" {
+			return false, false, errors.New("OpenVPN session sample requires a checkpoint identity")
+		}
+	}
+	return s.addTrafficBatchWithMarker("", nil, clients, nil, true, markerID)
+}
+
 // AddXrayTrafficBatch makes retries after an uncertain database commit
 // idempotent. The receipt and counters commit in the same transaction.
 func (s *InboundService) AddXrayTrafficBatch(id string, inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic) (bool, bool, error) {
@@ -96,7 +111,7 @@ func (s *InboundService) addTrafficBatchWithMarker(id string, inboundTraffics []
 // digest binds retries to their committed transaction, not to a trusted sender.
 func xrayTrafficPayloadHash(id string, inbounds []*xray.Traffic, clients []*xray.ClientTraffic, identities []XrayTrafficIdentity) (string, error) {
 	for _, client := range clients {
-		if client != nil && (client.PPPSessionID != "" || client.PPPInboundID != 0 || client.PPPRxBytes != 0 || client.PPPTxBytes != 0 || client.TuicTrafficID != 0 || client.TuicUUID != "" || client.TuicInboundId != 0) {
+		if client != nil && (client.PPPSessionID != "" || client.PPPInboundID != 0 || client.PPPRxBytes != 0 || client.PPPTxBytes != 0 || client.OpenVPNSessionID != "" || client.OpenVPNInboundID != 0 || client.OpenVPNRxBytes != 0 || client.OpenVPNTxBytes != 0 || client.TuicTrafficID != 0 || client.TuicUUID != "" || client.TuicInboundId != 0) {
 			return "", errors.New("Xray receipt payload contains nonserializable protocol fields")
 		}
 	}
@@ -262,6 +277,9 @@ func (s *InboundService) addClientTraffic(tx *gorm.DB, traffics []*xray.ClientTr
 	if err := validatePPPAccountingDestinations(tx, traffics); err != nil {
 		return fmt.Errorf("verify PPP accounting destinations: %w", err)
 	}
+	if err := validateOpenVPNAccountingDestinations(tx, traffics); err != nil {
+		return fmt.Errorf("verify OpenVPN accounting destinations: %w", err)
+	}
 	// Periodic TUIC samples previously discarded a deleted traffic ID or
 	// charged every normalized email match. Reject the entire transaction so
 	// the collector can requeue its still-uncommitted runtime deltas.
@@ -277,6 +295,10 @@ func (s *InboundService) addClientTraffic(tx *gorm.DB, traffics []*xray.ClientTr
 	traffics, err = resolvePPPClientTraffic(tx, traffics)
 	if err != nil {
 		return fmt.Errorf("resolve PPP traffic checkpoints: %w", err)
+	}
+	traffics, err = resolveOpenVPNSessionTraffic(tx, traffics)
+	if err != nil {
+		return fmt.Errorf("resolve OpenVPN session checkpoints: %w", err)
 	}
 	for _, traffic := range traffics {
 		if traffic != nil && (traffic.Up < 0 || traffic.Down < 0) {
@@ -513,6 +535,114 @@ func resolvePPPClientTraffic(tx *gorm.DB, traffics []*xray.ClientTraffic) ([]*xr
 		traffic.PPPSessionID = ""
 		traffic.PPPInboundID = 0
 		traffic.PPPRxBytes, traffic.PPPTxBytes = 0, 0
+	}
+	return resolved, nil
+}
+
+// validateOpenVPNAccountingDestinations refuses a closed session whose owner
+// cannot be resolved to exactly one traffic row. Unlike a status poll, the
+// hook record is the only evidence for a short session; guessing a destination
+// would charge the wrong client.
+func validateOpenVPNAccountingDestinations(tx *gorm.DB, traffics []*xray.ClientTraffic) error {
+	wanted := make(map[string]struct{})
+	sessions := make(map[string]struct{})
+	for _, traffic := range traffics {
+		if traffic == nil || traffic.OpenVPNSessionID == "" {
+			continue
+		}
+		if _, exists := sessions[traffic.OpenVPNSessionID]; exists {
+			return fmt.Errorf("duplicate OpenVPN session identity %q requires manual review", traffic.OpenVPNSessionID)
+		}
+		sessions[traffic.OpenVPNSessionID] = struct{}{}
+		key := transferEmailKey(traffic.Email)
+		if key == "" {
+			return errors.New("OpenVPN session sample has no accounting identity")
+		}
+		wanted[key] = struct{}{}
+	}
+	if len(wanted) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(wanted))
+	for key := range wanted {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	counts := make(map[string]int, len(keys))
+	for _, batch := range chunkStrings(keys, sqlInChunk) {
+		var rows []xray.ClientTraffic
+		if err := tx.Model(&xray.ClientTraffic{}).Select("id", "email").Clauses(clause.Locking{Strength: "UPDATE"}).Where("LOWER(TRIM(email)) IN ?", batch).Order("id").Find(&rows).Error; err != nil {
+			return err
+		}
+		for _, row := range rows {
+			counts[transferEmailKey(row.Email)]++
+		}
+	}
+	for _, key := range keys {
+		if counts[key] != 1 {
+			return fmt.Errorf("OpenVPN accounting identity %q has %d matching traffic rows; manual reconciliation required", key, counts[key])
+		}
+	}
+	return nil
+}
+
+// resolveOpenVPNSessionTraffic converts a final absolute session reading into
+// the still-uncommitted delta and advances its checkpoint in the same
+// transaction as client usage. A replay after an uncertain commit therefore
+// adds no bytes. A decrease or identity change is rejected for manual review;
+// the durable hook evidence is not deleted until this function succeeds.
+func resolveOpenVPNSessionTraffic(tx *gorm.DB, traffics []*xray.ClientTraffic) ([]*xray.ClientTraffic, error) {
+	resolved := make([]*xray.ClientTraffic, len(traffics))
+	for i, traffic := range traffics {
+		if traffic != nil {
+			copy := *traffic
+			resolved[i] = &copy
+		}
+	}
+	for _, traffic := range resolved {
+		if traffic == nil || traffic.OpenVPNSessionID == "" {
+			continue
+		}
+		if len(traffic.OpenVPNSessionID) > 192 || traffic.OpenVPNInboundID <= 0 ||
+			strings.TrimSpace(traffic.Email) == "" || traffic.OpenVPNRxBytes < 0 || traffic.OpenVPNTxBytes < 0 {
+			return nil, errors.New("invalid OpenVPN session checkpoint")
+		}
+		initial := model.OpenVPNSessionCounter{
+			SessionID: traffic.OpenVPNSessionID,
+			Email:     strings.TrimSpace(traffic.Email),
+			InboundID: traffic.OpenVPNInboundID,
+		}
+		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&initial).Error; err != nil {
+			return nil, err
+		}
+		var previous model.OpenVPNSessionCounter
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("session_id = ?", traffic.OpenVPNSessionID).Take(&previous).Error; err != nil {
+			return nil, err
+		}
+		if transferEmailKey(previous.Email) != transferEmailKey(traffic.Email) || previous.InboundID != traffic.OpenVPNInboundID ||
+			previous.RxBytes < 0 || previous.TxBytes < 0 || traffic.OpenVPNRxBytes < previous.RxBytes || traffic.OpenVPNTxBytes < previous.TxBytes {
+			return nil, fmt.Errorf("OpenVPN session %q checkpoint identity mismatch or counters decreased; manual reconciliation required", traffic.OpenVPNSessionID)
+		}
+		rxDelta := traffic.OpenVPNRxBytes - previous.RxBytes
+		txDelta := traffic.OpenVPNTxBytes - previous.TxBytes
+		checkpoint := model.OpenVPNSessionCounter{
+			SessionID: traffic.OpenVPNSessionID,
+			Email:     strings.TrimSpace(traffic.Email),
+			InboundID: traffic.OpenVPNInboundID,
+			RxBytes:   traffic.OpenVPNRxBytes,
+			TxBytes:   traffic.OpenVPNTxBytes,
+		}
+		if err := tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "session_id"}},
+			DoUpdates: clause.AssignmentColumns([]string{"email", "inbound_id", "rx_bytes", "tx_bytes"}),
+		}).Create(&checkpoint).Error; err != nil {
+			return nil, err
+		}
+		traffic.Email = strings.TrimSpace(traffic.Email)
+		traffic.Up, traffic.Down = rxDelta, txDelta
+		traffic.OpenVPNSessionID = ""
+		traffic.OpenVPNInboundID = 0
+		traffic.OpenVPNRxBytes, traffic.OpenVPNTxBytes = 0, 0
 	}
 	return resolved, nil
 }
@@ -1048,6 +1178,9 @@ func (s *InboundService) delClientStatsByEmails(tx *gorm.DB, emails []string) er
 }
 
 func (s *InboundService) ResetClientTrafficByEmail(clientEmail string) error {
+	if err := rejectUnverifiedOpenVPNReset([]string{clientEmail}); err != nil {
+		return err
+	}
 	return submitTrafficWrite(func() error {
 		return database.GetDB().Transaction(func(tx *gorm.DB) error {
 			if err := closeResellerTrafficWindowTx(tx, clientEmail); err != nil {
@@ -1075,6 +1208,9 @@ func (s *InboundService) ResetClientTraffic(id int, clientEmail string) (needRes
 func (s *InboundService) resetClientTrafficLocked(id int, clientEmail string) (bool, error) {
 	needRestart := false
 
+	if err := rejectUnverifiedOpenVPNReset([]string{clientEmail}); err != nil {
+		return false, err
+	}
 	if err := rejectNegativeTrafficEvidence(database.GetDB(), []string{clientEmail}); err != nil {
 		return false, err
 	}
@@ -1189,6 +1325,9 @@ func (s *InboundService) resetClientTrafficLocked(id int, clientEmail string) (b
 }
 
 func (s *InboundService) ResetAllTraffics() error {
+	if err := rejectUnverifiedOpenVPNReset(nil); err != nil {
+		return err
+	}
 	return submitTrafficWrite(func() error {
 		return s.resetAllTrafficsLocked()
 	})
@@ -1223,6 +1362,9 @@ func (s *InboundService) resetAllTrafficsLocked() error {
 }
 
 func (s *InboundService) ResetInboundTraffic(id int) error {
+	if err := rejectUnverifiedOpenVPNReset(nil); err != nil {
+		return err
+	}
 	return submitTrafficWrite(func() error {
 		db := database.GetDB()
 		if err := db.Model(model.Inbound{}).

@@ -251,6 +251,15 @@ func (s *ClientService) Update(inboundSvc *InboundService, id int, updated model
 	if err != nil {
 		return false, err
 	}
+	// Reducing a finite quota releases capacity that may still be owed by a
+	// session whose final evidence has not been committed. Treat it like a
+	// reset for the OpenVPN evidence fence; increasing or switching to
+	// unlimited does not release consumed bytes.
+	if updated.TotalGB > 0 && updated.TotalGB < existing.TotalGB {
+		if err := rejectUnverifiedOpenVPNReset([]string{existing.Email}); err != nil {
+			return false, err
+		}
+	}
 	inboundIds, err := s.GetInboundIdsForRecord(id)
 	if err != nil {
 		return false, err

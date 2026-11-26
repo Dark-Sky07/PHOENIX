@@ -84,6 +84,7 @@ func TestRealOpenVPNExperimentalFingerprintAdmission(t *testing.T) {
 	if err := writeConfig(inst, 31295); err != nil {
 		t.Fatal(err)
 	}
+	stripProductionHooks(t, inst)
 	// Test-only hook: record exactly what OpenVPN provides when this session
 	// disconnects. This plain file is not durable production accounting.
 	disconnectLog := filepath.Join(dir, "disconnect-record")

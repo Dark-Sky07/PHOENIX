@@ -212,8 +212,8 @@ describe('smoke: redesigned pages', () => {
     expect(container.querySelector('.reseller-traffic-warning')).toBeTruthy();
     const openvpnWarning = container.querySelector('.openvpn-credential-warning');
     expect(openvpnWarning).toBeTruthy();
-    expect(openvpnWarning?.textContent).toContain('between traffic polls can be missed without any warning');
-    expect(openvpnWarning?.textContent).toContain('absence of alerts does not prove usage is complete');
+    expect(openvpnWarning?.textContent).toContain('A session ending without that evidence leaves a durable incident');
+    expect(openvpnWarning?.textContent).toContain('its usage is never invented');
     expect(container.querySelectorAll('.resource-tile').length).toBe(4);
     expect(container.querySelectorAll('.service-row').length).toBeGreaterThanOrEqual(3);
     expect(screen.getAllByText('Xray').length).toBeGreaterThan(0);

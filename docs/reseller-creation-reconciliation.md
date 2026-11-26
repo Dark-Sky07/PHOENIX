@@ -58,14 +58,20 @@ past collision require investigation; this check does not revoke them. It also
 does not coordinate another panel process or a privileged filesystem writer.
 
 **Removing a local client certificate file is not revocation.** A previously
-issued profile still contains its certificate and private key, and the current
-OpenVPN server configuration accepts certificates signed by the inbound CA;
-it does not check the current enabled-client list at authentication. Disabling
-or removing a client is therefore not proof that a copied profile cannot
-reconnect, nor that an existing session was disconnected. Administrators should
-restrict access to affected OpenVPN listeners while investigating and retain
-accounting evidence. A migration-safe revocation/allowlist and verified drain
-remain necessary before relying on quota enforcement or removal.
+issued profile still contains its certificate and private key. The generated
+server config now installs `script-security 2`, a `tls-verify` script and a
+filesystem-backed certificate fingerprint allowlist; new authentications fail
+closed when the allowlist is missing, unreadable or lacks the client digest.
+`Manager.RevokeClient` removes that digest and sends `client-kill` using a
+numeric client ID parsed from a live management status response, then checks a
+fresh status snapshot for that ID. A `SUCCESS` acknowledgement alone is not
+proof of termination: if the ID is unavailable, the daemon generation is
+unknown, or the session remains visible, revocation fails closed and quota
+must not be released. `tls-verify` is not re-run for already authenticated
+sessions, so a client admitted before an allowlist migration can keep
+forwarding traffic. Administrators must still restrict affected listeners and
+retain accounting evidence while investigating. DCO behavior and OpenVPN
+versions other than the tested 2.4/2.5/2.6 range require separate validation.
 
 ## OpenVPN management polling
 
@@ -90,6 +96,42 @@ traffic after the last observation or client disappearance can be missed.
 Reconciliation and shutdown are not a verified drain. The accounting lock only
 coordinates participating mutation paths; direct runtime changes remain outside
 this fence. Do not treat this as complete accounting or automatic recovery.
+
+## Durable OpenVPN session evidence
+
+Each daemon generation installs `client-connect` and `client-disconnect`
+scripts. The admission hook fsyncs a record containing the client CN, OpenVPN
+session ID, daemon generation, inbound ID, peer address and certificate digest
+before the session is admitted. A conflicting or unwritable record denies the
+connection and leaves a durable incident. The disconnect hook fsyncs the final
+absolute received/sent counters from OpenVPN; malformed counters or a missing
+session ID produce a durable incident instead of guessed usage. Files are
+published with a hard link into a `0700` spool, are never overwritten by a
+retry, and are only removed after the accounting transaction succeeds.
+
+Closed-session samples are committed under the shared allocation lock and a
+durable poll marker. A per-session database checkpoint converts the final
+absolute counters into the still-uncommitted delta in the same transaction as
+client usage, so a replay after a crash between commit and acknowledgement adds
+zero bytes. A decreased counter, changed owner or ambiguous destination fails
+closed and retains the hook record. While a session has recent admission
+evidence, management deltas for that client are deliberately suppressed: a
+short session is billed only from its final hook evidence, and both sources are
+never charged for the same bytes.
+
+This is not a complete accounting protocol. A session that ends without a
+disconnect hook (SIGKILL, host crash, or an hooks-disabled daemon) has no final
+evidence: it leaves a dashboard warning and requires operator reconciliation;
+no bytes are invented and capacity is not automatically released. An open
+record is not a measurement. The spool is local to the host, does not fence
+privileged filesystem writers, and does not survive deletion of the whole
+inbound data directory. A crash before the first fsync, simultaneous database
+and filesystem loss, and cross-host restore are outside this design. The
+generation value binds evidence to a daemon epoch but is not a cryptographic
+attestation of the client certificate; the authorization allowlist is a
+separate, fail-closed control. See `docs/openvpn-session-recovery.md` for the
+operator procedure and the exact conditions under which removal, quota reset
+and quota reduction are refused.
 
 ## Local OpenVPN removal fence
 

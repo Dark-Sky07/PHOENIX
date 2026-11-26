@@ -2988,6 +2988,10 @@
       "description": "Anonymous, link-based client checkout. A signed per-client ref token (issued via /panel/api/clients/checkout-link/:email) authorizes every call; no panel session is required. Orders are recorded as pending and completed by the payment webhook."
     },
     {
+      "name": "OpenVPN revocation",
+      "description": "Explicit superadmin revocation of an OpenVPN client. The endpoint removes the current certificate fingerprint from the daemon allowlist and kills managed sessions after validating their numeric client IDs. It does not prove final traffic or release quota."
+    },
+    {
       "name": "WebSocket",
       "description": "Real-time status updates via WebSocket. Connect once at <code>ws://<panel>/ws</code> to receive a stream of JSON messages without polling. Requires an authenticated session cookie (Bearer token auth is not supported). Each message has a <code>type</code> field that identifies the payload shape."
     }
@@ -14575,6 +14579,84 @@
                 "example": {
                   "success": true,
                   "obj": "pending"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/openvpn/revoke": {
+      "post": {
+        "tags": [
+          "OpenVPN revocation"
+        ],
+        "summary": "Revoke one client on every managed OpenVPN daemon generation. A conflict response means the operation is incomplete and quota must not be released.",
+        "operationId": "post_panel_api_openvpn_revoke",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "email": {
+                    "type": "string",
+                    "description": "Client certificate CN (email)."
+                  }
+                },
+                "required": [
+                  "email"
+                ]
+              },
+              "example": {
+                "email": "alice@example.com"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                },
+                "example": {
+                  "success": true,
+                  "msg": "authorization revoked and current sessions confirmed terminated; verify final usage before quota changes"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "example": {
+                  "success": false,
+                  "msg": "revocation incomplete; verify sessions and accounting before releasing quota"
                 }
               }
             }

@@ -66,6 +66,14 @@ func renderServerConf(inst Instance, mgmtPort int) string {
 		b.WriteString("explicit-exit-notify 1\n")
 	}
 	b.WriteString("persist-key\npersist-tun\n")
+	// Production authorization and durable session evidence. The verifier
+	// fails closed when the allowlist is missing or a client digest is absent;
+	// the hooks publish fsynced records before a session is admitted and after
+	// its final counters are known. These directives require script-security 2.
+	b.WriteString("script-security 2\n")
+	fmt.Fprintf(&b, "tls-verify %s\n", quoteConfigPath(filepath.Join(dir, "tls-verify")))
+	fmt.Fprintf(&b, "client-connect %s\n", quoteConfigPath(filepath.Join(dir, "client-connect")))
+	fmt.Fprintf(&b, "client-disconnect %s\n", quoteConfigPath(filepath.Join(dir, "client-disconnect")))
 	b.WriteString("mute-replay-warnings\nstatus-version 2\nverb 3\n")
 	fmt.Fprintf(&b, "writepid %s\n", quoteConfigPath(pidPathForID(inst.Id)))
 	fmt.Fprintf(&b, "log %s\n", quoteConfigPath(logPathForID(inst.Id)))
@@ -88,6 +96,9 @@ func writeConfig(inst Instance, mgmtPort int) error {
 	dir := dataDirForID(inst.Id)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err
+	}
+	if err := ensureEvidenceForConfig(dir, inst); err != nil {
+		return fmt.Errorf("prepare OpenVPN authorization and session evidence: %w", err)
 	}
 	return os.WriteFile(confPathForID(inst.Id), []byte(renderServerConf(inst, mgmtPort)), 0o640)
 }
