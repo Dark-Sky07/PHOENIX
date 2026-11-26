@@ -386,6 +386,7 @@ func TestTrafficEvidenceMigrationPostgres(t *testing.T) {
 		&model.ResellerNodeCounterIncident{NodeId: -2, Email: "", Direction: "l2tp-orphan"},
 		&model.ResellerNodeCounterIncident{NodeId: -3, Email: "", Direction: "ppp-counter-decreased"},
 		&model.PPPClientTrafficCounter{SessionID: "ppp-pg-migration", Email: "migration@test", InboundID: 313, RxBytes: 123, TxBytes: 321},
+		&model.OpenVPNSessionCounter{SessionID: "openvpn-pg-migration", Email: "migration@test", InboundID: 314, RxBytes: 456, TxBytes: 654},
 		&model.XrayTrafficReceipt{ID: "migration-receipt"}, &model.XrayTrafficInFlight{ID: "migration-inflight"},
 		&model.TuicTrafficReceipt{ID: "tuic-migration-receipt", PayloadHash: "v1:test-roundtrip"},
 	} {
@@ -447,5 +448,9 @@ func TestTrafficEvidenceMigrationPostgres(t *testing.T) {
 	var ppp model.PPPClientTrafficCounter
 	if err := dst.First(&ppp, "session_id = ?", "ppp-pg-migration").Error; err != nil || ppp.RxBytes != 123 || ppp.TxBytes != 321 {
 		t.Fatalf("PPP checkpoint: %+v %v", ppp, err)
+	}
+	var ovpn model.OpenVPNSessionCounter
+	if err := dst.First(&ovpn, "session_id = ?", "openvpn-pg-migration").Error; err != nil || ovpn.RxBytes != 456 || ovpn.TxBytes != 654 || ovpn.InboundID != 314 {
+		t.Fatalf("OpenVPN checkpoint: %+v %v", ovpn, err)
 	}
 }
