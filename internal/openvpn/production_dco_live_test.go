@@ -20,8 +20,8 @@ func TestRealOpenVPNProductionDCOEvidence(t *testing.T) {
 		t.Skip("PHOENIX_TEST_OPENVPN_LIVE_BINARY not configured")
 	}
 	version, err := exec.Command(binary, "--version").CombinedOutput()
-	if err != nil {
-		t.Fatal(err)
+	if err != nil && !strings.Contains(string(version), "OpenVPN") {
+		t.Fatalf("read OpenVPN version: %v\n%s", err, version)
 	}
 	if strings.Contains(string(version), "OpenVPN 2.4.") {
 		t.Skip("OpenVPN 2.4 has no DCO data channel")
