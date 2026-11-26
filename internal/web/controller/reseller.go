@@ -43,6 +43,8 @@ func NewResellerController(g *gin.RouterGroup) *ResellerController {
 }
 
 func (a *ResellerController) initRouter(g *gin.RouterGroup) {
+	g.GET("/reconciliation", a.reconciliation)
+	g.POST("/reconciliation/repair", a.reconciliationRepair)
 	g.GET("/list", a.list)
 	g.GET("/get/:id", a.get)
 	g.GET("/assignments", a.assignments)
@@ -708,6 +710,36 @@ func (a *ResellerController) deleteVoucher(c *gin.Context) {
 		return
 	}
 	jsonMsg(c, "", a.voucherService.Delete(id))
+}
+
+// reconciliation exposes every local evidence source that can gate reseller
+// operations. It is admin-only (the whole /panel/api/resellers group is behind
+// the admin/API-token guards) and never changes state.
+func (a *ResellerController) reconciliation(c *gin.Context) {
+	jsonObj(c, service.ReadReconciliationReport(database.GetDB()), nil)
+}
+
+// reconciliationRepair archives evidence and clears only reconciliation
+// markers. Superadmin is required because a wrong click can hide unapplied
+// traffic evidence. Dry-run is the default and the confirmation token must
+// match exactly before anything is moved.
+func (a *ResellerController) reconciliationRepair(c *gin.Context) {
+	user := session.GetLoginUser(c)
+	if user == nil || user.Id != 1 {
+		c.JSON(http.StatusForbidden, gin.H{"success": false, "msg": "superadmin required for reconciliation repair"})
+		return
+	}
+	var options service.ReconcileOptions
+	if err := c.ShouldBindJSON(&options); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "msg": "invalid reconciliation request"})
+		return
+	}
+	result, err := service.ReconcileCounterIncidents(database.GetDB(), options)
+	if err != nil {
+		jsonMsg(c, "", err)
+		return
+	}
+	jsonObj(c, result, nil)
 }
 
 // HandlePublicPaymentWebhook processes HMAC-SHA256 signed external payment

@@ -14,6 +14,7 @@ const TITLE_KEYS: Record<string, string> = {
   '/xray': 'menu.xray',
   '/api-docs': 'menu.apiDocs',
   '/resellers': 'menu.resellers',
+  '/resellers/reconciliation': 'resellers.reconciliationTitle',
   '/reseller/report': 'menu.report',
   '/reseller/profile': 'menu.profile',
   '/reseller/renewals': 'resellers.renewalCenter',

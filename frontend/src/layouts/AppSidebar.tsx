@@ -252,6 +252,7 @@ export default function AppSidebar() {
       { key: '/clients', icon: 'team', title: t('menu.clients'), group: 'manage' },
       { key: '/groups', icon: 'groups', title: t('menu.groups'), group: 'manage' },
       { key: '/resellers', icon: 'reseller', title: t('menu.resellers'), group: 'manage' },
+      { key: '/resellers/reconciliation', icon: 'tool', title: t('resellers.reconciliationTitle', 'Traffic reconciliation'), group: 'manage' },
       { key: '/nodes', icon: 'cluster', title: t('menu.nodes'), group: 'manage' },
       { key: '/xray#outbound', icon: 'outbound', title: t('pages.xray.Outbounds'), group: 'manage' },
       { key: '/settings', icon: 'setting', title: t('menu.settings'), group: 'system' },

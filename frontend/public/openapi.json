@@ -11305,7 +11305,7 @@
         "tags": [
           "Resellers (نمایندگی)"
         ],
-        "summary": "Every reseller with its live usage snapshot: inbound/client counts, allocated and consumed traffic and quota flags.",
+        "summary": "Every reseller with its live usage snapshot: inbound/client counts, allocated and consumed traffic and quota flags. Read-only views include a warnings array when reconciliation is needed; quota decisions still fail closed.",
         "operationId": "get_panel_api_resellers_list",
         "responses": {
           "200": {
@@ -11340,6 +11340,92 @@
                       "allocatedTraffic": 549755813888
                     }
                   ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/resellers/reconciliation": {
+      "get": {
+        "tags": [
+          "Resellers (نمایندگی)"
+        ],
+        "summary": "Admin-only operational snapshot: counter incidents, in-flight poll markers, fallback files, traffic journals, dangling reseller client mappings and Xray API reachability. Read-only; never clears evidence.",
+        "operationId": "get_panel_api_resellers_reconciliation",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                },
+                "example": {
+                  "success": true,
+                  "obj": {
+                    "available": true,
+                    "danglingMappings": [],
+                    "dbIncidents": [],
+                    "inFlightPolls": [],
+                    "fallbackFiles": [],
+                    "xrayApi": {
+                      "port": 62789,
+                      "reachable": true
+                    },
+                    "warnings": []
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/resellers/reconciliation/repair": {
+      "post": {
+        "tags": [
+          "Resellers (نمایندگی)"
+        ],
+        "summary": "Superadmin-only, backup-first repair. Dry-run by default; body { \"confirm\": \"RECONCILE_COUNTER_INCIDENTS\", \"dryRun\": false } archives dangling mappings and marker files before deleting them. Traffic journals are never cleared and no service is stopped or restarted.",
+        "operationId": "post_panel_api_resellers_reconciliation_repair",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                },
+                "example": {
+                  "success": true,
+                  "obj": {
+                    "dryRun": false,
+                    "backupDir": "/etc/x-ui/reconciliation-backups/20261126-220000.000",
+                    "archivedMappings": 1,
+                    "clearedIncidents": 1,
+                    "clearedPolls": 0,
+                    "movedFallbackFiles": 1
+                  }
                 }
               }
             }

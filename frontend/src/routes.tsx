@@ -16,6 +16,7 @@ const ResellersPage = lazy(() => import('@/pages/resellers/ResellersPage'));
 const ResellerReportPage = lazy(() => import('@/pages/resellers/ResellerReportPage'));
 const ResellerProfilePage = lazy(() => import('@/pages/resellers/ResellerProfilePage'));
 const ResellerRenewalsPage = lazy(() => import('@/pages/resellers/ResellerRenewalsPage'));
+const ReconciliationPage = lazy(() => import('@/pages/resellers/ReconciliationPage'));
 const CheckoutPage = lazy(() => import('@/pages/checkout/CheckoutPage'));
 const ResellerSignupPage = lazy(() => import('@/pages/checkout/ResellerSignupPage'));
 const ResellerDepositPage = lazy(() => import('@/pages/checkout/ResellerDepositPage'));
@@ -85,6 +86,10 @@ export const appRoutes: RouteObject[] = [
       {
         path: 'resellers',
         element: <AdminOnly>{withSuspense(<ResellersPage />)}</AdminOnly>,
+      },
+      {
+        path: 'resellers/reconciliation',
+        element: <AdminOnly>{withSuspense(<ReconciliationPage />)}</AdminOnly>,
       },
       {
         path: 'reseller/report',

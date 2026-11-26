@@ -191,6 +191,14 @@ export default function ResellersPage() {
     queryClient.invalidateQueries({ queryKey: keys.inbounds.root() });
   }, [queryClient]);
 
+  const reconciliationWarnings = useMemo(() => {
+    const seen = new Set<string>();
+    for (const stat of listQuery.data || []) {
+      for (const warning of stat.warnings || []) seen.add(warning);
+    }
+    return Array.from(seen);
+  }, [listQuery.data]);
+
   const exportListCsv = useCallback(async () => {
     setExportingList(true);
     try {
@@ -649,6 +657,24 @@ export default function ResellersPage() {
 
             {listQuery.isError && (
               <Alert type="error" showIcon message={t('somethingWentWrong')} style={{ marginBottom: 12 }} />
+            )}
+            {reconciliationWarnings.length > 0 && (
+              <Alert
+                type="warning"
+                showIcon
+                style={{ marginBottom: 12 }}
+                message={t('resellers.reconciliationBanner', 'Traffic accounting needs administrator review')}
+                description={
+                  <Space direction="vertical" size={2}>
+                    {reconciliationWarnings.map((warning) => (
+                      <span key={warning}>{warning}</span>
+                    ))}
+                    <Button type="link" size="small" onClick={() => { const base = window.location.pathname.replace(/\/resellers\/?$/, ''); window.location.assign(`${base}/resellers/reconciliation`); }}>
+                      {t('resellers.openReconciliation', 'Open reconciliation page')}
+                    </Button>
+                  </Space>
+                }
+              />
             )}
             {view === 'overview' ? (
               <div className="phoenix-rise phoenix-rise-2">

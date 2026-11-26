@@ -513,6 +513,9 @@ func (s *ClientService) Delete(inboundSvc *InboundService, id int, keepTraffic b
 			if err := tx.Delete(&model.ClientRecord{}, id).Error; err != nil {
 				return err
 			}
+			if err := archiveResellerClientMappingsTx(tx, []string{existing.Email}, "client deleted"); err != nil {
+				return err
+			}
 			return tx.Where("LOWER(TRIM(email)) = LOWER(?)", existing.Email).Delete(&model.ResellerClient{}).Error
 		})
 	})
@@ -756,6 +759,9 @@ func (s *ClientService) DeleteByEmail(inboundSvc *InboundService, email string, 
 			return needRestart, err
 		}
 	}
+	if err := archiveResellerClientMappingsTx(db, []string{email}, "client deleted without canonical record"); err != nil {
+		return needRestart, err
+	}
 	if err := db.Where("LOWER(TRIM(email)) = LOWER(?)", email).Delete(&model.ResellerClient{}).Error; err != nil {
 		return needRestart, err
 	}
@@ -865,6 +871,9 @@ func (s *ClientService) DeleteByEmailForInbounds(inboundSvc *InboundService, ema
 				}
 			}
 			if err := tx.Delete(&model.ClientRecord{}, rec.Id).Error; err != nil {
+				return err
+			}
+			if err := archiveResellerClientMappingsTx(tx, []string{rec.Email}, "client deleted"); err != nil {
 				return err
 			}
 			return tx.Where("LOWER(TRIM(email)) = LOWER(?)", rec.Email).Delete(&model.ResellerClient{}).Error

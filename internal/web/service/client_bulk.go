@@ -802,6 +802,9 @@ func (s *ClientService) BulkDelete(inboundSvc *InboundService, emails []string, 
 						return err
 					}
 				}
+				if err := archiveResellerClientMappingsTx(tx, successEmails, "bulk client delete"); err != nil {
+					return err
+				}
 				for _, batch := range chunkStrings(successEmails, sqlInChunk) {
 					if err := tx.Where("LOWER(TRIM(email)) IN ?", batch).Delete(&model.ResellerClient{}).Error; err != nil {
 						return err
