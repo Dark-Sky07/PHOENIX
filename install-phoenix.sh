@@ -48,6 +48,14 @@ arch() {
 
 echo "Arch: $(arch)"
 
+# APT can be held by another administrator or unattended-upgrades. Wait for
+# the dpkg frontend lock instead of aborting the whole panel update on a
+# transient lock. Five minutes is long enough for a normal apt run and short
+# enough to surface a stuck holder without touching its lock files.
+apt_get_locked() {
+    apt-get -o DPkg::Lock::Timeout=300 "$@"
+}
+
 # Simple helpers
 is_ipv4() {
     [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && return 0 || return 1
@@ -94,7 +102,7 @@ is_port_in_use() {
 install_base() {
     case "${release}" in
         ubuntu | debian | armbian)
-            apt-get update && apt-get install -y -q cron curl tar tzdata socat ca-certificates openssl unzip
+            apt_get_locked update && apt_get_locked install -y -q cron curl tar tzdata socat ca-certificates openssl unzip
             ;;
         fedora | amzn | virtuozzo | rhel | almalinux | rocky | ol)
             dnf -y update && dnf install -y -q cronie curl tar tzdata socat ca-certificates openssl unzip
@@ -116,7 +124,7 @@ install_base() {
             apk update && apk add dcron curl tar tzdata socat ca-certificates openssl unzip
             ;;
         *)
-            apt-get update && apt-get install -y -q cron curl tar tzdata socat ca-certificates openssl unzip
+            apt_get_locked update && apt_get_locked install -y -q cron curl tar tzdata socat ca-certificates openssl unzip
             ;;
     esac
 }
@@ -153,7 +161,7 @@ install_openvpn() {
         echo -e "${green}Installing OpenVPN for OpenVPN inbounds...${plain}"
         case "${release}" in
             ubuntu | debian | armbian | linuxmint)
-                if ! apt-get update || ! apt-get install -y -q openvpn; then
+                if ! apt_get_locked update || ! apt_get_locked install -y -q openvpn; then
                     echo -e "${red}Failed to install the 'openvpn' package with apt.${plain}"
                     return 1
                 fi
@@ -224,7 +232,7 @@ install_l2tp_ipsec() {
     echo -e "${green}Installing strongSwan/xl2tpd/PPP for L2TP/IPsec inbounds...${plain}"
     case "${release}" in
         ubuntu | debian | armbian | linuxmint)
-            apt-get update && apt-get install -y -q $packages || return 1
+            apt_get_locked update && apt_get_locked install -y -q $packages || return 1
             ;;
         fedora | amzn | virtuozzo | rhel | almalinux | rocky | ol)
             dnf install -y -q $packages || return 1
@@ -325,7 +333,7 @@ install_pppvpn() {
     case "${release}" in
         ubuntu | debian | armbian | linuxmint)
             packages="pptpd ppp iptables iproute2 python3 python3-venv python3-dev build-essential"
-            apt-get update && apt-get install -y -q $packages || return 1
+            apt_get_locked update && apt_get_locked install -y -q $packages || return 1
             ;;
         fedora | amzn | virtuozzo | rhel | almalinux | rocky | ol)
             packages="pptpd ppp iptables iproute python3 python3-pip python3-devel gcc"
@@ -445,7 +453,7 @@ install_postgres_local() {
 
     case "${release}" in
         ubuntu | debian | armbian)
-            apt-get update >&2 && apt-get install -y -q postgresql >&2 || return 1
+            apt_get_locked update >&2 && apt_get_locked install -y -q postgresql >&2 || return 1
             ;;
         fedora | amzn | virtuozzo | rhel | almalinux | rocky | ol)
             dnf install -y -q postgresql-server postgresql-contrib >&2 || return 1
@@ -551,7 +559,7 @@ ensure_pg_client() {
     echo -e "${yellow}Installing PostgreSQL client tools (pg_dump/pg_restore) for in-panel backup...${plain}" >&2
     case "${release}" in
         ubuntu | debian | armbian)
-            apt-get update >&2 && apt-get install -y -q postgresql-client >&2 || return 1
+            apt_get_locked update >&2 && apt_get_locked install -y -q postgresql-client >&2 || return 1
             ;;
         fedora | amzn | virtuozzo | rhel | almalinux | rocky | ol)
             dnf install -y -q postgresql >&2 || return 1
