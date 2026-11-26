@@ -18,6 +18,7 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/config"
 	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/logger"
+	"github.com/Dark-Sky07/phoenix/internal/openvpn"
 	"github.com/Dark-Sky07/phoenix/internal/sub"
 	"github.com/Dark-Sky07/phoenix/internal/util/crypto"
 	"github.com/Dark-Sky07/phoenix/internal/util/sys"
@@ -477,6 +478,26 @@ func GetApiToken(getApiToken bool) {
 	fmt.Println("apiToken:", created.Token)
 }
 
+// checkMigrationQuiescence refuses a copy when accounting state is still in
+// flight. Poll markers live in the source database; hook evidence is local to
+// the panel being migrated. Both must be settled before a point-in-time copy.
+func checkMigrationQuiescence(srcPath string) error {
+	if err := database.SourceMigrationQuiescence(srcPath); err != nil {
+		return err
+	}
+	if err := openvpn.CheckSessionEvidenceIncidents(); err != nil {
+		return fmt.Errorf("unresolved OpenVPN session evidence: %w", err)
+	}
+	pending, err := openvpn.PendingSessionEvidence()
+	if err != nil {
+		return fmt.Errorf("inspect pending OpenVPN evidence: %w", err)
+	}
+	if pending > 0 {
+		return fmt.Errorf("source has %d OpenVPN session(s) without final usage evidence; reconcile before migrating", pending)
+	}
+	return nil
+}
+
 // migrateDb performs database migration operations for the PHOENIX panel.
 func migrateDb() {
 	inboundService := service.InboundService{}
@@ -625,6 +646,10 @@ func main() {
 			}
 			fmt.Printf("Restored %s -> %s\n", migrateRestore, migrateOut)
 		case migrateDsn != "":
+			if err := checkMigrationQuiescence(src); err != nil {
+				fmt.Println("migration preflight failed:", err)
+				os.Exit(1)
+			}
 			if err := database.MigrateData(src, migrateDsn); err != nil {
 				fmt.Println("migration failed:", err)
 				os.Exit(1)

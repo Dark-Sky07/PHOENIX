@@ -82,6 +82,12 @@ certificate is pruned; they do not revoke a profile.
 
 ## Migration notes
 
+`phoenix migrate-db --dsn ...` now refuses to copy while the source database
+has an active traffic poll marker or while local OpenVPN evidence has an
+unresolved incident or an admitted session without final counters. Stop the
+panel and settle accounting before migrating; the preflight is a necessary
+check, not proof that every external writer stopped.
+
 Certificates pruned before the allowlist existed cannot be reconstructed from
 the new archive; the public certificate archive only covers certificates
 pruned by the current code. Consider rotating the inbound CA and reissuing
@@ -98,5 +104,9 @@ restricted.
   and a session that ends before any hook runs cannot be recovered here.
 - The daemon generation binds evidence to an epoch but is not cryptographic
   attestation; the allowlist is a separate fail-closed authentication control.
-- Version-matrix and required-DCO live coverage run in CI; cross-host,
-  multi-panel and privileged-writer scenarios still need operator sign-off.
+- Version-matrix and required-DCO live coverage run in CI. Two hosts with
+  separate evidence spools replaying one checkpoint are tested on PostgreSQL,
+  but the test does not authenticate hosts; a privileged filesystem writer,
+  simultaneous database and disk loss, a crash before the first fsync and a
+  session that ends before any hook runs remain outside what local evidence
+  can prove. Deployment and migration still require operator sign-off.

@@ -100,6 +100,34 @@ func validateTrafficEvidenceTables(src *gorm.DB) error {
 	return nil
 }
 
+// SourceMigrationQuiescence refuses a copy while the source still records an
+// active accounting poll. A marker means a transaction may be in flight; a
+// point-in-time copy could split it even though MigrateData itself copies the
+// marker row. This is a necessary preflight check, not proof that every
+// external writer has stopped.
+func SourceMigrationQuiescence(srcPath string) error {
+	src, err := gorm.Open(sqlite.Open(srcPath+"?_journal_mode=WAL&_busy_timeout=10000"), &gorm.Config{Logger: logger.Discard})
+	if err != nil {
+		return fmt.Errorf("open migration source: %w", err)
+	}
+	sqlDB, err := src.DB()
+	if err != nil {
+		return err
+	}
+	defer sqlDB.Close()
+	if !src.Migrator().HasTable(&model.XrayTrafficInFlight{}) {
+		return nil
+	}
+	var count int64
+	if err := src.Model(&model.XrayTrafficInFlight{}).Count(&count).Error; err != nil {
+		return err
+	}
+	if count > 0 {
+		return fmt.Errorf("source has %d active traffic poll marker(s); stop the panel and wait for accounting to quiesce before migrating", count)
+	}
+	return nil
+}
+
 // MigrateData copies every row from the configured SQLite file at srcPath into
 // a fresh PostgreSQL database described by dstDSN. The destination tables are
 // (re)created with AutoMigrate before the copy. Source data is left untouched.
