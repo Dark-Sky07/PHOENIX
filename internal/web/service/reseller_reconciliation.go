@@ -86,6 +86,27 @@ type ReconcileResult struct {
 	Warnings               []string `json:"warnings"`
 }
 
+// emptySlice keeps the public JSON schema stable. A nil Go slice serializes as
+// null, while callers of these operational APIs need a collection they can
+// safely enumerate even when there is no evidence to report.
+func emptySlice[T any](values []T) []T {
+	if values == nil {
+		return []T{}
+	}
+	return values
+}
+
+func (report *ReconciliationReport) normalizeCollections() {
+	report.DanglingMappings = emptySlice(report.DanglingMappings)
+	report.DBIncidents = emptySlice(report.DBIncidents)
+	report.InFlightPolls = emptySlice(report.InFlightPolls)
+	report.FallbackFiles = emptySlice(report.FallbackFiles)
+	report.L2TPEvidenceFiles = emptySlice(report.L2TPEvidenceFiles)
+	report.XrayJournals = emptySlice(report.XrayJournals)
+	report.TuicJournals = emptySlice(report.TuicJournals)
+	report.Warnings = emptySlice(report.Warnings)
+}
+
 func listDanglingResellerClientMappings(db *gorm.DB) ([]ResellerClientMappingRow, error) {
 	if db == nil {
 		return nil, errors.New("database unavailable while checking reseller mappings")
@@ -246,6 +267,7 @@ func ReadReconciliationReport(db *gorm.DB) ReconciliationReport {
 	if len(report.XrayJournals) > 0 || len(report.TuicJournals) > 0 {
 		report.Warnings = append(report.Warnings, "Traffic journals still hold unapplied usage; replay them before clearing their markers.")
 	}
+	report.normalizeCollections()
 	return report
 }
 
@@ -315,7 +337,7 @@ func archiveL2TPReconciliationEvidence(report ReconciliationReport, backupDir st
 // markers. It never stops or restarts the panel or Xray, and it never deletes
 // journal files, which may represent traffic that has not been applied yet.
 func ReconcileCounterIncidents(db *gorm.DB, options ReconcileOptions) (ReconcileResult, error) {
-	result := ReconcileResult{DryRun: true}
+	result := ReconcileResult{DryRun: true, Warnings: []string{}}
 	if db == nil {
 		return result, errors.New("database unavailable while reconciling")
 	}
