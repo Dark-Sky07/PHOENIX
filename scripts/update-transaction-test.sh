@@ -35,13 +35,27 @@ require('pg_restore --clean --if-exists')
 require('for suffix in "" "-wal" "-shm" "-journal"; do')
 require("update_db_snapshot_ready=0")
 
-# The old service is stopped before the snapshot, migration is checked before
-# the candidate is started, and rollback restores DB state before restarting the
-# old service.
+# The old service is stopped before the snapshot, its live tree is only moved
+# after CWD/process quiescence, and the candidate is started only after its
+# migration. A maintenance barrier spans the entire exposed replacement window.
 order("if ! service_stop_for_update; then return 1; fi", "if ! snapshot_update_database; then")
 order("if ! snapshot_update_database; then", "if ! mv \"$xui_folder\" \"$update_backup_dir\"; then")
-order("if ! config_after_update; then", "if ! service_start_after_update || ! verify_post_update_runtime; then")
-order("if ! restore_update_database; then", "service_start_after_update >/dev/null 2>&1 || true")
+update_main = text.index("update_x-ui() {")
+config_start = text.index("if ! config_after_update; then", update_main)
+candidate_start = text.index("if ! service_start_after_update || ! verify_post_update_runtime; then", config_start)
+if config_start >= candidate_start:
+    raise SystemExit("candidate started before post-update configuration")
+order("if ! begin_update_maintenance; then", "if ! commit_update_transaction; then")
+order("if ! service_start_after_update || ! verify_post_update_runtime; then", "if ! finalize_update_transaction; then")
+require("acquire_update_lock() {")
+require("begin_update_maintenance() {")
+require("end_update_maintenance() {")
+require("live_install_processes() {")
+require("quiesce_live_install_processes() {")
+require("wait_for_service_stop() {")
+require("if ! service_stop_for_update; then\n            echo -e \"${red}CRITICAL: candidate service did not release")
+require("stable_samples")
+require("for attempt in {1..90}; do")
 
 # Migration/configuration failures must escape config_after_update instead of
 # being printed and ignored, and helper-driven SSL paths must not start the
@@ -92,6 +106,12 @@ for raw in sys.argv[1:]:
     require("verify_started_panel_runtime() {")
     require("if ! verify_started_panel_runtime; then")
     require("Verified Xray API listener on 127.0.0.1:${port}.")
+    # Compatibility updates from an old management script reach the new
+    # installer first. That route must delegate before its legacy rm path.
+    require('if [[ -f "${xui_folder}/x-ui" && "${PHOENIX_FORCE_INSTALL:-0}" != "1" ]]; then')
+    require('phoenix_raw_fetch "$update_tmp" update.sh')
+    if text.index('phoenix_raw_fetch "$update_tmp" update.sh') >= text.index('# Stop x-ui service and remove old resources'):
+        raise SystemExit(f"{name}: legacy installer removes a live tree before updater handoff")
     # The verification pass must happen before any daemon-specific installer.
     if text.index("if ! verify_runtime_prerequisites; then") >= text.index("if ! install_openvpn; then"):
         raise SystemExit(f"{name}: prerequisite check must run before daemon installers")
@@ -113,11 +133,36 @@ for needle in (
     "verify_xray_api_listener() {",
     "verify_post_update_runtime() {",
     "if ! service_start_after_update || ! verify_post_update_runtime; then",
-    "Verified Xray API listener on 127.0.0.1:${port}.",
+    "read_xray_api_port() {",
+    "Verified stable Xray API listener on 127.0.0.1:${port}.",
+    "begin_update_maintenance() {",
+    "end_update_maintenance() {",
+    "wait_for_service_stop() {",
 ):
     if needle not in text:
         raise SystemExit(f"update.sh: missing runtime prerequisite guard: {needle}")
 if text.index("if ! verify_runtime_prerequisites; then") >= text.index("if ! install_pppvpn; then"):
     raise SystemExit("update.sh: prerequisite check must run before daemon installers")
 print("update runtime prerequisite static checks passed")
+PY
+
+python3 - "${root_dir}/x-ui.sh" "${root_dir}/phoenix.sh" <<'PY'
+from pathlib import Path
+import sys
+
+for raw in sys.argv[1:]:
+    text = Path(raw).read_text()
+    name = Path(raw).name
+    for needle in (
+        "phoenix_run_updater() {",
+        'raw.githubusercontent.com/${repo}/${tag}/update.sh',
+        "env PHOENIX_TAG=\"${tag}\" bash \"${tmp}\"",
+        "if phoenix_run_updater; then",
+    ):
+        if needle not in text:
+            raise SystemExit(f"{name}: missing transactional update route: {needle}")
+    update_body = text[text.index("update() {"):text.index("update_menu() {")]
+    if "phoenix_run_installer" in update_body:
+        raise SystemExit(f"{name}: update still uses destructive installer route")
+print("management-script transactional update checks passed")
 PY

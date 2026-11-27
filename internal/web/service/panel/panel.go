@@ -41,12 +41,10 @@ type PanelUpdateInfo struct {
 const phoenixRepo = "Dark-Sky07/PHOENIX"
 
 const (
-	// panelUpdaterURL is the script the in-panel update button downloads and
-	// runs. It is the very same installer the CLI uses (`x-ui.sh update` →
-	// install-phoenix.sh), which resolves the latest PHOENIX release and
-	// restarts the panel — so an in-panel update can never install upstream
-	// builds.
-	panelUpdaterURL      = "https://raw.githubusercontent.com/" + phoenixRepo + "/main/install-phoenix.sh"
+	// panelUpdaterURL is the transactional updater used by the in-panel update
+	// action. It stages a tagged release and never removes the live install tree
+	// beneath a running panel (unlike the legacy installer path).
+	panelUpdaterURL      = "https://raw.githubusercontent.com/" + phoenixRepo + "/main/update.sh"
 	maxPanelUpdaterBytes = 2 << 20
 
 	// panelUpdateInfoTTL caches the GitHub release lookup so multiple UI

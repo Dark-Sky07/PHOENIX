@@ -43,8 +43,10 @@ _fail() {
     exit 2
 }
 
-# check root
-[[ $EUID -ne 0 ]] && _fail "FATAL ERROR: Please run this script with root privilege."
+# check root (the opt-in function harness never executes an update).
+if [[ $EUID -ne 0 && "${PHOENIX_UPDATE_TEST_LIB:-0}" != "1" ]]; then
+    _fail "FATAL ERROR: Please run this script with root privilege."
+fi
 
 if _command_exists curl; then
     curl_bin=$(which curl)
@@ -104,6 +106,10 @@ update_db_snapshot=""
 update_db_snapshot_dir=""
 update_db_snapshot_ready=0
 update_defer_service_start=0
+update_lock_dir=""
+update_maintenance_dir=""
+update_maintenance_marker=""
+update_maintenance_active=0
 resolve_latest_xray_version() {
     local releases version
     releases="$(curl -4fsSL --retry 3 --connect-timeout 10 "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=20")" || return 1
@@ -1195,6 +1201,16 @@ configure_update_database() {
     local kind folder embedded_name candidate
     local -a candidates=()
 
+    # The panel process reads a maintenance marker from its database folder.
+    # Keep that marker outside the replaceable install tree, including when an
+    # operator configured a relative folder (which the panel resolves from its
+    # WorkingDirectory).
+    update_maintenance_dir="${XUI_DB_FOLDER:-/etc/x-ui}"
+    if [[ "$update_maintenance_dir" != /* ]]; then
+        update_maintenance_dir="${xui_folder}/${update_maintenance_dir}"
+    fi
+    update_maintenance_marker="${update_maintenance_dir}/panel-update-in-progress"
+
     kind="$(printf '%s' "${XUI_DB_TYPE:-sqlite}" | tr '[:upper:]' '[:lower:]')"
     case "$kind" in
         postgres|postgresql|pg)
@@ -1320,6 +1336,56 @@ restore_update_database() {
     return 0
 }
 
+# Serialize updaters before touching the service. In particular, a web-triggered
+# updater must not race a CLI invocation through two independent directory
+# swaps. mkdir is portable across supported distributions and leaves an
+# intentionally visible lock if the updater is killed before its EXIT trap.
+acquire_update_lock() {
+    local parent
+    parent="$(dirname "$xui_folder")"
+    update_lock_dir="${parent}/.x-ui-update.lock"
+    if ! mkdir "$update_lock_dir" 2>/dev/null; then
+        echo -e "${red}Another x-ui update is already running or was interrupted (${update_lock_dir}). The live installation was not touched.${plain}"
+        return 1
+    fi
+    printf '%s\n' "pid=$$ started=$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${update_lock_dir}/owner" || {
+        rmdir "$update_lock_dir" 2>/dev/null || true
+        update_lock_dir=""
+        return 1
+    }
+}
+
+# Prevent a planned, bounded service replacement from being mistaken for an
+# Xray failure by the old or newly started panel. The marker is deliberately
+# outside /usr/local/x-ui, is created before shutdown, and is removed only
+# after a stable API listener has been verified. If the updater is killed, it
+# remains as a fail-closed maintenance signal rather than inventing traffic or
+# silently clearing accounting evidence.
+begin_update_maintenance() {
+    local temporary
+    [[ -n "$update_maintenance_marker" ]] || return 1
+    if [[ -e "$update_maintenance_marker" || -L "$update_maintenance_marker" ]]; then
+        echo -e "${red}An interrupted panel update is still marked at ${update_maintenance_marker}; refusing to overwrite its safety barrier.${plain}"
+        return 1
+    fi
+    mkdir -p -m 0700 "$update_maintenance_dir" || return 1
+    temporary="${update_maintenance_marker}.tmp.$$"
+    (umask 077; printf 'pid=%s\nstarted=%s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$temporary") || return 1
+    mv -f "$temporary" "$update_maintenance_marker" || {
+        rm -f "$temporary"
+        return 1
+    }
+    update_maintenance_active=1
+    echo -e "${yellow}Accounting maintenance barrier enabled for the service replacement.${plain}"
+}
+
+end_update_maintenance() {
+    [[ "$update_maintenance_active" -eq 1 ]] || return 0
+    rm -f "$update_maintenance_marker" || return 1
+    update_maintenance_active=0
+    echo -e "${green}Accounting maintenance barrier cleared after stable runtime verification.${plain}"
+}
+
 stage_update_assets() {
     local parent archive_name service_url
     parent="$(dirname "$xui_folder")"
@@ -1405,6 +1471,11 @@ cleanup_update_transaction() {
     update_db_snapshot_dir=""
     update_db_snapshot_ready=0
     update_defer_service_start=0
+    if [[ -n "$update_lock_dir" && -d "$update_lock_dir" ]]; then
+        rm -f "${update_lock_dir}/owner" 2>/dev/null || true
+        rmdir "$update_lock_dir" 2>/dev/null || true
+    fi
+    update_lock_dir=""
 }
 
 service_is_active() {
@@ -1415,18 +1486,12 @@ service_is_active() {
     fi
 }
 
-# A green service manager state only proves that the panel process exists. The
-# actual client runtime also requires the local Xray control listener. Check it
-# after an update while the rollback boundary is still available, so a binary
-# that starts but cannot launch Xray is never announced as a successful update.
-verify_xray_api_listener() {
-    local config_path port attempt
-    config_path="${xui_folder}/bin/config.json"
-    if ! command -v python3 >/dev/null 2>&1; then
-        echo -e "${red}Python 3 is required to validate the Xray API listener.${plain}"
-        return 1
-    fi
-    if ! port="$(python3 - "$config_path" <<'PY'
+# Read the API port only from a complete JSON configuration. A panel creates
+# this file during startup on first install, so its temporary absence is a
+# pending state, not proof that a successful replacement is broken.
+read_xray_api_port() {
+    local config_path="$1"
+    python3 - "$config_path" <<'PY'
 import json
 import sys
 
@@ -1444,22 +1509,44 @@ except Exception:
     raise SystemExit(1)
 print(port)
 PY
-)"; then
-        echo -e "${red}Could not read the Xray API port from ${config_path}.${plain}"
+}
+
+# A green service-manager state alone proves only that a panel process exists.
+# Require three consecutive successful loopback API connections after the
+# candidate owns its final live directory. This avoids the old false-negative
+# window where config.json was sampled during a stop/swap/start transition, and
+# keeps the rollback boundary until Xray is demonstrably stable.
+verify_xray_api_listener() {
+    local config_path port observed_port attempt stable_samples=0
+    config_path="${xui_folder}/bin/config.json"
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo -e "${red}Python 3 is required to validate the Xray API listener.${plain}"
         return 1
     fi
-    for attempt in {1..60}; do
-        if (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null; then
-            echo -e "${green}Verified Xray API listener on 127.0.0.1:${port}.${plain}"
-            return 0
-        fi
+    for attempt in {1..90}; do
         if ! service_is_active; then
             echo -e "${red}x-ui stopped while waiting for the Xray API listener.${plain}"
             return 1
         fi
+        port="$(read_xray_api_port "$config_path" 2>/dev/null || true)"
+        if [[ "$port" =~ ^[0-9]+$ ]] && (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null; then
+            if [[ "$observed_port" == "$port" ]]; then
+                stable_samples=$((stable_samples + 1))
+            else
+                observed_port="$port"
+                stable_samples=1
+            fi
+            if [[ "$stable_samples" -ge 3 ]]; then
+                echo -e "${green}Verified stable Xray API listener on 127.0.0.1:${port}.${plain}"
+                return 0
+            fi
+        else
+            observed_port=""
+            stable_samples=0
+        fi
         sleep 1
     done
-    echo -e "${red}Xray API listener 127.0.0.1:${port} did not become ready within 60 seconds.${plain}"
+    echo -e "${red}Xray API/config did not become stably ready within 90 seconds (${config_path}).${plain}"
     return 1
 }
 
@@ -1479,12 +1566,90 @@ service_is_enabled() {
     fi
 }
 
+# Print processes which would retain a reference to the install tree if it were
+# renamed. Renaming a directory while one of these processes still has it as a
+# CWD is exactly the condition that produced relative `bin/config.json` and
+# MTProto `mkdir bin` failures in production.
+live_install_processes() {
+    local proc pid cwd exe
+    for proc in /proc/[0-9]*; do
+        [[ -d "$proc" ]] || continue
+        pid="${proc##*/}"
+        [[ "$pid" != "$$" ]] || continue
+        cwd="$(readlink "$proc/cwd" 2>/dev/null || true)"
+        exe="$(readlink "$proc/exe" 2>/dev/null || true)"
+        if [[ "$cwd" == "$xui_folder" || "$cwd" == "$xui_folder/"* || "$cwd" == "$xui_folder (deleted)"* || "$exe" == "$xui_folder/"* || "$exe" == "$xui_folder (deleted)"* ]]; then
+            printf '%s|%s|%s\n' "$pid" "$cwd" "$exe"
+        fi
+    done
+}
+
+# A live process whose executable is in the panel tree is a managed panel or
+# sidecar and may be terminated after systemd/OpenRC has already requested a
+# graceful shutdown. Anything that merely has its CWD there (for example an
+# administrator shell) is never killed; the update aborts rather than moving
+# its working directory out from under it.
+quiesce_live_install_processes() {
+    local snapshot pid cwd exe attempt managed=1
+    for attempt in {1..8}; do
+        snapshot="$(live_install_processes)"
+        [[ -z "$snapshot" ]] && return 0
+        managed=1
+        while IFS='|' read -r pid cwd exe; do
+            [[ -n "$pid" ]] || continue
+            if [[ "$exe" == "$xui_folder/"* || "$exe" == "$xui_folder (deleted)"* ]]; then
+                kill -TERM "$pid" 2>/dev/null || true
+            else
+                echo -e "${red}Process ${pid} still has ${xui_folder} as its working directory (${exe:-unknown executable}); refusing to move the live tree.${plain}"
+                managed=0
+            fi
+        done <<< "$snapshot"
+        [[ "$managed" -eq 1 ]] || return 1
+        sleep 1
+    done
+
+    snapshot="$(live_install_processes)"
+    while IFS='|' read -r pid cwd exe; do
+        [[ -n "$pid" ]] || continue
+        if [[ "$exe" == "$xui_folder/"* || "$exe" == "$xui_folder (deleted)"* ]]; then
+            kill -KILL "$pid" 2>/dev/null || true
+        else
+            echo -e "${red}Process ${pid} still has ${xui_folder} as its working directory; refusing to move the live tree.${plain}"
+            return 1
+        fi
+    done <<< "$snapshot"
+    sleep 1
+    snapshot="$(live_install_processes)"
+    if [[ -n "$snapshot" ]]; then
+        echo -e "${red}Panel processes still reference ${xui_folder}; the installation was not moved.${plain}"
+        return 1
+    fi
+    return 0
+}
+
+wait_for_service_stop() {
+    local attempt
+    for attempt in {1..30}; do
+        if ! service_is_active; then
+            # quiesce performs its own bounded TERM/KILL wait and refuses
+            # unknown CWD holders immediately; do not keep looping once the
+            # service manager has confirmed the unit is inactive.
+            quiesce_live_install_processes
+            return $?
+        fi
+        sleep 1
+    done
+    echo -e "${red}x-ui did not fully stop and release ${xui_folder}; the installation was not replaced.${plain}"
+    return 1
+}
+
 service_stop_for_update() {
     if [[ "$release" == "alpine" ]]; then
-        rc-service x-ui stop >/dev/null 2>&1
+        rc-service x-ui stop >/dev/null 2>&1 || return 1
     else
-        systemctl stop x-ui >/dev/null 2>&1
+        systemctl stop x-ui >/dev/null 2>&1 || return 1
     fi
+    wait_for_service_stop
 }
 
 service_start_after_update() {
@@ -1541,20 +1706,24 @@ rollback_update() {
     echo -e "${red}Update failed; restoring the previous x-ui installation and service state.${plain}"
 
     if [[ "$update_commit_started" -eq 1 ]]; then
-        # Stop the candidate before moving it out of the live path. Never kill
-        # unrelated daemon processes: active VPN users must not be disconnected
-        # by rollback cleanup.
-        service_stop_for_update >/dev/null 2>&1 || true
+        # Never delete or rename the candidate while it can still be a process
+        # CWD. A failed stop is an explicit fail-closed condition: keep both
+        # trees and the maintenance barrier for operator recovery rather than
+        # recreating the deleted-CWD failure during rollback.
+        if ! service_stop_for_update; then
+            echo -e "${red}CRITICAL: candidate service did not release ${xui_folder}; rollback trees were retained and the accounting maintenance barrier remains active.${plain}"
+            return 1
+        fi
         if [[ -n "$update_backup_dir" && -d "$update_backup_dir" ]]; then
             if [[ -e "$xui_folder" || -L "$xui_folder" ]]; then
-                rm -rf "$xui_folder" || true
+                rm -rf "$xui_folder" || return 1
             fi
-            mv "$update_backup_dir" "$xui_folder" || true
+            mv "$update_backup_dir" "$xui_folder" || return 1
         fi
-        restore_update_service >/dev/null 2>&1 || true
+        restore_update_service || return 1
         if [[ -n "$update_wrapper_backup" && -e "$update_wrapper_backup" ]]; then
             rm -f /usr/bin/x-ui
-            cp -a "$update_wrapper_backup" /usr/bin/x-ui || true
+            cp -a "$update_wrapper_backup" /usr/bin/x-ui || return 1
         elif [[ -n "$update_wrapper_backup" ]]; then
             rm -f /usr/bin/x-ui
         fi
@@ -1566,8 +1735,18 @@ rollback_update() {
             fi
         fi
         if [[ "$update_old_service_active" -eq 1 ]]; then
-            service_start_after_update >/dev/null 2>&1 || true
+            if ! service_start_after_update || ! verify_post_update_runtime; then
+                echo -e "${red}CRITICAL: restored service did not pass stable runtime verification; accounting maintenance remains active.${plain}"
+                return 1
+            fi
         fi
+    fi
+    # When the old service had intentionally been disabled, no panel worker can
+    # observe the replacement interval. Otherwise the barrier is cleared only
+    # after the restored API was proven stable above.
+    if ! end_update_maintenance; then
+        echo -e "${red}CRITICAL: could not clear the accounting maintenance marker after rollback.${plain}"
+        return 1
     fi
     update_transaction_active=0
     update_commit_started=0
@@ -1576,6 +1755,10 @@ rollback_update() {
 
 commit_update_transaction() {
     local parent service_path
+    [[ "$update_maintenance_active" -eq 1 ]] || {
+        echo -e "${red}Accounting maintenance barrier is not active; refusing to replace the live installation.${plain}"
+        return 1
+    }
     parent="$(dirname "$xui_folder")"
     update_backup_dir="${parent}/.x-ui-rollback.$$"
     [[ ! -e "$update_backup_dir" ]] || return 1
@@ -1641,6 +1824,10 @@ commit_update_transaction() {
 }
 
 finalize_update_transaction() {
+    # The candidate is still rollbackable until this succeeds. Do not announce
+    # success while the maintenance barrier remains in place, because that
+    # would leave accounting paused after an apparently successful update.
+    end_update_maintenance || return 1
     rm -rf "$update_backup_dir"
     update_backup_dir=""
     update_transaction_active=0
@@ -1667,7 +1854,10 @@ update_x-ui() {
     echo -e "${green}Current x-ui version: ${current_xui_version:-unknown}${plain}"
     echo -e "${green}Preparing a transactional x-ui update; the live installation will remain untouched until validation completes.${plain}"
 
-    tag_version=$(${curl_bin} -Ls "https://api.github.com/repos/${PHOENIX_REPO}/releases?per_page=10" 2>/dev/null | grep -m1 '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    tag_version="${PHOENIX_TAG:-}"
+    if [[ -z "$tag_version" ]]; then
+        tag_version=$(${curl_bin} -Ls "https://api.github.com/repos/${PHOENIX_REPO}/releases?per_page=10" 2>/dev/null | grep -m1 '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    fi
     if [[ -z "$tag_version" ]]; then
         echo -e "${yellow}Trying to fetch version with IPv4...${plain}"
         tag_version=$(${curl_bin} -4 -Ls "https://api.github.com/repos/${PHOENIX_REPO}/releases?per_page=10" 2>/dev/null | grep -m1 '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
@@ -1677,12 +1867,18 @@ update_x-ui() {
 
     # From this point every failure cleans only temporary files, or restores the
     # old directory/service/wrapper after the single atomic commit point.
+    if ! acquire_update_lock; then
+        _fail "ERROR: Could not acquire the x-ui update lock; the existing installation was not touched."
+    fi
     update_transaction_active=1
     trap 'rollback_update' EXIT
 
     stage_latest_xray
     if ! stage_update_assets; then
         _fail "ERROR: Failed to stage x-ui ${tag_version}; the existing installation was not touched."
+    fi
+    if ! begin_update_maintenance; then
+        _fail "ERROR: Could not establish the accounting maintenance barrier; the existing installation was not touched."
     fi
     echo -e "${green}Validated panel archive and latest Xray-core ${xray_update_version}; committing the staged installation...${plain}"
 
@@ -1707,11 +1903,19 @@ update_x-ui() {
     if ! service_start_after_update || ! verify_post_update_runtime; then
         _fail "ERROR: x-ui failed its post-update runtime verification; rollback completed."
     fi
-    finalize_update_transaction
+    if ! finalize_update_transaction; then
+        _fail "ERROR: x-ui passed runtime verification but could not finalize accounting maintenance safely; rollback completed."
+    fi
 
     echo -e "${green}x-ui ${tag_version} and Xray-core ${xray_update_version} update finished; it is running now.${plain}"
     echo -e "${green}The prior installation was retained until the new service passed its health check, then removed.${plain}"
 }
+
+# Runtime harnesses source the functions above with this opt-in guard; production
+# execution always enters the transactional updater below.
+if [[ "${PHOENIX_UPDATE_TEST_LIB:-0}" == "1" ]]; then
+    return 0 2>/dev/null || exit 0
+fi
 
 echo -e "${green}Running...${plain}"
 install_base
