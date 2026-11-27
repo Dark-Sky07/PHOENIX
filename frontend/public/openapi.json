@@ -2933,7 +2933,7 @@
   "tags": [
     {
       "name": "Authentication",
-      "description": "Two authentication modes are supported. UI sessions use a cookie set by the login endpoint. Programmatic clients (bots, scripts, remote panels) authenticate with a Bearer token taken from Settings → Security → API Token. Both work for every endpoint under /panel/api/*."
+      "description": "Two authentication modes are supported. UI sessions use a cookie set by the login endpoint. Programmatic clients (bots, scripts, remote panels) authenticate with a Bearer token taken from Settings → Security → API Token. Both work for routine endpoints under /panel/api/*. High-impact operations deliberately require an interactive superadmin browser session and refuse Bearer tokens: API-token/admin-account management, certificate issuance, database export or restore, external backups, audit-log erasure, accounting reconciliation repair, and OpenVPN revocation."
     },
     {
       "name": "Inbounds",
@@ -2957,11 +2957,11 @@
     },
     {
       "name": "Settings",
-      "description": "Panel configuration and user credentials. All endpoints live under /panel/api/setting and require a logged-in session or Bearer token."
+      "description": "Panel configuration and user credentials. Standard endpoints accept a logged-in session or Bearer token. API-token management, panel-admin management, certificate issuance, cloud-backup execution, and audit-log erasure require an interactive superadmin browser session and refuse Bearer tokens."
     },
     {
       "name": "API Tokens",
-      "description": "Manage Bearer tokens used for programmatic auth (bots, central panels acting on this node, CI). Each token has a unique name and an enabled flag — disable to revoke without deleting, delete to revoke permanently. Tokens are stored as SHA-256 hashes and the plaintext is returned only once, in the create response — it cannot be retrieved afterwards, so copy it then. Send one as <code>Authorization: Bearer &lt;token&gt;</code> on any /panel/api/* request — the token is a full-admin credential."
+      "description": "Manage Bearer tokens used for programmatic auth (bots, central panels acting on this node, CI). Each token has a unique name and an enabled flag — disable to revoke without deleting, delete to revoke permanently. Tokens are stored as SHA-256 hashes and the plaintext is returned only once, in the create response — it cannot be retrieved afterwards, so copy it then. A full-scope token can automate standard panel API operations, but it cannot access browser-session-only high-impact operations or manage API tokens/admin accounts itself."
     },
     {
       "name": "Xray Settings",
@@ -4712,7 +4712,7 @@
         "tags": [
           "Server"
         ],
-        "summary": "Stream the SQLite database file as an attachment. Use as a manual backup.",
+        "summary": "Stream the database backup as an attachment. Requires an interactive superadmin browser session; Bearer tokens are refused.",
         "operationId": "get_panel_api_server_getDb",
         "responses": {
           "200": {
@@ -4742,7 +4742,7 @@
         "tags": [
           "Server"
         ],
-        "summary": "Stream a cross-engine migration file as an attachment: a .dump (SQL text) on SQLite, or a .db SQLite database built from the live data on PostgreSQL.",
+        "summary": "Stream a cross-engine migration file as an attachment: a .dump (SQL text) on SQLite, or a .db SQLite database built from live PostgreSQL data. Requires an interactive superadmin browser session; Bearer tokens are refused.",
         "operationId": "get_panel_api_server_getMigration",
         "responses": {
           "200": {
@@ -5903,7 +5903,7 @@
         "tags": [
           "Server"
         ],
-        "summary": "Restore the panel DB from an uploaded SQLite file (multipart form, field name \"db\"). The panel restarts after restore. Destructive.",
+        "summary": "Restore the panel DB from an uploaded SQLite file (multipart form, field name \"db\"). The panel restarts after restore. Destructive and restricted to an interactive superadmin browser session; Bearer tokens are refused.",
         "operationId": "post_panel_api_server_importDB",
         "responses": {
           "200": {
@@ -9356,7 +9356,7 @@
         "tags": [
           "Backup"
         ],
-        "summary": "Send a fresh DB backup to every Telegram chat configured as an admin recipient. No body, no params.",
+        "summary": "Send a fresh DB backup to every Telegram chat configured as an admin recipient. No body, no params. Requires an interactive superadmin browser session; Bearer tokens are refused.",
         "operationId": "post_panel_api_backuptotgbot",
         "responses": {
           "200": {
@@ -9616,7 +9616,7 @@
         "tags": [
           "API Tokens"
         ],
-        "summary": "List every API token, enabled or not. The token value is never returned — only metadata.",
+        "summary": "List every API token, enabled or not. The token value is never returned — only metadata. Requires an interactive superadmin browser session; Bearer tokens are refused.",
         "operationId": "get_panel_api_setting_apiTokens",
         "responses": {
           "200": {
@@ -9657,7 +9657,7 @@
         "tags": [
           "API Tokens"
         ],
-        "summary": "Mint a new API token. Name must be unique and 1-64 characters; the token string is server-generated and returned only in this response — it is stored hashed and cannot be retrieved later.",
+        "summary": "Mint a new API token. Name must be unique and 1-64 characters; the token string is server-generated and returned only in this response — it is stored hashed and cannot be retrieved later. Requires an interactive superadmin browser session; Bearer tokens are refused.",
         "operationId": "post_panel_api_setting_apiTokens_create",
         "requestBody": {
           "required": true,
@@ -9747,7 +9747,7 @@
         "tags": [
           "API Tokens"
         ],
-        "summary": "Permanently delete a token. Any caller using it stops authenticating immediately.",
+        "summary": "Permanently delete a token. Any caller using it stops authenticating immediately. Requires an interactive superadmin browser session; Bearer tokens are refused.",
         "operationId": "post_panel_api_setting_apiTokens_delete_id",
         "parameters": [
           {
@@ -9791,7 +9791,7 @@
         "tags": [
           "API Tokens"
         ],
-        "summary": "Toggle a token enabled/disabled without deleting it. Disabled tokens are rejected by checkAPIAuth on the next request.",
+        "summary": "Toggle a token enabled/disabled without deleting it. Disabled tokens are rejected by checkAPIAuth on the next request. Requires an interactive superadmin browser session; Bearer tokens are refused.",
         "operationId": "post_panel_api_setting_apiTokens_setEnabled_id",
         "parameters": [
           {
@@ -9895,7 +9895,7 @@
         "tags": [
           "API Tokens"
         ],
-        "summary": "Issue a Let's Encrypt (RFC 8555 HTTP-01 on port 80, auto-renewed daily) or 1-year self-signed certificate and optionally apply its paths to the panel.",
+        "summary": "Issue a Let's Encrypt (RFC 8555 HTTP-01 on port 80, auto-renewed daily) or 1-year self-signed certificate and optionally apply its paths to the panel. Requires an interactive superadmin browser session; Bearer tokens are refused.",
         "operationId": "post_panel_api_setting_cert_issue",
         "requestBody": {
           "required": true,
@@ -10002,7 +10002,7 @@
         "tags": [
           "API Tokens"
         ],
-        "summary": "Immediately upload a database snapshot to the configured S3 / Cloudflare R2 / MinIO or WebDAV cloud storage and apply retention cleanup.",
+        "summary": "Immediately upload a database snapshot to the configured S3 / Cloudflare R2 / MinIO or WebDAV cloud storage and apply retention cleanup. Requires an interactive superadmin browser session; Bearer tokens are refused.",
         "operationId": "post_panel_api_setting_cloudBackup_run",
         "responses": {
           "200": {
@@ -10072,7 +10072,7 @@
         "tags": [
           "API Tokens"
         ],
-        "summary": "Clear all recorded security audit log entries.",
+        "summary": "Clear all recorded security audit log entries. Requires an interactive superadmin browser session; Bearer tokens are refused.",
         "operationId": "post_panel_api_setting_auditLogs_clear",
         "responses": {
           "200": {
@@ -11517,7 +11517,7 @@
         "tags": [
           "Resellers (نمایندگی)"
         ],
-        "summary": "Superadmin-only, backup-first repair. Dry-run by default; body { \"confirm\": \"RECONCILE_COUNTER_INCIDENTS\", \"dryRun\": false } archives dangling mappings and marker files before deleting them. Traffic journals are never cleared and no service is stopped or restarted.",
+        "summary": "Interactive-superadmin-only, backup-first repair. Bearer tokens are refused. Dry-run by default; body { \"confirm\": \"RECONCILE_COUNTER_INCIDENTS\", \"dryRun\": false } archives dangling mappings and marker files before deleting them. Traffic journals are never cleared and no service is stopped or restarted.",
         "operationId": "post_panel_api_resellers_reconciliation_repair",
         "responses": {
           "200": {
@@ -14192,7 +14192,7 @@
         "tags": [
           "Resellers (نمایندگی)"
         ],
-        "summary": "List all panel admin accounts and their RBAC roles/permissions (owner only).",
+        "summary": "List all panel admin accounts and their RBAC roles/permissions (interactive superadmin browser session only; Bearer tokens are refused).",
         "operationId": "get_panel_api_setting_admins",
         "responses": {
           "200": {
@@ -14222,7 +14222,7 @@
         "tags": [
           "Resellers (نمایندگی)"
         ],
-        "summary": "Create a new panel admin account with an RBAC role and granular permissions (owner only).",
+        "summary": "Create a new panel admin account with an RBAC role and granular permissions (interactive superadmin browser session only; Bearer tokens are refused).",
         "operationId": "post_panel_api_setting_admins_create",
         "responses": {
           "200": {
@@ -14252,7 +14252,7 @@
         "tags": [
           "Resellers (نمایندگی)"
         ],
-        "summary": "Update a panel admin account RBAC role, permissions, or status (owner only).",
+        "summary": "Update a panel admin account RBAC role, permissions, or status (interactive superadmin browser session only; Bearer tokens are refused).",
         "operationId": "post_panel_api_setting_admins_update_id",
         "parameters": [
           {
@@ -14293,7 +14293,7 @@
         "tags": [
           "Resellers (نمایندگی)"
         ],
-        "summary": "Delete a secondary panel admin account (owner only).",
+        "summary": "Delete a secondary panel admin account (interactive superadmin browser session only; Bearer tokens are refused).",
         "operationId": "post_panel_api_setting_admins_delete_id",
         "parameters": [
           {
@@ -14797,7 +14797,7 @@
         "tags": [
           "OpenVPN revocation"
         ],
-        "summary": "Revoke one client on every managed OpenVPN daemon generation. A conflict response means the operation is incomplete and quota must not be released.",
+        "summary": "Revoke one client on every managed OpenVPN daemon generation. Requires an interactive superadmin browser session; Bearer tokens are refused. A conflict response means the operation is incomplete and quota must not be released.",
         "operationId": "post_panel_api_openvpn_revoke",
         "requestBody": {
           "required": true,
