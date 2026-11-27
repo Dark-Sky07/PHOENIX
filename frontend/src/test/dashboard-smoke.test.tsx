@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { MemoryRouter } from 'react-router-dom';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { MemoryRouter, useLocation } from 'react-router-dom';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 import { ThemeProvider } from '@/hooks/useTheme';
 import { Status } from '@/models/status';
@@ -121,7 +121,7 @@ vi.mock('@/api/queries/useNodesQuery', () => ({
 }));
 
 const statusObj = {
-  counterIncidents: { available: true, databaseCount: 0, fallbackPresent: false, pendingInProcess: false } as CounterIncidentStatus,
+  counterIncidents: { available: true, databaseCount: 0, fallbackPresent: false, pendingInProcess: false, daemonIdentityCount: 0 } as CounterIncidentStatus,
   nodeSnapshotSafety: { available: true, nodeCount: 0 },
   cpu: 5.8, cpuCores: 4, logicalPro: 8, cpuSpeedMhz: 2900,
   disk: { current: 65820373811.2, total: 171798691840 },
@@ -185,6 +185,10 @@ function wrap(ui: React.ReactNode) {
   );
 }
 
+function CurrentPath() {
+  return <output data-testid="current-path">{useLocation().pathname}</output>;
+}
+
 /** Ignore React act() noise, jsdom gaps and antd deprecation notices from pre-existing code. */
 function isRealError(args: unknown[]): boolean {
   const text = String(args[0]);
@@ -198,7 +202,7 @@ describe('smoke: redesigned pages', () => {
     vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => { errors.push(args); });
   });
   afterEach(() => {
-    statusObj.counterIncidents = { available: true, databaseCount: 0, fallbackPresent: false, pendingInProcess: false };
+    statusObj.counterIncidents = { available: true, databaseCount: 0, fallbackPresent: false, pendingInProcess: false, daemonIdentityCount: 0 };
     statusObj.nodeSnapshotSafety = { available: true, nodeCount: 0 };
     statusObj.openvpn.errorMsg = '';
     cleanup();
@@ -209,6 +213,8 @@ describe('smoke: redesigned pages', () => {
     const { default: IndexPage } = await import('@/pages/index/IndexPage');
     const { container } = wrap(<IndexPage />);
     expect(container.querySelector('.dash-hero')).toBeTruthy();
+    expect(container.querySelector('.accounting-safety-panel.is-healthy')).toBeTruthy();
+    expect(screen.getByText('Accounting protection active')).toBeTruthy();
     expect(container.querySelector('.reseller-traffic-warning')).toBeTruthy();
     const openvpnWarning = container.querySelector('.openvpn-credential-warning');
     expect(openvpnWarning).toBeTruthy();
@@ -248,9 +254,21 @@ describe('smoke: redesigned pages', () => {
       expect(container.querySelector('.ant-alert-error')).toBeTruthy();
       cleanup();
     }
-    statusObj.counterIncidents = { available: true, databaseCount: 0, fallbackPresent: false, pendingInProcess: false };
+    statusObj.counterIncidents = { available: true, databaseCount: 0, fallbackPresent: false, pendingInProcess: false, daemonIdentityCount: 0 };
     const { container } = wrap(<IndexPage />);
     expect(container.querySelector('.ant-alert-error')).toBeNull();
+  });
+
+  it('opens the non-destructive reconciliation review from the accounting safety card', async () => {
+    const { default: IndexPage } = await import('@/pages/index/IndexPage');
+    statusObj.counterIncidents = { available: true, databaseCount: 2, fallbackPresent: false, pendingInProcess: false, daemonIdentityCount: 0 };
+    const { container } = wrap(<><IndexPage /><CurrentPath /></>);
+
+    expect(container.querySelector('.accounting-safety-panel.is-review')).toBeTruthy();
+    expect(screen.getByText('Accounting review required')).toBeTruthy();
+    expect(container.querySelector('.accounting-safety-metric b')?.textContent).toBe('2');
+    fireEvent.click(screen.getByRole('button', { name: 'Open reconciliation' }));
+    expect(screen.getByTestId('current-path').textContent).toBe('/resellers/reconciliation');
   });
 
   it('warns about missing or unavailable daemon identity diagnostics', async () => {

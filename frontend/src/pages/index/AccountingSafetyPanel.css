@@ -1,0 +1,155 @@
+.accounting-safety-panel {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--phoenix-border);
+  border-radius: 18px;
+  background: linear-gradient(120deg, color-mix(in srgb, var(--phoenix-surface) 96%, transparent), var(--phoenix-surface));
+  box-shadow: 0 12px 28px -24px rgba(67, 20, 7, .55);
+}
+
+.accounting-safety-panel .ant-card-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(290px, 1fr) auto;
+  gap: 24px;
+  align-items: center;
+  padding: 20px 24px;
+}
+
+.accounting-safety-panel::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 4px;
+  background: var(--phoenix-accent);
+}
+
+.accounting-safety-panel.is-review::before {
+  background: #ff7a45;
+}
+
+.accounting-safety-panel.is-unknown::before {
+  background: #faad14;
+}
+
+.accounting-safety-main {
+  display: flex;
+  min-width: 0;
+  gap: 14px;
+  align-items: flex-start;
+}
+
+.accounting-safety-icon {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  place-items: center;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--phoenix-accent) 14%, transparent);
+  color: var(--phoenix-accent);
+  font-size: 20px;
+}
+
+.accounting-safety-panel.is-review .accounting-safety-icon {
+  background: rgba(255, 122, 69, .12);
+  color: #ff7a45;
+}
+
+.accounting-safety-panel.is-unknown .accounting-safety-icon {
+  background: rgba(250, 173, 20, .14);
+  color: #d48806;
+}
+
+.accounting-safety-copy {
+  min-width: 0;
+}
+
+.accounting-safety-copy .phoenix-eyebrow {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--phoenix-text-2);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.accounting-safety-copy strong {
+  display: block;
+  color: var(--phoenix-text);
+  font-size: 16px;
+  line-height: 1.35;
+}
+
+.accounting-safety-copy p {
+  max-width: 650px;
+  margin: 4px 0 0;
+  color: var(--phoenix-text-2);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.accounting-safety-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.accounting-safety-metric {
+  min-width: 0;
+}
+
+.accounting-safety-metric > span {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--phoenix-text-2);
+  font-size: 11px;
+  line-height: 1.25;
+}
+
+.accounting-safety-metric b {
+  color: var(--phoenix-text);
+  font-size: 20px;
+  line-height: 1;
+}
+
+.accounting-safety-metric .ant-tag {
+  margin: 0;
+  font-size: 11px;
+}
+
+.accounting-safety-action {
+  min-width: 158px;
+}
+
+@media (max-width: 1180px) {
+  .accounting-safety-panel .ant-card-body {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .accounting-safety-metrics {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+}
+
+@media (max-width: 640px) {
+  .accounting-safety-panel .ant-card-body {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 18px;
+    padding: 18px;
+  }
+
+  .accounting-safety-metrics {
+    gap: 10px;
+  }
+
+  .accounting-safety-action {
+    width: 100%;
+  }
+}

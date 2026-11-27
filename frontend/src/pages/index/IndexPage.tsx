@@ -1,5 +1,6 @@
 import { lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 import {
   Alert,
   Button,
@@ -41,6 +42,7 @@ import AppSidebar from '@/layouts/AppSidebar';
 import { LazyMount } from '@/components/utility';
 import { setMessageInstance } from '@/utils/messageBus';
 import { usePanelUpdateInfo } from '@/api/queries/usePanelUpdateInfo';
+import AccountingSafetyPanel from './AccountingSafetyPanel';
 import ResourceTile from './ResourceTile';
 import ServicePanel from './ServicePanel';
 import NetworkPanel from './NetworkPanel';
@@ -101,6 +103,7 @@ function InfoTile({
 
 export default function IndexPage() {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const { isDark, isUltra, antdThemeConfig } = useTheme();
   const { status, fetched, fetchError, refresh } = useStatusQuery();
   const { isMobile } = useMediaQuery();
@@ -355,6 +358,12 @@ export default function IndexPage() {
                       </Tooltip>
                     </div>
                   </header>
+
+                  <AccountingSafetyPanel
+                    status={status.counterIncidents}
+                    nodeSafety={status.nodeSnapshotSafety}
+                    onOpenReconciliation={() => navigate('/resellers/reconciliation')}
+                  />
 
                   <Alert
                     className="reseller-traffic-warning"
