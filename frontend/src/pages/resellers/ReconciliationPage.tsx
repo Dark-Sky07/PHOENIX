@@ -56,6 +56,8 @@ interface ReconciliationReport {
   }[];
   inFlightPolls: string[];
   fallbackFiles: string[];
+  l2tpMarkerPresent: boolean;
+  l2tpEvidenceFiles: string[];
   xrayJournals: string[];
   tuicJournals: string[];
   xrayApi: { port: number; reachable: boolean; error?: string };
@@ -69,6 +71,8 @@ interface ReconcileResult {
   clearedIncidents: number;
   clearedPolls: number;
   movedFallbackFiles: number;
+  movedL2tpMarker: boolean;
+  movedL2tpEvidenceFiles: number;
   warnings: string[];
 }
 
@@ -119,6 +123,8 @@ export default function ReconciliationPage() {
       (report?.dbIncidents.length || 0) +
       (report?.inFlightPolls.length || 0) +
       (report?.fallbackFiles.length || 0) +
+      (report?.l2tpMarkerPresent ? 1 : 0) +
+      (report?.l2tpEvidenceFiles.length || 0) +
       (report?.xrayJournals.length || 0) +
       (report?.tuicJournals.length || 0) +
       (report?.xrayApi.reachable ? 0 : 1),
@@ -214,7 +220,7 @@ export default function ReconciliationPage() {
                 description={
                   <Space direction="vertical" size={2}>
                     <span>
-                      {`Dry run: ${String(lastResult.dryRun)}; mappings archived: ${lastResult.archivedMappings}; incidents: ${lastResult.clearedIncidents}; polls: ${lastResult.clearedPolls}; fallback files moved: ${lastResult.movedFallbackFiles}`}
+                      {`Dry run: ${String(lastResult.dryRun)}; mappings archived: ${lastResult.archivedMappings}; incidents: ${lastResult.clearedIncidents}; polls: ${lastResult.clearedPolls}; fallback files moved: ${lastResult.movedFallbackFiles}; L2TP marker moved: ${String(lastResult.movedL2tpMarker)}; L2TP evidence files moved: ${lastResult.movedL2tpEvidenceFiles}`}
                     </span>
                     {lastResult.backupDir && <Typography.Text code>{lastResult.backupDir}</Typography.Text>}
                     {lastResult.warnings.map((warning) => (
@@ -265,6 +271,11 @@ export default function ReconciliationPage() {
                   {nameList(report?.fallbackFiles || [])}
                 </div>
                 <div>
+                  <Typography.Text strong>{t('resellers.reconciliationL2tp', 'L2TP accounting evidence')}</Typography.Text>
+                  {report?.l2tpMarkerPresent && <Typography.Text code style={{ display: 'block' }}>l2tp-accounting-incident</Typography.Text>}
+                  {nameList(report?.l2tpEvidenceFiles || [])}
+                </div>
+                <div>
                   <Typography.Text strong>{t('resellers.reconciliationInFlight', 'In-flight poll markers')}</Typography.Text>
                   {nameList(report?.inFlightPolls || [])}
                 </div>
@@ -297,7 +308,7 @@ export default function ReconciliationPage() {
           <Alert
             type="warning"
             showIcon
-            message={t('resellers.reconciliationRepairWarning', 'This archives dangling mappings, counter incidents, poll markers and fallback files. Traffic journals are never cleared. No service is stopped or restarted.')}
+            message={t('resellers.reconciliationRepairWarning', 'This archives dangling mappings, counter incidents, poll markers, Xray fallback files, and L2TP accounting evidence. Traffic journals are never cleared. No service is stopped or restarted.')}
           />
           <Typography.Text>{t('resellers.reconciliationTypeToken', 'Type the confirmation token to continue:')}</Typography.Text>
           <Typography.Text code>{CONFIRM_TOKEN}</Typography.Text>

@@ -133,8 +133,14 @@ func (a *APIController) initRouter(g *gin.RouterGroup) {
 // an acknowledged kill was fully drained.
 func (a *APIController) RevokeOpenVPNClient(c *gin.Context) {
 	user := session.GetLoginUser(c)
-	if user == nil || user.Id != 1 {
-		c.JSON(http.StatusForbidden, gin.H{"success": false, "msg": "superadmin required for OpenVPN revocation"})
+	// checkAPIAuth maps a bearer token to the primary user so ordinary full
+	// token automation can use the documented panel API. Certificate revocation
+	// is deliberately narrower: it kills live sessions and is intended to be a
+	// browser-session superadmin action with an explicit operator review. Do not
+	// let that synthetic principal turn a copied full-scope token into this
+	// irreversible authority.
+	if c.GetBool("api_authed") || user == nil || user.Id != 1 {
+		c.JSON(http.StatusForbidden, gin.H{"success": false, "msg": "superadmin session required for OpenVPN revocation"})
 		return
 	}
 	var request struct {

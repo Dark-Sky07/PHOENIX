@@ -54,17 +54,19 @@ type XrayAPIHealth struct {
 // client identities because an operator must be able to identify and archive
 // a dangling mapping; it is never exposed to resellers.
 type ReconciliationReport struct {
-	Available        bool                       `json:"available"`
-	GeneratedAt      int64                      `json:"generatedAt"`
-	CounterIncident  CounterIncidentStatus      `json:"counterIncident"`
-	DanglingMappings []ResellerClientMappingRow `json:"danglingMappings"`
-	DBIncidents      []CounterIncidentRow       `json:"dbIncidents"`
-	InFlightPolls    []string                   `json:"inFlightPolls"`
-	FallbackFiles    []string                   `json:"fallbackFiles"`
-	XrayJournals     []string                   `json:"xrayJournals"`
-	TuicJournals     []string                   `json:"tuicJournals"`
-	XrayAPI          XrayAPIHealth              `json:"xrayApi"`
-	Warnings         []string                   `json:"warnings"`
+	Available         bool                       `json:"available"`
+	GeneratedAt       int64                      `json:"generatedAt"`
+	CounterIncident   CounterIncidentStatus      `json:"counterIncident"`
+	DanglingMappings  []ResellerClientMappingRow `json:"danglingMappings"`
+	DBIncidents       []CounterIncidentRow       `json:"dbIncidents"`
+	InFlightPolls     []string                   `json:"inFlightPolls"`
+	FallbackFiles     []string                   `json:"fallbackFiles"`
+	L2TPMarkerPresent bool                       `json:"l2tpMarkerPresent"`
+	L2TPEvidenceFiles []string                   `json:"l2tpEvidenceFiles"`
+	XrayJournals      []string                   `json:"xrayJournals"`
+	TuicJournals      []string                   `json:"tuicJournals"`
+	XrayAPI           XrayAPIHealth              `json:"xrayApi"`
+	Warnings          []string                   `json:"warnings"`
 }
 
 type ReconcileOptions struct {
@@ -73,13 +75,15 @@ type ReconcileOptions struct {
 }
 
 type ReconcileResult struct {
-	DryRun             bool     `json:"dryRun"`
-	BackupDir          string   `json:"backupDir,omitempty"`
-	ArchivedMappings   int64    `json:"archivedMappings"`
-	ClearedIncidents   int64    `json:"clearedIncidents"`
-	ClearedPolls       int64    `json:"clearedPolls"`
-	MovedFallbackFiles int64    `json:"movedFallbackFiles"`
-	Warnings           []string `json:"warnings"`
+	DryRun                 bool     `json:"dryRun"`
+	BackupDir              string   `json:"backupDir,omitempty"`
+	ArchivedMappings       int64    `json:"archivedMappings"`
+	ClearedIncidents       int64    `json:"clearedIncidents"`
+	ClearedPolls           int64    `json:"clearedPolls"`
+	MovedFallbackFiles     int64    `json:"movedFallbackFiles"`
+	MovedL2TPMarker        bool     `json:"movedL2tpMarker"`
+	MovedL2TPEvidenceFiles int64    `json:"movedL2tpEvidenceFiles"`
+	Warnings               []string `json:"warnings"`
 }
 
 func listDanglingResellerClientMappings(db *gorm.DB) ([]ResellerClientMappingRow, error) {
@@ -130,6 +134,34 @@ func listDirectoryEntries(dir string) ([]string, error) {
 		names = append(names, entry.Name())
 	}
 	return names, nil
+}
+
+// listL2TPReconciliationEvidence reports the local half of an L2TP accounting
+// incident. The shared database row alone is insufficient: leaving this marker
+// or one of its captured observations in place makes every later L2TP poll
+// fail closed. Reject unexpected filesystem entries rather than archiving an
+// arbitrary directory or symlink from a privileged reconciliation endpoint.
+func listL2TPReconciliationEvidence() (markerPresent bool, evidence []string, err error) {
+	marker, err := os.Lstat(l2tpAccountingIncidentPath())
+	if errors.Is(err, os.ErrNotExist) {
+		markerPresent = false
+	} else if err != nil {
+		return false, nil, fmt.Errorf("inspect L2TP accounting marker: %w", err)
+	} else if !marker.Mode().IsRegular() {
+		return false, nil, errors.New("invalid L2TP accounting marker entry")
+	} else {
+		markerPresent = true
+	}
+
+	files, err := l2tpRecoveryFiles(filepath.Join(config.GetDBFolderPath(), "l2tp-accounting-evidence"))
+	if err != nil {
+		return false, nil, fmt.Errorf("inspect L2TP accounting evidence: %w", err)
+	}
+	evidence = make([]string, 0, len(files))
+	for _, file := range files {
+		evidence = append(evidence, file.name)
+	}
+	return markerPresent, evidence, nil
 }
 
 func readXrayAPIPort() (int, error) {
@@ -196,6 +228,10 @@ func ReadReconciliationReport(db *gorm.DB) ReconciliationReport {
 		report.Available = false
 		report.Warnings = append(report.Warnings, "Could not read counter incident fallback: "+err.Error())
 	}
+	if report.L2TPMarkerPresent, report.L2TPEvidenceFiles, err = listL2TPReconciliationEvidence(); err != nil {
+		report.Available = false
+		report.Warnings = append(report.Warnings, "Could not read L2TP accounting evidence: "+err.Error())
+	}
 	if report.XrayJournals, err = listDirectoryEntries(XrayTrafficJournalDir()); err != nil {
 		report.Available = false
 		report.Warnings = append(report.Warnings, "Could not read Xray traffic journal: "+err.Error())
@@ -221,6 +257,60 @@ func writeReconciliationBackup(dir string, name string, value any) error {
 	return os.WriteFile(filepath.Join(dir, name), append(data, '\n'), 0600)
 }
 
+// archiveL2TPReconciliationEvidence moves exactly the files present in the
+// reviewed report. A new observation is deliberately left live and prevents
+// the matching database barrier from being cleared below.
+func archiveL2TPReconciliationEvidence(report ReconciliationReport, backupDir string, result *ReconcileResult) error {
+	if !report.L2TPMarkerPresent && len(report.L2TPEvidenceFiles) == 0 {
+		return nil
+	}
+	moveRegular := func(source, target, label string) error {
+		info, err := os.Lstat(source)
+		if err != nil {
+			return fmt.Errorf("inspect %s: %w", label, err)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("invalid %s entry", label)
+		}
+		if err := os.Rename(source, target); err != nil {
+			return fmt.Errorf("archive %s: %w", label, err)
+		}
+		return nil
+	}
+	if report.L2TPMarkerPresent {
+		if err := moveRegular(l2tpAccountingIncidentPath(), filepath.Join(backupDir, "l2tp-accounting-incident"), "L2TP accounting marker"); err != nil {
+			return fmt.Errorf("archive L2TP accounting marker: %w", err)
+		}
+		result.MovedL2TPMarker = true
+	}
+
+	evidenceDir := filepath.Join(config.GetDBFolderPath(), "l2tp-accounting-evidence")
+	if len(report.L2TPEvidenceFiles) > 0 {
+		evidenceBackup := filepath.Join(backupDir, "l2tp-accounting-evidence")
+		if err := os.MkdirAll(evidenceBackup, 0700); err != nil {
+			return fmt.Errorf("prepare L2TP accounting evidence backup: %w", err)
+		}
+		for _, name := range report.L2TPEvidenceFiles {
+			if err := moveRegular(filepath.Join(evidenceDir, name), filepath.Join(evidenceBackup, name), fmt.Sprintf("L2TP accounting evidence %q", name)); err != nil {
+				return err
+			}
+			result.MovedL2TPEvidenceFiles++
+		}
+		if err := syncCounterIncidentDir(evidenceDir); err != nil {
+			return fmt.Errorf("sync L2TP accounting evidence archive: %w", err)
+		}
+	}
+	if report.L2TPMarkerPresent {
+		if err := syncCounterIncidentDir(filepath.Dir(l2tpAccountingIncidentPath())); err != nil {
+			return fmt.Errorf("sync L2TP accounting marker archive: %w", err)
+		}
+	}
+	if err := syncCounterIncidentDir(backupDir); err != nil {
+		return fmt.Errorf("sync L2TP accounting backup: %w", err)
+	}
+	return nil
+}
+
 // ReconcileCounterIncidents archives evidence first and only then removes
 // markers. It never stops or restarts the panel or Xray, and it never deletes
 // journal files, which may represent traffic that has not been applied yet.
@@ -233,7 +323,7 @@ func ReconcileCounterIncidents(db *gorm.DB, options ReconcileOptions) (Reconcile
 		result.Warnings = append(result.Warnings, "Dry run only: the confirmation token did not match; no evidence was changed.")
 		return result, nil
 	}
-	if xrayCounterIncidentPending.Load() || xrayCoreExitPending.Load() || xrayAPIOutagePending.Load() {
+	if xrayCounterIncidentPending.Load() || xrayCoreExitPending.Load() || xrayAPIOutagePending.Load() || l2tpIncidentPending.Load() {
 		return result, errors.New("reconciliation refused while a local traffic incident is still being persisted")
 	}
 
@@ -244,8 +334,26 @@ func ReconcileCounterIncidents(db *gorm.DB, options ReconcileOptions) (Reconcile
 		result.ClearedIncidents = int64(len(report.DBIncidents))
 		result.ClearedPolls = int64(len(report.InFlightPolls))
 		result.MovedFallbackFiles = int64(len(report.FallbackFiles))
+		result.MovedL2TPMarker = report.L2TPMarkerPresent
+		result.MovedL2TPEvidenceFiles = int64(len(report.L2TPEvidenceFiles))
 		result.Warnings = append(result.Warnings, "Dry run: no evidence was changed.")
 		return result, nil
+	}
+
+	// Serialize with L2TP incident publication on this panel and every panel
+	// deliberately sharing the active database. Re-read under that lock: an
+	// operator must never clear a snapshot that changed while waiting to repair.
+	unlock, err := LockResellerAllocationForXrayRecovery()
+	if err != nil {
+		return result, fmt.Errorf("lock reconciliation: %w", err)
+	}
+	defer unlock()
+	if xrayCounterIncidentPending.Load() || xrayCoreExitPending.Load() || xrayAPIOutagePending.Load() || l2tpIncidentPending.Load() {
+		return result, errors.New("reconciliation refused while a local traffic incident is still being persisted")
+	}
+	report = ReadReconciliationReport(db)
+	if !report.Available {
+		return result, errors.New("reconciliation refused because its evidence report is incomplete")
 	}
 
 	backupRoot := filepath.Join(config.GetDBFolderPath(), "reconciliation-backups", time.Now().UTC().Format("20060102-150405.000"))
@@ -276,8 +384,22 @@ func ReconcileCounterIncidents(db *gorm.DB, options ReconcileOptions) (Reconcile
 			return result, fmt.Errorf("sync fallback directory: %w", err)
 		}
 	}
+	if err := archiveL2TPReconciliationEvidence(report, backupRoot, &result); err != nil {
+		return result, err
+	}
+	// A new L2TP observation can share the existing -2 database key. Do not
+	// clear that row if fresh local evidence appeared while this archive ran:
+	// the archived old file remains auditable and the newer evidence keeps the
+	// panel safely fail-closed for a fresh operator review.
+	markerPresent, evidenceFiles, err := listL2TPReconciliationEvidence()
+	if err != nil {
+		return result, err
+	}
+	if markerPresent || len(evidenceFiles) > 0 {
+		return result, errors.New("L2TP accounting evidence changed during reconciliation; database incidents were retained")
+	}
 
-	err := db.Transaction(func(tx *gorm.DB) error {
+	err = db.Transaction(func(tx *gorm.DB) error {
 		if len(report.DanglingMappings) > 0 {
 			now := time.Now().UnixMilli()
 			archives := make([]model.ResellerClientMappingArchive, 0, len(report.DanglingMappings))
@@ -356,6 +478,8 @@ func ReconciliationNeeded(report ReconciliationReport) bool {
 		len(report.DBIncidents) > 0 ||
 		len(report.InFlightPolls) > 0 ||
 		len(report.FallbackFiles) > 0 ||
+		report.L2TPMarkerPresent ||
+		len(report.L2TPEvidenceFiles) > 0 ||
 		len(report.XrayJournals) > 0 ||
 		len(report.TuicJournals) > 0
 }

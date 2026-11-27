@@ -33,6 +33,9 @@ func l2tpRecoveryFiles(dir string) ([]l2tpRecoveryFile, error) {
 		if entry.IsDir() {
 			return nil, fmt.Errorf("unexpected directory in L2TP accounting evidence: %q", entry.Name())
 		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("unexpected symlink in L2TP accounting evidence: %q", entry.Name())
+		}
 		info, err := entry.Info()
 		if err != nil {
 			return nil, err
@@ -50,6 +53,20 @@ func l2tpRecoveryFiles(dir string) ([]l2tpRecoveryFile, error) {
 // the currently running daemon epoch. A newly observed dropped session remains
 // fail-closed; it cannot be released merely because a later poll happened to
 // look healthy.
+// l2tpIncidentsPredateDaemon applies the same epoch rule to the database half
+// of the incident as to the marker and captured files. A row written by the
+// current daemon cannot be released merely because older local evidence was
+// present too. Legacy rows without a creation time predate this mechanism and
+// remain eligible only when all local evidence does.
+func l2tpIncidentsPredateDaemon(incidents []model.ResellerNodeCounterIncident, startedAt time.Time) bool {
+	for _, incident := range incidents {
+		if incident.CreatedAt != 0 && incident.CreatedAt >= startedAt.UnixMilli() {
+			return false
+		}
+	}
+	return true
+}
+
 func l2tpRestartRecoveryEligible(startedAt time.Time) (bool, error) {
 	if startedAt.IsZero() || l2tpIncidentPending.Load() {
 		return false, nil
@@ -130,6 +147,12 @@ func RecoverL2TPAccountingAfterRestart(manager *l2tp.Manager) (bool, string, err
 	var incidents []model.ResellerNodeCounterIncident
 	if err := db.Where("node_id = ?", -2).Order("id ASC").Find(&incidents).Error; err != nil {
 		return false, "", fmt.Errorf("read shared L2TP accounting incident: %w", err)
+	}
+	if !l2tpIncidentsPredateDaemon(incidents, startedAt) {
+		// The replacement has observed a current-epoch incident. Preserve every
+		// marker and row for explicit reconciliation instead of treating an old
+		// local marker as authority to clear the newer database evidence.
+		return false, "", nil
 	}
 
 	backupRoot := filepath.Join(config.GetDBFolderPath(), "reconciliation-backups")
