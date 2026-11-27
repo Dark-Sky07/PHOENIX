@@ -1415,6 +1415,62 @@ service_is_active() {
     fi
 }
 
+# A green service manager state only proves that the panel process exists. The
+# actual client runtime also requires the local Xray control listener. Check it
+# after an update while the rollback boundary is still available, so a binary
+# that starts but cannot launch Xray is never announced as a successful update.
+verify_xray_api_listener() {
+    local config_path port attempt
+    config_path="${xui_folder}/bin/config.json"
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo -e "${red}Python 3 is required to validate the Xray API listener.${plain}"
+        return 1
+    fi
+    if ! port="$(python3 - "$config_path" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        config = json.load(handle)
+    port = next(
+        inbound.get("port")
+        for inbound in config.get("inbounds", [])
+        if isinstance(inbound, dict) and inbound.get("tag") == "api"
+    )
+    if not isinstance(port, int) or not 1 <= port <= 65535:
+        raise ValueError("invalid API port")
+except Exception:
+    raise SystemExit(1)
+print(port)
+PY
+)"; then
+        echo -e "${red}Could not read the Xray API port from ${config_path}.${plain}"
+        return 1
+    fi
+    for attempt in {1..15}; do
+        if (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null; then
+            echo -e "${green}Verified Xray API listener on 127.0.0.1:${port}.${plain}"
+            return 0
+        fi
+        if ! service_is_active; then
+            echo -e "${red}x-ui stopped while waiting for the Xray API listener.${plain}"
+            return 1
+        fi
+        sleep 1
+    done
+    echo -e "${red}Xray API listener 127.0.0.1:${port} did not become ready within 15 seconds.${plain}"
+    return 1
+}
+
+verify_post_update_runtime() {
+    if ! service_is_active; then
+        echo -e "${red}x-ui service is not active after update.${plain}"
+        return 1
+    fi
+    verify_xray_api_listener
+}
+
 service_is_enabled() {
     if [[ "$release" == "alpine" ]]; then
         rc-update show default 2>/dev/null | grep -Eq '(^|[[:space:]])x-ui([[:space:]]|$)'
@@ -1648,8 +1704,8 @@ update_x-ui() {
     fi
     update_defer_service_start=0
 
-    if ! service_start_after_update || ! service_is_active; then
-        _fail "ERROR: x-ui failed its post-configuration health check; rollback completed."
+    if ! service_start_after_update || ! verify_post_update_runtime; then
+        _fail "ERROR: x-ui failed its post-update runtime verification; rollback completed."
     fi
     finalize_update_transaction
 

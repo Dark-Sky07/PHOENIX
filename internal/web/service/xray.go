@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Dark-Sky07/phoenix/internal/amneziawg"
 	"github.com/Dark-Sky07/phoenix/internal/amneziawgnet"
@@ -32,6 +34,7 @@ var (
 	isManuallyStopped          atomic.Bool // Indicates that Xray was stopped manually from the panel
 	xrayCounterIncidentPending atomic.Bool // Local in-memory barrier until persistence succeeds.
 	xrayCoreExitPending        atomic.Bool // An unexpected core exit is not yet durable in the database.
+	xrayAPIOutagePending       atomic.Bool // An unreachable local API is not yet durable in the database.
 	result                     string
 	// One baseline per panel process, shared by every XrayService instance.
 	// The state is protected by lock, which also protects process changes.
@@ -1368,6 +1371,56 @@ func (s *XrayService) GetXrayAPIPort() int {
 	return p.GetAPIPort()
 }
 
+// checkXrayAPIWhileLocked probes the managed process with a dedicated API
+// client. It must be called while lock is held so a process replacement cannot
+// make a successful response look like proof for a different core.
+func checkXrayAPIWhileLocked(ctx context.Context, current *xray.Process) error {
+	if current == nil || !current.IsRunning() {
+		return errors.New("xray is not running")
+	}
+	port := current.GetAPIPort()
+	if port <= 0 {
+		return errors.New("xray API port is unavailable")
+	}
+	api := xray.XrayAPI{}
+	if err := api.Init(port); err != nil {
+		return err
+	}
+	defer api.Close()
+	return api.HealthCheck(ctx)
+}
+
+// CheckXrayAPI verifies that the live core answers a bounded, read-only API
+// request. It does not poll counters and therefore never changes accounting
+// baselines. The watchdog uses this to detect the "process exists but API port
+// is refusing connections" failure mode.
+func (s *XrayService) CheckXrayAPI(ctx context.Context) error {
+	lock.Lock()
+	defer lock.Unlock()
+	return checkXrayAPIWhileLocked(ctx, p)
+}
+
+// RecordUnreachableXrayAPI confirms an API outage while holding the process
+// lock, then persists an uncertainty marker before the watchdog restarts the
+// core. A response that recovers between watchdog ticks is deliberately not
+// marked. The caller may only restart after this returns recorded=true.
+func (s *XrayService) RecordUnreachableXrayAPI() (recorded bool, err error) {
+	lock.Lock()
+	defer lock.Unlock()
+	if p == nil || !p.IsRunning() || isManuallyStopped.Load() {
+		return false, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := checkXrayAPIWhileLocked(ctx, p); err == nil {
+		return false, nil
+	}
+	if err := recordUnreachableXrayAPI(database.GetDB()); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // IsNeedRestartAndSetFalse checks if restart is needed and resets the flag to false.
 func (s *XrayService) IsNeedRestartAndSetFalse() bool {
 	return isNeedXrayRestart.CompareAndSwap(true, false)
@@ -1518,6 +1571,29 @@ func recordUnexpectedXrayExit(db *gorm.DB) error {
 	xrayCoreExitPending.Store(false)
 	if diskErr != nil {
 		logger.Warning("unexpected Xray exit: local fallback failed; database incident retained:", diskErr)
+	}
+	return nil
+}
+
+// recordUnreachableXrayAPI preserves the fact that the panel could not read
+// the core counters before automated recovery stops the process. A listening
+// process alone is not accounting evidence: without its API, bytes since the
+// last successful poll are unknowable. The marker therefore fails quota
+// changes closed until the existing backup-first reconciliation flow reviews
+// it, rather than inventing a zero or silently continuing.
+func recordUnreachableXrayAPI(db *gorm.DB) error {
+	xrayAPIOutagePending.Store(true)
+	incident := model.ResellerNodeCounterIncident{NodeId: 0, Email: "", Direction: "api-unreachable"}
+	diskErr := storeCounterIncidentFallback(incident)
+	if db == nil {
+		return errors.New("cannot persist unreachable Xray API: database unavailable")
+	}
+	if err := db.Clauses(clause.OnConflict{DoNothing: true}).Create(&incident).Error; err != nil {
+		return fmt.Errorf("cannot persist unreachable Xray API: %w; fallback error: %v", err, diskErr)
+	}
+	xrayAPIOutagePending.Store(false)
+	if diskErr != nil {
+		logger.Warning("unreachable Xray API: local fallback failed; database incident retained:", diskErr)
 	}
 	return nil
 }

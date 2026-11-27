@@ -158,6 +158,61 @@ func TestReconcileCounterIncidentsBacksUpBeforeClearing(t *testing.T) {
 	}
 }
 
+func TestReconcileCounterIncidentsPreservesEvidenceCreatedAfterItsBackup(t *testing.T) {
+	setupConflictDB(t)
+	db := database.GetDB()
+	xrayCoreExitPending.Store(false)
+	xrayCounterIncidentPending.Store(false)
+	xrayAPIOutagePending.Store(false)
+	t.Cleanup(func() {
+		reconciliationAfterBackupHook = nil
+		xrayCoreExitPending.Store(false)
+		xrayCounterIncidentPending.Store(false)
+		xrayAPIOutagePending.Store(false)
+	})
+
+	oldIncident := model.ResellerNodeCounterIncident{NodeId: 0, Email: "", Direction: "core-exited"}
+	if err := db.Create(&oldIncident).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := BeginXrayPoll("reconcile-old-poll"); err != nil {
+		t.Fatal(err)
+	}
+	var hookErr error
+	reconciliationAfterBackupHook = func() {
+		if err := db.Create(&model.ResellerNodeCounterIncident{NodeId: -2, Email: "", Direction: "l2tp-session-disappeared"}).Error; err != nil {
+			hookErr = err
+			return
+		}
+		hookErr = BeginXrayPoll("reconcile-new-poll")
+	}
+
+	result, err := ReconcileCounterIncidents(db, ReconcileOptions{Confirm: ReconcileConfirmToken, DryRun: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hookErr != nil {
+		t.Fatalf("could not inject later evidence: %v", hookErr)
+	}
+	if result.ClearedIncidents != 1 || result.ClearedPolls != 1 {
+		t.Fatalf("repair cleared a different snapshot than expected: %+v", result)
+	}
+	var incidents []model.ResellerNodeCounterIncident
+	if err := db.Order("id ASC").Find(&incidents).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(incidents) != 1 || incidents[0].Direction != "l2tp-session-disappeared" {
+		t.Fatalf("new counter evidence was deleted: %+v", incidents)
+	}
+	var polls []model.XrayTrafficInFlight
+	if err := db.Order("id ASC").Find(&polls).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(polls) != 1 || polls[0].ID != "reconcile-new-poll" {
+		t.Fatalf("new poll marker was deleted: %+v", polls)
+	}
+}
+
 func TestClientDeletionArchivesResellerMapping(t *testing.T) {
 	reseller, client := seedResellerRenewal(t)
 	db := database.GetDB()

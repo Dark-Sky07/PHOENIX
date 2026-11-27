@@ -125,6 +125,27 @@ func (x *XrayAPI) Close() {
 	x.isConnected = false
 }
 
+// HealthCheck confirms that the running core answers a small read-only Stats
+// RPC. Unlike QueryStats, GetSysStats does not return every client counter and
+// therefore does not put a large allocation or accounting load on a busy
+// panel. It never resets or advances the traffic baseline.
+func (x *XrayAPI) HealthCheck(ctx context.Context) error {
+	if x.grpcClient == nil || x.StatsServiceClient == nil {
+		return common.NewError("xray api is not initialized")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	response, err := (*x.StatsServiceClient).GetSysStats(ctx, &statsService.SysStatsRequest{})
+	if err != nil {
+		return err
+	}
+	if response == nil {
+		return common.NewError("empty xray system stats response")
+	}
+	return nil
+}
+
 // AddInbound adds a new inbound configuration to the Xray core via gRPC.
 func (x *XrayAPI) AddInbound(inbound []byte) error {
 	client := *x.HandlerServiceClient

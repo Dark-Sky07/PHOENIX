@@ -1,10 +1,10 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"time"
@@ -18,6 +18,12 @@ import (
 // ReconcileConfirmToken is required for a non-dry-run repair. A mistaken
 // click on the UI button can therefore never remove evidence.
 const ReconcileConfirmToken = "RECONCILE_COUNTER_INCIDENTS"
+
+// reconciliationAfterBackupHook is used by the race-regression test to insert
+// fresh evidence after the immutable backup report has been written. Production
+// code never assigns it. The repair must preserve that later evidence instead
+// of deleting every row in an evidence table.
+var reconciliationAfterBackupHook func()
 
 type ResellerClientMappingRow struct {
 	ResellerID int    `json:"resellerId"`
@@ -148,11 +154,16 @@ func checkXrayAPIHealth() XrayAPIHealth {
 	if err != nil {
 		return XrayAPIHealth{Error: err.Error()}
 	}
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 700*time.Millisecond)
-	if err != nil {
+	api := xray.XrayAPI{}
+	if err := api.Init(port); err != nil {
 		return XrayAPIHealth{Port: port, Error: err.Error()}
 	}
-	_ = conn.Close()
+	defer api.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := api.HealthCheck(ctx); err != nil {
+		return XrayAPIHealth{Port: port, Error: err.Error()}
+	}
 	return XrayAPIHealth{Port: port, Reachable: true}
 }
 
@@ -222,7 +233,7 @@ func ReconcileCounterIncidents(db *gorm.DB, options ReconcileOptions) (Reconcile
 		result.Warnings = append(result.Warnings, "Dry run only: the confirmation token did not match; no evidence was changed.")
 		return result, nil
 	}
-	if xrayCounterIncidentPending.Load() || xrayCoreExitPending.Load() {
+	if xrayCounterIncidentPending.Load() || xrayCoreExitPending.Load() || xrayAPIOutagePending.Load() {
 		return result, errors.New("reconciliation refused while a local traffic incident is still being persisted")
 	}
 
@@ -245,6 +256,9 @@ func ReconcileCounterIncidents(db *gorm.DB, options ReconcileOptions) (Reconcile
 		return result, fmt.Errorf("back up reconciliation report: %w", err)
 	}
 	result.BackupDir = backupRoot
+	if reconciliationAfterBackupHook != nil {
+		reconciliationAfterBackupHook()
+	}
 
 	if len(report.FallbackFiles) > 0 {
 		fallbackBackup := filepath.Join(backupRoot, "counter-incident-fallback")
@@ -295,19 +309,32 @@ func ReconcileCounterIncidents(db *gorm.DB, options ReconcileOptions) (Reconcile
 			if err := writeReconciliationBackup(backupRoot, "counter-incidents.json", report.DBIncidents); err != nil {
 				return fmt.Errorf("back up counter incidents: %w", err)
 			}
-			if err := tx.Where("1 = 1").Delete(&model.ResellerNodeCounterIncident{}).Error; err != nil {
-				return fmt.Errorf("clear counter incidents: %w", err)
+			// Delete only the rows captured in report-before.json. A new
+			// incident can be written by another panel process after this repair
+			// began; clearing the entire table would silently discard that newer
+			// evidence without a backup.
+			incidentIDs := make([]int, 0, len(report.DBIncidents))
+			for _, incident := range report.DBIncidents {
+				incidentIDs = append(incidentIDs, incident.ID)
 			}
-			result.ClearedIncidents = int64(len(report.DBIncidents))
+			cleared := tx.Where("id IN ?", incidentIDs).Delete(&model.ResellerNodeCounterIncident{})
+			if cleared.Error != nil {
+				return fmt.Errorf("clear counter incidents: %w", cleared.Error)
+			}
+			result.ClearedIncidents = cleared.RowsAffected
 		}
 		if len(report.InFlightPolls) > 0 {
 			if err := writeReconciliationBackup(backupRoot, "in-flight-polls.json", report.InFlightPolls); err != nil {
 				return fmt.Errorf("back up poll markers: %w", err)
 			}
-			if err := tx.Where("1 = 1").Delete(&model.XrayTrafficInFlight{}).Error; err != nil {
-				return fmt.Errorf("clear poll markers: %w", err)
+			// The same snapshot rule applies to durable poll barriers. A marker
+			// created after the report belongs to a later poll and must remain
+			// until it has its own evidence and reconciliation decision.
+			cleared := tx.Where("id IN ?", report.InFlightPolls).Delete(&model.XrayTrafficInFlight{})
+			if cleared.Error != nil {
+				return fmt.Errorf("clear poll markers: %w", cleared.Error)
 			}
-			result.ClearedPolls = int64(len(report.InFlightPolls))
+			result.ClearedPolls = cleared.RowsAffected
 		}
 		return nil
 	})
