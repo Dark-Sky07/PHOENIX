@@ -91,6 +91,19 @@ func (s *XrayService) IsXrayRunning() bool {
 	return p != nil && p.IsRunning()
 }
 
+// XrayStartedAt returns the current managed-core epoch. A process can be alive
+// while it is still loading a large generated configuration and has not bound
+// its API listener yet; health monitoring uses this timestamp to avoid treating
+// that normal startup interval as an API outage.
+func (s *XrayService) XrayStartedAt() time.Time {
+	lock.Lock()
+	defer lock.Unlock()
+	if p == nil || !p.IsRunning() {
+		return time.Time{}
+	}
+	return p.StartedAt()
+}
+
 // XrayProcess returns the current Xray process instance (may be nil when Xray
 // is not running). It exposes the package-level process to callers outside this
 // package (e.g. the tgbot subpackage) without changing access semantics.

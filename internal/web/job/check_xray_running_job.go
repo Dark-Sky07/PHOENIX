@@ -10,7 +10,19 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/web/service"
 )
 
-const xrayAPIUnreachableThreshold = 3
+const (
+	xrayAPIUnreachableThreshold = 3
+	// Xray can take several seconds to load a generated configuration with many
+	// inbounds/clients before it binds its loopback gRPC listener. Do not turn
+	// that ordinary startup work into an accounting incident and forced restart.
+	xrayAPIStartupGrace = 30 * time.Second
+)
+
+// xrayStartupEpochService is optional to preserve the narrow watchdog test
+// seam while letting the production service identify a fresh managed core.
+type xrayStartupEpochService interface {
+	XrayStartedAt() time.Time
+}
 
 // xrayHealthService is deliberately narrow so the outage/recovery path is
 // testable without starting a real core. The concrete service still owns all
@@ -75,6 +87,15 @@ func (j *CheckXrayRunningJob) Run() {
 	if !j.xrayService.IsXrayRunning() {
 		j.apiCheckTime = 0
 		return
+	}
+	if epochs, ok := j.xrayService.(xrayStartupEpochService); ok {
+		startedAt := epochs.XrayStartedAt()
+		if !startedAt.IsZero() && time.Since(startedAt) < xrayAPIStartupGrace {
+			// Reset rather than retain a pre-start failure count: this may be a
+			// replacement core whose listener has not been created yet.
+			j.apiCheckTime = 0
+			return
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	err := j.xrayService.CheckXrayAPI(ctx)
