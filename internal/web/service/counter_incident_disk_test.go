@@ -47,8 +47,10 @@ func TestCounterIncidentFallbackSurvivesLostProcessMemory(t *testing.T) {
 	if _, err := (&InboundService{}).SetRemoteTraffic(77, &runtime.TrafficSnapshot{}, false); err == nil {
 		t.Fatal("fallback did not block node sync")
 	}
-	if err := checkLocalXrayCounterIncidents(database.GetDB()); err == nil {
-		t.Fatal("fallback did not block local traffic collection")
+	// A remote-node fallback still blocks the affected allocation paths above,
+	// but must not freeze the unrelated local Xray collector after a restart.
+	if err := checkLocalXrayCounterIncidents(database.GetDB()); err != nil {
+		t.Fatalf("remote fallback blocked local traffic collection: %v", err)
 	}
 	// Persisted fallback is intentionally not cleared automatically on DB recovery.
 	if err := storeCounterIncidentFallback(evidence); err != nil {

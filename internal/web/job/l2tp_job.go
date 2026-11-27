@@ -66,8 +66,9 @@ func persistL2TPPoll(collector *XrayTrafficJob, poll func() ([]*xray.Traffic, []
 }
 
 // pollL2TPWithIncidentBarrier still samples after an incident publication
-// error so that its poll marker can fence an observed hook or orphan. It never
-// authorizes daemon reconciliation while the publication is unresolved.
+// error so that its poll marker can fence an observed hook or orphan. Its
+// caller decides whether a non-destructive reboot start is safe; replacement
+// remains deferred while publication is unresolved.
 func pollL2TPWithIncidentBarrier(collector *XrayTrafficJob, publish func() error, poll func() ([]*xray.Traffic, []*xray.ClientTraffic, error)) (bool, error) {
 	var publicationErr error
 	// An unapplied batch can also retain the allocation lock across ticks.
@@ -93,20 +94,55 @@ func pollL2TPWithIncidentBarrier(collector *XrayTrafficJob, publish func() error
 	return restart, nil
 }
 
+func (j *L2TPJob) desiredInstances() ([]l2tp.Instance, bool) {
+	inbounds, err := j.inboundService.GetAllInbounds()
+	if err != nil {
+		logger.Warning("l2tp job: get inbounds failed:", err)
+		return nil, false
+	}
+	wanted := make([]l2tp.Instance, 0, 1)
+	for _, ib := range inbounds {
+		if ib.Protocol != model.L2TP || !ib.Enable || ib.NodeID != nil {
+			continue
+		}
+		clients, clientsOK := j.enabledClientsForInbound(ib)
+		if !clientsOK {
+			return nil, false
+		}
+		inst, ok := l2tp.InstanceFromInbound(ib, clients)
+		if !ok {
+			logger.Warningf("l2tp job: inbound %d has invalid settings or credentials", ib.Id)
+			continue
+		}
+		// See OpenvpnJob: follow the running core's relay listener each
+		// round; excluded from the daemon fingerprint so it never restarts
+		// the daemons.
+		inst.XrayRelayPort = j.xrayService.DaemonRelayPort(ib.Tag)
+		wanted = append(wanted, inst)
+	}
+	return wanted, true
+}
+
 func (j *L2TPJob) Run() {
 	if !l2tpRunMu.TryLock() {
 		return
 	}
 	defer l2tpRunMu.Unlock()
 	mgr := l2tp.GetManager()
+	wanted, wantedOK := j.desiredInstances()
+	if !wantedOK {
+		return
+	}
 	// Sample and commit before the periodic reconcile may stop or replace the
 	// daemon. Other runtime operations and traffic after the poll remain outside
 	// this barrier; a successful sample is not a final accounting proof.
+	healthySample := false
 	restart, err := pollL2TPWithIncidentBarrier(l2tpJournalCollector, service.PublishL2TPAccountingIncident, func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
 		inboundDeltas, clientDeltas, err := mgr.CollectTrafficChecked()
 		if err != nil {
 			return nil, nil, err
 		}
+		healthySample = true
 		if len(inboundDeltas) == 0 && len(clientDeltas) == 0 {
 			// No observed delta to apply. Clear the in-flight marker instead of
 			// retaining an empty receipt every tick; this does not establish
@@ -127,33 +163,26 @@ func (j *L2TPJob) Run() {
 		j.xrayService.SetToNeedRestart()
 	}
 	if err != nil {
-		logger.Warning("l2tp job: poll or accounting barrier failed; reconciliation deferred:", err)
-		return
-	}
-	inbounds, err := j.inboundService.GetAllInbounds()
-	if err != nil {
-		logger.Warning("l2tp job: get inbounds failed:", err)
-		return
-	}
-	wanted := make([]l2tp.Instance, 0, 1)
-	for _, ib := range inbounds {
-		if ib.Protocol != model.L2TP || !ib.Enable || ib.NodeID != nil {
-			continue
+		// A durable accounting incident must still prevent daemon replacement,
+		// but it must not keep an enabled daemon from starting after a reboot.
+		// Starting from no managed process is non-destructive; a later healthy
+		// sample can archive only evidence that predates that new daemon epoch.
+		if healthySample && mgr.Status().Running {
+			recovered, backupDir, recoveryErr := service.RecoverL2TPAccountingAfterRestart(mgr)
+			if recoveryErr != nil {
+				logger.Warning("l2tp job: restart recovery could not archive accounting evidence:", recoveryErr)
+			} else if recovered {
+				logger.Warning("l2tp job: archived pre-restart L2TP accounting evidence after a healthy replacement sample:", backupDir)
+				return
+			}
 		}
-		clients, clientsOK := j.enabledClientsForInbound(ib)
-		if !clientsOK {
+		if !mgr.Status().Running {
+			mgr.Reconcile(wanted)
+			logger.Warning("l2tp job: accounting barrier remains; started only an absent enabled daemon and deferred later replacement:", err)
 			return
 		}
-		inst, ok := l2tp.InstanceFromInbound(ib, clients)
-		if !ok {
-			logger.Warningf("l2tp job: inbound %d has invalid settings or credentials", ib.Id)
-			continue
-		}
-		// See OpenvpnJob: follow the running core's relay listener each
-		// round; excluded from the daemon fingerprint so it never restarts
-		// the daemons.
-		inst.XrayRelayPort = j.xrayService.DaemonRelayPort(ib.Tag)
-		wanted = append(wanted, inst)
+		logger.Warning("l2tp job: poll or accounting barrier failed; kept the running daemon and deferred replacement:", err)
+		return
 	}
 	mgr.Reconcile(wanted)
 }
