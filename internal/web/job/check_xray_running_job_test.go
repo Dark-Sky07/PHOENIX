@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 )
 
 type fakeXrayHealthService struct {
 	crashed      bool
 	running      bool
+	startedAt    time.Time
 	observed     bool
 	observeErr   error
 	apiErrors    []error
@@ -32,6 +34,8 @@ func (f *fakeXrayHealthService) RestartXray(force bool) error {
 }
 
 func (f *fakeXrayHealthService) IsXrayRunning() bool { return f.running }
+
+func (f *fakeXrayHealthService) XrayStartedAt() time.Time { return f.startedAt }
 
 func (f *fakeXrayHealthService) CheckXrayAPI(context.Context) error {
 	index := f.apiCalls
@@ -100,5 +104,42 @@ func TestCheckXrayRunningJobRetainsExistingCrashRecovery(t *testing.T) {
 	}
 	if fake.apiCalls != 0 {
 		t.Fatalf("crashed core API was probed %d times", fake.apiCalls)
+	}
+}
+
+func TestCheckXrayRunningJobDoesNotCreateIncidentWhileNewCoreStarts(t *testing.T) {
+	unreachable := errors.New("connection refused")
+	fake := &fakeXrayHealthService{
+		running:   true,
+		startedAt: time.Now(),
+		apiErrors: []error{unreachable, unreachable, unreachable},
+		recorded:  true,
+	}
+	job := &CheckXrayRunningJob{xrayService: fake}
+	for range xrayAPIUnreachableThreshold + 1 {
+		job.Run()
+	}
+	if fake.apiCalls != 0 {
+		t.Fatalf("fresh core API was probed %d times during startup grace", fake.apiCalls)
+	}
+	if fake.recordCalls != 0 || len(fake.restartCalls) != 0 {
+		t.Fatalf("fresh core created an incident or restarted: record=%d restart=%v", fake.recordCalls, fake.restartCalls)
+	}
+}
+
+func TestCheckXrayRunningJobRecoversUnreachableAPIAfterStartupGrace(t *testing.T) {
+	unreachable := errors.New("connection refused")
+	fake := &fakeXrayHealthService{
+		running:   true,
+		startedAt: time.Now().Add(-xrayAPIStartupGrace - time.Second),
+		apiErrors: []error{unreachable, unreachable, unreachable},
+		recorded:  true,
+	}
+	job := &CheckXrayRunningJob{xrayService: fake}
+	for range xrayAPIUnreachableThreshold {
+		job.Run()
+	}
+	if fake.recordCalls != 1 || len(fake.restartCalls) != 1 || !fake.restartCalls[0] {
+		t.Fatalf("stale core was not recovered after startup grace: record=%d restart=%v", fake.recordCalls, fake.restartCalls)
 	}
 }

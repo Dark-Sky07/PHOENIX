@@ -1448,7 +1448,7 @@ PY
         echo -e "${red}Could not read the Xray API port from ${config_path}.${plain}"
         return 1
     fi
-    for attempt in {1..15}; do
+    for attempt in {1..60}; do
         if (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null; then
             echo -e "${green}Verified Xray API listener on 127.0.0.1:${port}.${plain}"
             return 0
@@ -1459,7 +1459,7 @@ PY
         fi
         sleep 1
     done
-    echo -e "${red}Xray API listener 127.0.0.1:${port} did not become ready within 15 seconds.${plain}"
+    echo -e "${red}Xray API listener 127.0.0.1:${port} did not become ready within 60 seconds.${plain}"
     return 1
 }
 
