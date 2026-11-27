@@ -24,10 +24,10 @@ func TestGetXrayConfigDefersQuotaEnforcementDuringUpdateMaintenance(t *testing.T
 		Settings: `{"clients":[{"email":"update-maintenance@example.test","id":"7c64e132-6a7f-4f52-9e13-5f3ec7d8f7df","enable":true}]}`,
 	}
 	client := model.ClientRecord{
-		Email:     email,
-		UUID:      "7c64e132-6a7f-4f52-9e13-5f3ec7d8f7df",
-		TotalGB:   100,
-		Enable:    true,
+		Email:      email,
+		UUID:       "7c64e132-6a7f-4f52-9e13-5f3ec7d8f7df",
+		TotalGB:    100,
+		Enable:     true,
 		ExpiryTime: time.Now().Add(-time.Hour).UnixMilli(),
 	}
 	for _, row := range []any{&inbound, &client} {
