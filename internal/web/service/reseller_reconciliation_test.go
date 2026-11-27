@@ -83,13 +83,27 @@ func TestReconcileCounterIncidentsBacksUpBeforeClearing(t *testing.T) {
 	if err := storeCounterIncidentFallback(incident); err != nil {
 		t.Fatal(err)
 	}
+	l2tpIncident := model.ResellerNodeCounterIncident{NodeId: -2, Direction: "l2tp-orphan"}
+	if err := db.Create(&l2tpIncident).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(l2tpAccountingIncidentPath(), []byte("old L2TP incident\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	l2tpEvidenceDir := filepath.Join(config.GetDBFolderPath(), "l2tp-accounting-evidence")
+	if err := os.MkdirAll(l2tpEvidenceDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(l2tpEvidenceDir, "old-l2tp-evidence.txt"), []byte("old L2TP observation\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	if err := BeginXrayPoll("reconcile-pending"); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { xrayCoreExitPending.Store(false); xrayCounterIncidentPending.Store(false) })
 
 	report := ReadReconciliationReport(db)
-	if len(report.DanglingMappings) != 1 || len(report.DBIncidents) != 1 || len(report.InFlightPolls) != 1 || len(report.FallbackFiles) != 1 {
+	if len(report.DanglingMappings) != 1 || len(report.DBIncidents) != 2 || len(report.InFlightPolls) != 1 || len(report.FallbackFiles) != 1 || !report.L2TPMarkerPresent || len(report.L2TPEvidenceFiles) != 1 {
 		t.Fatalf("incomplete reconciliation report: %+v", report)
 	}
 
@@ -117,7 +131,7 @@ func TestReconcileCounterIncidentsBacksUpBeforeClearing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("repair failed: %v", err)
 	}
-	if result.DryRun || result.BackupDir == "" || result.ArchivedMappings != 1 || result.ClearedIncidents != 1 || result.ClearedPolls != 1 || result.MovedFallbackFiles != 1 {
+	if result.DryRun || result.BackupDir == "" || result.ArchivedMappings != 1 || result.ClearedIncidents != 2 || result.ClearedPolls != 1 || result.MovedFallbackFiles != 1 || !result.MovedL2TPMarker || result.MovedL2TPEvidenceFiles != 1 {
 		t.Fatalf("unexpected repair result: %+v", result)
 	}
 	if _, err := os.Stat(filepath.Join(result.BackupDir, "report-before.json")); err != nil {
@@ -131,8 +145,14 @@ func TestReconcileCounterIncidentsBacksUpBeforeClearing(t *testing.T) {
 	if err := json.Unmarshal(data, &backedUp); err != nil {
 		t.Fatalf("invalid backup report: %v", err)
 	}
-	if len(backedUp.DanglingMappings) != 1 || len(backedUp.DBIncidents) != 1 {
+	if len(backedUp.DanglingMappings) != 1 || len(backedUp.DBIncidents) != 2 || !backedUp.L2TPMarkerPresent || len(backedUp.L2TPEvidenceFiles) != 1 {
 		t.Fatalf("backup lost evidence: %+v", backedUp)
+	}
+	if _, err := os.Stat(filepath.Join(result.BackupDir, "l2tp-accounting-incident")); err != nil {
+		t.Fatalf("L2TP marker was not archived: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(result.BackupDir, "l2tp-accounting-evidence", "old-l2tp-evidence.txt")); err != nil {
+		t.Fatalf("L2TP evidence was not archived: %v", err)
 	}
 
 	var archived int64
@@ -153,8 +173,64 @@ func TestReconcileCounterIncidentsBacksUpBeforeClearing(t *testing.T) {
 	if err != nil || len(fallback) != 0 {
 		t.Fatalf("fallback evidence retained: %v err=%v", fallback, err)
 	}
+	if _, err := os.Stat(l2tpAccountingIncidentPath()); !os.IsNotExist(err) {
+		t.Fatalf("L2TP marker retained after reconciliation: %v", err)
+	}
+	l2tpMarker, l2tpEvidence, err := listL2TPReconciliationEvidence()
+	if err != nil {
+		t.Fatalf("read L2TP evidence after reconciliation: %v", err)
+	}
+	if l2tpMarker || len(l2tpEvidence) != 0 {
+		t.Fatalf("L2TP evidence remained after reconciliation: marker=%v files=%v", l2tpMarker, l2tpEvidence)
+	}
+	if _, err := os.Stat(filepath.Join(config.GetDBFolderPath(), "l2tp-accounting-evidence", "old-l2tp-evidence.txt")); !os.IsNotExist(err) {
+		t.Fatalf("L2TP evidence retained after reconciliation: %v", err)
+	}
 	if _, err := os.Stat(filepath.Join(config.GetDBFolderPath(), "reconciliation-backups")); err != nil {
 		t.Fatalf("backup root missing: %v", err)
+	}
+}
+
+func TestReconcileCounterIncidentsRetainsDatabaseBarrierWhenL2TPEvidenceChanges(t *testing.T) {
+	setupConflictDB(t)
+	db := database.GetDB()
+	if err := db.Where("node_id = ? AND email = ?", -2, "").FirstOrCreate(&model.ResellerNodeCounterIncident{NodeId: -2, Direction: "l2tp-orphan"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(l2tpAccountingIncidentPath(), []byte("old L2TP incident\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	evidenceDir := filepath.Join(config.GetDBFolderPath(), "l2tp-accounting-evidence")
+	if err := os.MkdirAll(evidenceDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	oldEvidence := filepath.Join(evidenceDir, "old-l2tp-evidence.txt")
+	if err := os.WriteFile(oldEvidence, []byte("old L2TP observation\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { reconciliationAfterBackupHook = nil })
+	reconciliationAfterBackupHook = func() {
+		if err := os.WriteFile(filepath.Join(evidenceDir, "new-l2tp-evidence.txt"), []byte("new L2TP observation\n"), 0600); err != nil {
+			t.Fatalf("inject fresh L2TP evidence: %v", err)
+		}
+	}
+
+	result, err := ReconcileCounterIncidents(db, ReconcileOptions{Confirm: ReconcileConfirmToken, DryRun: false})
+	if err == nil || !strings.Contains(err.Error(), "L2TP accounting evidence changed") {
+		t.Fatalf("fresh L2TP evidence did not stop reconciliation: result=%+v err=%v", result, err)
+	}
+	if result.BackupDir == "" {
+		t.Fatalf("old evidence was not backed up before the safe refusal: %+v", result)
+	}
+	if _, err := os.Stat(filepath.Join(result.BackupDir, "l2tp-accounting-evidence", "old-l2tp-evidence.txt")); err != nil {
+		t.Fatalf("old L2TP evidence was not archived: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(evidenceDir, "new-l2tp-evidence.txt")); err != nil {
+		t.Fatalf("fresh L2TP evidence was not retained: %v", err)
+	}
+	var count int64
+	if err := db.Model(&model.ResellerNodeCounterIncident{}).Where("node_id = ?", -2).Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("L2TP database barrier was cleared after a new observation: count=%d err=%v", count, err)
 	}
 }
 

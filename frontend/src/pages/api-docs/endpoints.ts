@@ -61,7 +61,7 @@ export const sections: readonly Section[] = [
     id: 'authentication',
     title: 'Authentication',
     description:
-      'Two authentication modes are supported. UI sessions use a cookie set by the login endpoint. Programmatic clients (bots, scripts, remote panels) authenticate with a Bearer token taken from Settings → Security → API Token. Both work for every endpoint under /panel/api/*.',
+      'Two authentication modes are supported. UI sessions use a cookie set by the login endpoint. Programmatic clients (bots, scripts, remote panels) authenticate with a Bearer token taken from Settings → Security → API Token. Both work for routine endpoints under /panel/api/*. High-impact operations deliberately require an interactive superadmin browser session and refuse Bearer tokens: API-token/admin-account management, certificate issuance, database export or restore, external backups, audit-log erasure, accounting reconciliation repair, and OpenVPN revocation.',
     endpoints: [
       {
         method: 'POST',
@@ -352,12 +352,12 @@ export const sections: readonly Section[] = [
       {
         method: 'GET',
         path: '/panel/api/server/getDb',
-        summary: 'Stream the SQLite database file as an attachment. Use as a manual backup.',
+        summary: 'Stream the database backup as an attachment. Requires an interactive superadmin browser session; Bearer tokens are refused.',
       },
       {
         method: 'GET',
         path: '/panel/api/server/getMigration',
-        summary: 'Stream a cross-engine migration file as an attachment: a .dump (SQL text) on SQLite, or a .db SQLite database built from the live data on PostgreSQL.',
+        summary: 'Stream a cross-engine migration file as an attachment: a .dump (SQL text) on SQLite, or a .db SQLite database built from live PostgreSQL data. Requires an interactive superadmin browser session; Bearer tokens are refused.',
       },
       {
         method: 'GET',
@@ -554,7 +554,7 @@ export const sections: readonly Section[] = [
       {
         method: 'POST',
         path: '/panel/api/server/importDB',
-        summary: 'Restore the panel DB from an uploaded SQLite file (multipart form, field name "db"). The panel restarts after restore. Destructive.',
+        summary: 'Restore the panel DB from an uploaded SQLite file (multipart form, field name "db"). The panel restarts after restore. Destructive and restricted to an interactive superadmin browser session; Bearer tokens are refused.',
         params: [
           { name: 'db', in: 'body (multipart)', type: 'file', desc: 'SQLite database file to upload.' },
         ],
@@ -1114,7 +1114,7 @@ export const sections: readonly Section[] = [
       {
         method: 'POST',
         path: '/panel/api/backuptotgbot',
-        summary: 'Send a fresh DB backup to every Telegram chat configured as an admin recipient. No body, no params.',
+        summary: 'Send a fresh DB backup to every Telegram chat configured as an admin recipient. No body, no params. Requires an interactive superadmin browser session; Bearer tokens are refused.',
       },
     ],
   },
@@ -1123,7 +1123,7 @@ export const sections: readonly Section[] = [
     id: 'settings',
     title: 'Settings',
     description:
-      'Panel configuration and user credentials. All endpoints live under /panel/api/setting and require a logged-in session or Bearer token.',
+      'Panel configuration and user credentials. Standard endpoints accept a logged-in session or Bearer token. API-token management, panel-admin management, certificate issuance, cloud-backup execution, and audit-log erasure require an interactive superadmin browser session and refuse Bearer tokens.',
     endpoints: [
       {
         method: 'POST',
@@ -1171,18 +1171,18 @@ export const sections: readonly Section[] = [
     id: 'api-tokens',
     title: 'API Tokens',
     description:
-      'Manage Bearer tokens used for programmatic auth (bots, central panels acting on this node, CI). Each token has a unique name and an enabled flag — disable to revoke without deleting, delete to revoke permanently. Tokens are stored as SHA-256 hashes and the plaintext is returned only once, in the create response — it cannot be retrieved afterwards, so copy it then. Send one as <code>Authorization: Bearer &lt;token&gt;</code> on any /panel/api/* request — the token is a full-admin credential.',
+      'Manage Bearer tokens used for programmatic auth (bots, central panels acting on this node, CI). Each token has a unique name and an enabled flag — disable to revoke without deleting, delete to revoke permanently. Tokens are stored as SHA-256 hashes and the plaintext is returned only once, in the create response — it cannot be retrieved afterwards, so copy it then. A full-scope token can automate standard panel API operations, but it cannot access browser-session-only high-impact operations or manage API tokens/admin accounts itself.',
     endpoints: [
       {
         method: 'GET',
         path: '/panel/api/setting/apiTokens',
-        summary: 'List every API token, enabled or not. The token value is never returned — only metadata.',
+        summary: 'List every API token, enabled or not. The token value is never returned — only metadata. Requires an interactive superadmin browser session; Bearer tokens are refused.',
         response: '{\n  "success": true,\n  "obj": [\n    {\n      "id": 1,\n      "name": "default",\n      "enabled": true,\n      "createdAt": 1736000000\n    }\n  ]\n}',
       },
       {
         method: 'POST',
         path: '/panel/api/setting/apiTokens/create',
-        summary: 'Mint a new API token. Name must be unique and 1-64 characters; the token string is server-generated and returned only in this response — it is stored hashed and cannot be retrieved later.',
+        summary: 'Mint a new API token. Name must be unique and 1-64 characters; the token string is server-generated and returned only in this response — it is stored hashed and cannot be retrieved later. Requires an interactive superadmin browser session; Bearer tokens are refused.',
         params: [
           { name: 'name', in: 'body', type: 'string', desc: 'Human-readable label, e.g. "central-panel-a".' },
         ],
@@ -1193,7 +1193,7 @@ export const sections: readonly Section[] = [
       {
         method: 'POST',
         path: '/panel/api/setting/apiTokens/delete/:id',
-        summary: 'Permanently delete a token. Any caller using it stops authenticating immediately.',
+        summary: 'Permanently delete a token. Any caller using it stops authenticating immediately. Requires an interactive superadmin browser session; Bearer tokens are refused.',
         params: [
           { name: 'id', in: 'path', type: 'number', desc: 'Token row ID.' },
         ],
@@ -1202,7 +1202,7 @@ export const sections: readonly Section[] = [
       {
         method: 'POST',
         path: '/panel/api/setting/apiTokens/setEnabled/:id',
-        summary: 'Toggle a token enabled/disabled without deleting it. Disabled tokens are rejected by checkAPIAuth on the next request.',
+        summary: 'Toggle a token enabled/disabled without deleting it. Disabled tokens are rejected by checkAPIAuth on the next request. Requires an interactive superadmin browser session; Bearer tokens are refused.',
         params: [
           { name: 'id', in: 'path', type: 'number', desc: 'Token row ID.' },
           { name: 'enabled', in: 'body', type: 'boolean', desc: 'New enabled state.' },
@@ -1219,7 +1219,7 @@ export const sections: readonly Section[] = [
       {
         method: 'POST',
         path: '/panel/api/setting/cert/issue',
-        summary: "Issue a Let's Encrypt (RFC 8555 HTTP-01 on port 80, auto-renewed daily) or 1-year self-signed certificate and optionally apply its paths to the panel.",
+        summary: "Issue a Let's Encrypt (RFC 8555 HTTP-01 on port 80, auto-renewed daily) or 1-year self-signed certificate and optionally apply its paths to the panel. Requires an interactive superadmin browser session; Bearer tokens are refused.",
         params: [
           { name: 'domain', in: 'body', type: 'string', desc: 'Hostname (or IP for self-signed) to issue for.' },
           { name: 'email', in: 'body', type: 'string', optional: true, desc: 'Optional ACME contact email.' },
@@ -1238,7 +1238,7 @@ export const sections: readonly Section[] = [
       {
         method: 'POST',
         path: '/panel/api/setting/cloudBackup/run',
-        summary: 'Immediately upload a database snapshot to the configured S3 / Cloudflare R2 / MinIO or WebDAV cloud storage and apply retention cleanup.',
+        summary: 'Immediately upload a database snapshot to the configured S3 / Cloudflare R2 / MinIO or WebDAV cloud storage and apply retention cleanup. Requires an interactive superadmin browser session; Bearer tokens are refused.',
         response: '{\n  "success": true,\n  "obj": {\n    "key": "phoenix-backups/x-ui-backup-20261019-120000.db"\n  }\n}',
       },
       {
@@ -1250,7 +1250,7 @@ export const sections: readonly Section[] = [
       {
         method: 'POST',
         path: '/panel/api/setting/auditLogs/clear',
-        summary: 'Clear all recorded security audit log entries.',
+        summary: 'Clear all recorded security audit log entries. Requires an interactive superadmin browser session; Bearer tokens are refused.',
         response: '{\n  "success": true\n}',
       },
     ],
@@ -1530,7 +1530,7 @@ export const sections: readonly Section[] = [
         method: 'POST',
         path: '/panel/api/resellers/reconciliation/repair',
         summary:
-          'Superadmin-only, backup-first repair. Dry-run by default; body { "confirm": "RECONCILE_COUNTER_INCIDENTS", "dryRun": false } archives dangling mappings and marker files before deleting them. Traffic journals are never cleared and no service is stopped or restarted.',
+          'Interactive-superadmin-only, backup-first repair. Bearer tokens are refused. Dry-run by default; body { "confirm": "RECONCILE_COUNTER_INCIDENTS", "dryRun": false } archives dangling mappings and marker files before deleting them. Traffic journals are never cleared and no service is stopped or restarted.',
         response:
           '{\n  "success": true,\n  "obj": { "dryRun": false, "backupDir": "/etc/x-ui/reconciliation-backups/20261126-220000.000", "archivedMappings": 1, "clearedIncidents": 1, "clearedPolls": 0, "movedFallbackFiles": 1 }\n}',
       },
@@ -1975,23 +1975,23 @@ export const sections: readonly Section[] = [
       {
         method: 'GET',
         path: '/panel/api/setting/admins',
-        summary: 'List all panel admin accounts and their RBAC roles/permissions (owner only).',
+        summary: 'List all panel admin accounts and their RBAC roles/permissions (interactive superadmin browser session only; Bearer tokens are refused).',
       },
       {
         method: 'POST',
         path: '/panel/api/setting/admins/create',
-        summary: 'Create a new panel admin account with an RBAC role and granular permissions (owner only).',
+        summary: 'Create a new panel admin account with an RBAC role and granular permissions (interactive superadmin browser session only; Bearer tokens are refused).',
       },
       {
         method: 'POST',
         path: '/panel/api/setting/admins/update/:id',
-        summary: 'Update a panel admin account RBAC role, permissions, or status (owner only).',
+        summary: 'Update a panel admin account RBAC role, permissions, or status (interactive superadmin browser session only; Bearer tokens are refused).',
         params: [{ name: 'id', in: 'path', type: 'integer' }],
       },
       {
         method: 'POST',
         path: '/panel/api/setting/admins/delete/:id',
-        summary: 'Delete a secondary panel admin account (owner only).',
+        summary: 'Delete a secondary panel admin account (interactive superadmin browser session only; Bearer tokens are refused).',
         params: [{ name: 'id', in: 'path', type: 'integer' }],
       },
     ],
@@ -2100,7 +2100,7 @@ export const sections: readonly Section[] = [
       {
         method: 'POST',
         path: '/panel/api/openvpn/revoke',
-        summary: 'Revoke one client on every managed OpenVPN daemon generation. A conflict response means the operation is incomplete and quota must not be released.',
+        summary: 'Revoke one client on every managed OpenVPN daemon generation. Requires an interactive superadmin browser session; Bearer tokens are refused. A conflict response means the operation is incomplete and quota must not be released.',
         params: [
           { name: 'email', in: 'body (json)', type: 'string', desc: 'Client certificate CN (email).' },
         ],

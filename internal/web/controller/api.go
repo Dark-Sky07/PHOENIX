@@ -132,9 +132,12 @@ func (a *APIController) initRouter(g *gin.RouterGroup) {
 // releasing quota or deleting the client, and the response never claims that
 // an acknowledged kill was fully drained.
 func (a *APIController) RevokeOpenVPNClient(c *gin.Context) {
-	user := session.GetLoginUser(c)
-	if user == nil || user.Id != 1 {
-		c.JSON(http.StatusForbidden, gin.H{"success": false, "msg": "superadmin required for OpenVPN revocation"})
+	// checkAPIAuth maps a bearer token to the primary user so ordinary full
+	// token automation can use the documented panel API. Certificate revocation
+	// is deliberately narrower: it kills live sessions and needs an explicit
+	// operator review. Do not let that synthetic principal turn a copied
+	// full-scope token into this irreversible authority.
+	if !requireInteractiveSuperAdmin(c) {
 		return
 	}
 	var request struct {
@@ -152,8 +155,12 @@ func (a *APIController) RevokeOpenVPNClient(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"success": true, "msg": "authorization revoked and current sessions confirmed terminated; verify final usage before quota changes"})
 }
 
-// BackuptoTgbot sends a backup of the panel data to Telegram bot admins.
+// BackuptoTgbot sends a full panel backup outside the panel boundary. It is
+// intentionally browser-session-only, rather than an ordinary API-token task.
 func (a *APIController) BackuptoTgbot(c *gin.Context) {
+	if !requireInteractiveSuperAdmin(c) {
+		return
+	}
 	a.Tgbot.SendBackupToAdmins()
 }
 

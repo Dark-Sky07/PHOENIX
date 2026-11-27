@@ -268,6 +268,9 @@ type apiTokenEnabledForm struct {
 }
 
 func (a *SettingController) listApiTokens(c *gin.Context) {
+	if !a.ensureSuperAdmin(c) {
+		return
+	}
 	rows, err := a.apiTokenService.List()
 	if err != nil {
 		jsonMsg(c, I18nWeb(c, "pages.settings.toasts.getSettings"), err)
@@ -277,6 +280,9 @@ func (a *SettingController) listApiTokens(c *gin.Context) {
 }
 
 func (a *SettingController) createApiToken(c *gin.Context) {
+	if !a.ensureSuperAdmin(c) {
+		return
+	}
 	form := &apiTokenCreateForm{}
 	if err := c.ShouldBind(form); err != nil {
 		jsonMsg(c, I18nWeb(c, "pages.settings.toasts.modifySettings"), err)
@@ -291,6 +297,9 @@ func (a *SettingController) createApiToken(c *gin.Context) {
 }
 
 func (a *SettingController) deleteApiToken(c *gin.Context) {
+	if !a.ensureSuperAdmin(c) {
+		return
+	}
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
 		jsonMsg(c, I18nWeb(c, "pages.settings.toasts.modifySettings"), err)
@@ -300,6 +309,9 @@ func (a *SettingController) deleteApiToken(c *gin.Context) {
 }
 
 func (a *SettingController) setApiTokenEnabled(c *gin.Context) {
+	if !a.ensureSuperAdmin(c) {
+		return
+	}
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
 		jsonMsg(c, I18nWeb(c, "pages.settings.toasts.modifySettings"), err)
@@ -325,6 +337,9 @@ func (a *SettingController) getCertStatus(c *gin.Context) {
 }
 
 func (a *SettingController) issueCert(c *gin.Context) {
+	if !a.ensureSuperAdmin(c) {
+		return
+	}
 	form := &certIssueForm{ApplyToPanel: true}
 	if err := c.ShouldBind(form); err != nil {
 		jsonMsg(c, I18nWeb(c, "pages.settings.toasts.modifySettings"), err)
@@ -353,6 +368,9 @@ func (a *SettingController) testDiscord(c *gin.Context) {
 }
 
 func (a *SettingController) runCloudBackup(c *gin.Context) {
+	if !a.ensureSuperAdmin(c) {
+		return
+	}
 	key, err := a.cloudBackupService.BackupNow()
 	if err != nil {
 		jsonMsg(c, I18nWeb(c, "pages.settings.toasts.modifySettings"), err)
@@ -375,6 +393,9 @@ func (a *SettingController) listAuditLogs(c *gin.Context) {
 }
 
 func (a *SettingController) clearAuditLogs(c *gin.Context) {
+	if !a.ensureSuperAdmin(c) {
+		return
+	}
 	jsonMsg(c, I18nWeb(c, "pages.settings.toasts.modifySettings"), a.auditLogService.Clear())
 }
 
@@ -388,18 +409,13 @@ type adminForm struct {
 }
 
 func (a *SettingController) ensureSuperAdmin(c *gin.Context) bool {
-	if c.GetBool("api_authed") {
-		return true
-	}
-	user := session.GetLoginUser(c)
-	if !panel.IsSuperAdmin(user) {
-		jsonMsg(c, I18nWeb(c, "pages.settings.toasts.modifySettings"), errors.New("superadmin permission required"))
-		return false
-	}
-	return true
+	return requireInteractiveSuperAdmin(c)
 }
 
 func (a *SettingController) listAdmins(c *gin.Context) {
+	if !a.ensureSuperAdmin(c) {
+		return
+	}
 	admins, err := a.userService.ListAdmins()
 	if err != nil {
 		jsonMsg(c, I18nWeb(c, "pages.settings.toasts.getSettings"), err)

@@ -5,7 +5,43 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/Dark-Sky07/phoenix/internal/database/model"
 )
+
+func TestL2TPRestartRecoveryRejectsCurrentDaemonDatabaseEvidence(t *testing.T) {
+	startedAt := time.Now()
+	if !l2tpIncidentsPredateDaemon([]model.ResellerNodeCounterIncident{{CreatedAt: startedAt.Add(-time.Second).UnixMilli()}}, startedAt) {
+		t.Fatal("pre-daemon database incident was rejected")
+	}
+	if !l2tpIncidentsPredateDaemon([]model.ResellerNodeCounterIncident{{CreatedAt: 0}}, startedAt) {
+		t.Fatal("legacy database incident without a timestamp was rejected")
+	}
+	if l2tpIncidentsPredateDaemon([]model.ResellerNodeCounterIncident{{CreatedAt: startedAt.UnixMilli()}}, startedAt) {
+		t.Fatal("current daemon database incident became recovery eligible")
+	}
+	if l2tpIncidentsPredateDaemon([]model.ResellerNodeCounterIncident{{CreatedAt: startedAt.Add(time.Millisecond).UnixMilli()}}, startedAt) {
+		t.Fatal("later database incident became recovery eligible")
+	}
+}
+
+func TestL2TPRecoveryRejectsSymlinkEvidence(t *testing.T) {
+	setupConflictDB(t)
+	evidenceDir := filepath.Join(os.Getenv("XUI_DB_FOLDER"), "l2tp-accounting-evidence")
+	if err := os.MkdirAll(evidenceDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(os.Getenv("XUI_DB_FOLDER"), "outside-evidence.txt")
+	if err := os.WriteFile(target, []byte("evidence\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(evidenceDir, "not-a-real-evidence.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l2tpRecoveryFiles(evidenceDir); err == nil {
+		t.Fatal("symlink evidence was accepted")
+	}
+}
 
 func TestL2TPRestartRecoveryRequiresEvidenceOlderThanDaemonEpoch(t *testing.T) {
 	setupConflictDB(t)
