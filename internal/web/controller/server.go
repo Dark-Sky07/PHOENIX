@@ -417,8 +417,12 @@ func (a *ServerController) getConfigJson(c *gin.Context) {
 	jsonObj(c, configJson, nil)
 }
 
-// getDb downloads the database file.
+// getDb downloads a complete panel backup, including material not exposed by
+// ordinary API resources. Keep it bound to an interactive superadmin session.
 func (a *ServerController) getDb(c *gin.Context) {
+	if !requireInteractiveSuperAdmin(c) {
+		return
+	}
 	db, err := a.serverService.GetDb()
 	if err != nil {
 		jsonMsg(c, I18nWeb(c, "pages.index.getDatabaseError"), err)
@@ -442,6 +446,9 @@ func (a *ServerController) getDb(c *gin.Context) {
 // getMigration downloads a cross-engine migration file: a .dump on SQLite or a
 // .db SQLite database on PostgreSQL, so the data can seed the other backend.
 func (a *ServerController) getMigration(c *gin.Context) {
+	if !requireInteractiveSuperAdmin(c) {
+		return
+	}
 	data, filename, err := a.serverService.GetMigration()
 	if err != nil {
 		jsonMsg(c, I18nWeb(c, "pages.index.getDatabaseError"), err)
@@ -457,8 +464,12 @@ func (a *ServerController) getMigration(c *gin.Context) {
 	c.Writer.Write(data)
 }
 
-// importDB imports a database file and restarts the Xray service.
+// importDB replaces panel data and restarts the Xray service, so it requires
+// an interactive superadmin session rather than a reusable API token.
 func (a *ServerController) importDB(c *gin.Context) {
+	if !requireInteractiveSuperAdmin(c) {
+		return
+	}
 	file, _, err := c.Request.FormFile("db")
 	if err != nil {
 		jsonMsg(c, I18nWeb(c, "pages.index.readDatabaseError"), err)

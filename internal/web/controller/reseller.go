@@ -724,9 +724,7 @@ func (a *ResellerController) reconciliation(c *gin.Context) {
 // traffic evidence. Dry-run is the default and the confirmation token must
 // match exactly before anything is moved.
 func (a *ResellerController) reconciliationRepair(c *gin.Context) {
-	user := session.GetLoginUser(c)
-	if user == nil || user.Id != 1 {
-		c.JSON(http.StatusForbidden, gin.H{"success": false, "msg": "superadmin required for reconciliation repair"})
+	if !requireInteractiveSuperAdmin(c) {
 		return
 	}
 	var options service.ReconcileOptions
