@@ -21,6 +21,9 @@ on:
 jobs:
   build:
     permissions:
+      # Read is required by the SBOM publisher to locate its workflow artifact;
+      # write is limited to attaching release assets for an already-published tag.
+      actions: read
       contents: write
     strategy:
       matrix:
@@ -195,11 +198,27 @@ jobs:
       - name: Package
         run: tar -zcvf x-ui-linux-${{ matrix.platform }}.tar.gz x-ui
 
+      - name: Generate archive checksum
+        run: sha256sum x-ui-linux-${{ matrix.platform }}.tar.gz > x-ui-linux-${{ matrix.platform }}.tar.gz.sha256
+
+      - name: Generate SPDX SBOM
+        # anchore/sbom-action v0.24.4, pinned to an immutable tag commit.
+        # The SBOM is attached to release-event runs as a release asset and is
+        # retained as a workflow artifact on ordinary main-branch builds.
+        uses: anchore/sbom-action@dfcb83b97731532d72be422cbc51ee64adb6fd56
+        with:
+          path: ./x-ui
+          artifact-name: x-ui-linux-${{ matrix.platform }}.spdx.json
+          output-file: ./x-ui-linux-${{ matrix.platform }}.spdx.json
+
       - name: Upload files to Artifacts
         uses: actions/upload-artifact@v7
         with:
           name: x-ui-linux-${{ matrix.platform }}
-          path: ./x-ui-linux-${{ matrix.platform }}.tar.gz
+          path: |
+            ./x-ui-linux-${{ matrix.platform }}.tar.gz
+            ./x-ui-linux-${{ matrix.platform }}.tar.gz.sha256
+            ./x-ui-linux-${{ matrix.platform }}.spdx.json
 
       - name: Upload files to GH release
         uses: svenstaro/upload-release-action@v2
@@ -214,12 +233,24 @@ jobs:
           overwrite: false
           prerelease: false
 
+      - name: Upload archive checksum to GH release
+        uses: svenstaro/upload-release-action@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          tag: ${{ github.ref_name }}
+          file: x-ui-linux-${{ matrix.platform }}.tar.gz.sha256
+          asset_name: x-ui-linux-${{ matrix.platform }}.tar.gz.sha256
+          overwrite: false
+          prerelease: false
+
   # =================================
   #  Windows Build
   # =================================
   build-windows:
     name: Build for Windows
     permissions:
+      actions: read
       contents: write
     strategy:
       matrix:
@@ -373,11 +404,28 @@ jobs:
         run: |
           Compress-Archive -Path .\x-ui -DestinationPath "x-ui-windows-amd64.zip"
 
+      - name: Generate archive checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash -Path "x-ui-windows-amd64.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  x-ui-windows-amd64.zip" | Out-File -FilePath "x-ui-windows-amd64.zip.sha256" -Encoding ascii -NoNewline
+
+      - name: Generate SPDX SBOM
+        # anchore/sbom-action v0.24.4, pinned to an immutable tag commit.
+        uses: anchore/sbom-action@dfcb83b97731532d72be422cbc51ee64adb6fd56
+        with:
+          path: ./x-ui
+          artifact-name: x-ui-windows-amd64.spdx.json
+          output-file: ./x-ui-windows-amd64.spdx.json
+
       - name: Upload files to Artifacts
         uses: actions/upload-artifact@v7
         with:
           name: x-ui-windows-amd64
-          path: ./x-ui-windows-amd64.zip
+          path: |
+            ./x-ui-windows-amd64.zip
+            ./x-ui-windows-amd64.zip.sha256
+            ./x-ui-windows-amd64.spdx.json
 
       - name: Upload files to GH release
         uses: svenstaro/upload-release-action@v2
@@ -389,5 +437,16 @@ jobs:
           asset_name: x-ui-windows-amd64.zip
           # Never mutate assets of an existing release. A reused tag must
           # fail rather than delete, replace, or force-move published files.
+          overwrite: false
+          prerelease: false
+
+      - name: Upload archive checksum to GH release
+        uses: svenstaro/upload-release-action@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          tag: ${{ github.ref_name }}
+          file: x-ui-windows-amd64.zip.sha256
+          asset_name: x-ui-windows-amd64.zip.sha256
           overwrite: false
           prerelease: false

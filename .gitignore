@@ -42,5 +42,23 @@ system_metrics.gob
 # Ignore Docker specific files
 docker-compose.override.yml
 
-# Ignore .env (Environment Variables) file
+# Ignore local environment, credentials, TLS material, and database backups.
+# Keep only intentionally non-sensitive templates in the repository.
 .env
+.env.*
+!.env.example
+!*.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.kdb
+*.keystore
+*.sqlite
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
+*.bak
+*.backup

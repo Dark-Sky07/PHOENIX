@@ -984,14 +984,45 @@ func (s *XrayService) GetXrayTraffic() ([]*xray.Traffic, []*xray.ClientTraffic, 
 		return nil, nil, err
 	}
 	trafficState.observeProcess(current)
-	if err := checkLocalXrayCounterIncidents(database.GetDB()); err != nil {
-		return nil, nil, err
+	db := database.GetDB()
+	// A marker from an older managed core used to block every later poll after
+	// a panel/server restart. On a local SQLite panel we can safely take a new
+	// no-charge baseline from the replacement core, archive the older evidence,
+	// and resume forward-only accounting. Shared PostgreSQL deployments retain
+	// the explicit reconciliation barrier because this process cannot identify
+	// evidence written by another panel.
+	present, recoveryEligible, recoveryErr := localXrayCounterIncidentRecoveryEligible(db, current.StartedAt())
+	if recoveryErr != nil {
+		return nil, nil, recoveryErr
+	}
+	if present && !recoveryEligible {
+		if err := checkLocalXrayCounterIncidents(db); err != nil {
+			return nil, nil, err
+		}
 	}
 	if err := trafficState.api.Init(current.GetAPIPort()); err != nil {
 		logger.Debug("Failed to initialize Xray API:", err)
 		return nil, nil, err
 	}
 	defer trafficState.api.Close()
+	if recoveryEligible {
+		// Do not charge the current cumulative counter values to the period
+		// before the replacement core was observed. The archived marker keeps
+		// that unknown interval auditable; the next poll starts fresh.
+		trafficState.api.ResetTrafficBaseline(false)
+		if _, _, err := trafficState.api.GetTraffic(); err != nil {
+			return nil, nil, fmt.Errorf("establish Xray recovery baseline: %w", err)
+		}
+		_, recovered, backupDir, recoveryErr := recoverLocalXrayCounterIncidentsAfterRestart(db, current.StartedAt())
+		if recoveryErr != nil {
+			return nil, nil, recoveryErr
+		}
+		if !recovered {
+			return nil, nil, errors.New("local Xray accounting evidence changed during restart recovery")
+		}
+		logger.Warning("archived local Xray accounting evidence after a fresh restart baseline:", backupDir)
+		return nil, nil, nil
+	}
 	traffic, clientTraffic, err := trafficState.api.GetTraffic()
 	if err != nil {
 		var decrease *xray.UserTrafficCounterDecrease
@@ -1538,17 +1569,11 @@ func localXrayIncidentEvidence(decrease *xray.UserTrafficCounterDecrease) model.
 }
 
 func checkLocalXrayCounterIncidents(db *gorm.DB) error {
-	if err := diskCounterIncidentError(); err != nil {
+	present, err := localXrayCounterIncidentPresent(db)
+	if err != nil {
 		return err
 	}
-	if db == nil {
-		return errors.New("database unavailable while checking Xray counter incidents")
-	}
-	var count int64
-	if err := db.Model(&model.ResellerNodeCounterIncident{}).Where("node_id = ?", 0).Count(&count).Error; err != nil {
-		return err
-	}
-	if count > 0 {
+	if present {
 		return errors.New("local Xray counter incident requires manual reconciliation")
 	}
 	return nil

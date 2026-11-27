@@ -17,6 +17,7 @@ type managed struct {
 	proc        *Process
 	tag         string
 	fingerprint string
+	startedAt   time.Time
 	lastErrAt   time.Time
 	last        map[string]interfaceCounter
 	online      map[string]bool
@@ -173,7 +174,7 @@ func (m *Manager) ensureLocked(inst Instance) error {
 		m.id = inst.Id
 		return err
 	}
-	m.proc = &managed{proc: proc, tag: inst.Tag, fingerprint: fp, last: map[string]interfaceCounter{}, online: map[string]bool{}}
+	m.proc = &managed{proc: proc, tag: inst.Tag, fingerprint: fp, startedAt: time.Now(), last: map[string]interfaceCounter{}, online: map[string]bool{}}
 	m.id = inst.Id
 	m.ready = true
 	logger.Infof("l2tp: started strongSwan/xl2tpd for inbound %d on UDP 500, 4500 and 1701", inst.Id)
@@ -324,6 +325,18 @@ func (m *Manager) Status() RuntimeStatus {
 		}
 	}
 	return status
+}
+
+// StartedAt returns the current managed daemon epoch. It is used to tell a
+// marker left by an earlier daemon instance from an incident observed by this
+// running instance; it does not prove that its session counters are complete.
+func (m *Manager) StartedAt() time.Time {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.proc == nil || m.proc.proc == nil || !m.proc.proc.IsRunning() {
+		return time.Time{}
+	}
+	return m.proc.startedAt
 }
 
 func (m *Manager) RemoveChecked(id int) error {

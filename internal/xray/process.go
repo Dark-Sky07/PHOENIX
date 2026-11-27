@@ -469,6 +469,13 @@ func (p *Process) GetUptime() uint64 {
 	return uint64(time.Since(p.startTime).Seconds())
 }
 
+// StartedAt returns the time this managed process instance was created. It is
+// used only to distinguish evidence from an older core epoch; callers must not
+// treat it as proof that every network listener became ready at that instant.
+func (p *Process) StartedAt() time.Time {
+	return p.startTime
+}
+
 // refreshAPIPort updates the API port from the inbound configs.
 func (p *process) refreshAPIPort() {
 	for _, inbound := range p.config.InboundConfigs {
