@@ -3,6 +3,8 @@ package job
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -141,5 +143,27 @@ func TestCheckXrayRunningJobRecoversUnreachableAPIAfterStartupGrace(t *testing.T
 	}
 	if fake.recordCalls != 1 || len(fake.restartCalls) != 1 || !fake.restartCalls[0] {
 		t.Fatalf("stale core was not recovered after startup grace: record=%d restart=%v", fake.recordCalls, fake.restartCalls)
+	}
+}
+
+func TestCheckXrayRunningJobDoesNotRecordMaintenanceReplacementAsOutage(t *testing.T) {
+	dbDir := t.TempDir()
+	t.Setenv("XUI_DB_FOLDER", dbDir)
+	if err := os.WriteFile(filepath.Join(dbDir, "panel-update-in-progress"), []byte("test\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	unreachable := errors.New("connection refused")
+	fake := &fakeXrayHealthService{
+		running:   true,
+		startedAt: time.Now().Add(-xrayAPIStartupGrace - time.Second),
+		apiErrors: []error{unreachable, unreachable, unreachable},
+		recorded:  true,
+	}
+	job := &CheckXrayRunningJob{xrayService: fake}
+	for range xrayAPIUnreachableThreshold + 1 {
+		job.Run()
+	}
+	if fake.apiCalls != 0 || fake.recordCalls != 0 || len(fake.restartCalls) != 0 {
+		t.Fatalf("maintenance replacement was treated as outage: api=%d record=%d restart=%v", fake.apiCalls, fake.recordCalls, fake.restartCalls)
 	}
 }

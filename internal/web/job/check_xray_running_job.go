@@ -60,6 +60,15 @@ func (j *CheckXrayRunningJob) Run() {
 	if j.xrayService == nil {
 		return
 	}
+	// update.sh writes this durable barrier before requesting the intentional
+	// service stop. Do not turn that planned hand-off into a core-exit/API
+	// outage incident or force a competing restart while the updater owns the
+	// rollback boundary.
+	if service.UpdateMaintenanceActive() {
+		j.checkTime = 0
+		j.apiCheckTime = 0
+		return
+	}
 	if j.xrayService.DidXrayCrash() {
 		j.apiCheckTime = 0
 		observed, err := j.xrayService.ObserveUnexpectedXrayExit()

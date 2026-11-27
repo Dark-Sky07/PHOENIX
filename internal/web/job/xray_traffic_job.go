@@ -283,6 +283,14 @@ func (j *XrayTrafficJob) prepareXrayBatch(
 }
 
 func (j *XrayTrafficJob) run() {
+	// The shell updater creates this barrier before stopping the panel and only
+	// removes it after a stable replacement API is confirmed. Skipping the poll
+	// avoids creating a durable in-flight marker from the deliberately absent
+	// runtime; it also prevents quota/expiry enforcement from acting on a
+	// transition rather than a real traffic observation.
+	if service.UpdateMaintenanceActive() {
+		return
+	}
 	// Never advance the in-memory baseline again while a previous batch is
 	// uncommitted. The receipt makes an ambiguous commit safe to retry.
 	if j.pending == nil {

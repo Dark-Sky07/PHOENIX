@@ -169,6 +169,28 @@ phoenix_run_installer() {
     return "${rc}"
 }
 
+# Updates must never use the legacy installer path: it removes the live panel
+# tree and can leave the old process with a deleted CWD. Fetch the updater and
+# all staged assets from one immutable release tag instead.
+phoenix_run_updater() {
+    local repo="${PHOENIX_REPO}" tag tmp rc
+    tag="${1:-$(phoenix_latest_tag)}"
+    if [[ -z "${tag}" ]]; then
+        LOGE "Could not determine the latest PHOENIX release tag."
+        return 1
+    fi
+    tmp="$(mktemp /tmp/phoenix-update.XXXXXX.sh)" || return 1
+    if ! curl -4fLRsS -o "${tmp}" "https://raw.githubusercontent.com/${repo}/${tag}/update.sh"; then
+        rm -f "${tmp}"
+        LOGE "Could not download the transactional PHOENIX ${tag} updater."
+        return 1
+    fi
+    env PHOENIX_TAG="${tag}" bash "${tmp}"
+    rc=$?
+    rm -f "${tmp}"
+    return "${rc}"
+}
+
 # Download the release management script into /usr/bin/x-ui. Newer releases
 # ship it as phoenix.sh; older tags only have x-ui.sh.
 update_release_script() {
@@ -199,9 +221,8 @@ update() {
         fi
         return 0
     fi
-    phoenix_run_installer
-    if [[ $? == 0 ]]; then
-        LOGI "Update is complete, Panel has automatically restarted "
+    if phoenix_run_updater; then
+        LOGI "Update is complete and the Xray API passed stable runtime verification."
         before_show_menu
     fi
 }

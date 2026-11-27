@@ -1651,6 +1651,24 @@ install_staged_xray() {
 install_x-ui() {
     cd ${xui_folder%/x-ui}/
 
+    # A launcher from an older release still routes `phoenix update` through
+    # this installer. Never let that compatibility path remove a live panel
+    # tree: hand it to the release-matched transactional updater before any
+    # stop, rm, or extraction occurs. Fresh installs retain the installer flow.
+    if [[ -f "${xui_folder}/x-ui" && "${PHOENIX_FORCE_INSTALL:-0}" != "1" ]]; then
+        local update_tmp update_rc
+        update_tmp="$(mktemp /tmp/phoenix-update.XXXXXX.sh)" || return 1
+        if ! phoenix_raw_fetch "$update_tmp" update.sh; then
+            rm -f "$update_tmp"
+            echo -e "${red}Failed to download the transactional updater; existing installation was not touched.${plain}"
+            return 1
+        fi
+        env PHOENIX_TAG="${phoenix_ref}" bash "$update_tmp"
+        update_rc=$?
+        rm -f "$update_tmp"
+        return "$update_rc"
+    fi
+
     # Download resources
     if [ $# == 0 ]; then
         tag_version="${PHOENIX_TAG:-$(curl -4fsSL "https://api.github.com/repos/${PHOENIX_REPO}/releases/latest" 2> /dev/null | grep -m1 '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')}"

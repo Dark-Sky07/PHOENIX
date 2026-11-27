@@ -21,7 +21,7 @@ type CounterIncidentStatus struct {
 }
 
 func readCounterIncidentStatus(db *gorm.DB) CounterIncidentStatus {
-	status := CounterIncidentStatus{PendingInProcess: xrayCounterIncidentPending.Load() || xrayCoreExitPending.Load() || xrayAPIOutagePending.Load() || hasPendingXrayExitObservation() || hasPendingNodeCounterIncidents() || hasPendingGlobalCounterIncident()}
+	status := CounterIncidentStatus{PendingInProcess: UpdateMaintenanceActive() || xrayCounterIncidentPending.Load() || xrayCoreExitPending.Load() || xrayAPIOutagePending.Load() || hasPendingXrayExitObservation() || hasPendingNodeCounterIncidents() || hasPendingGlobalCounterIncident()}
 	entries, err := os.ReadDir(counterIncidentDir())
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return status
