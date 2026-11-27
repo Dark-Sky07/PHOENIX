@@ -182,6 +182,16 @@ func (s *InboundService) addTrafficLocked(id string, inboundTraffics []*xray.Tra
 		return false, false, nil, err
 	}
 
+	// The durable updater barrier means the local Xray interval is deliberately
+	// unavailable. Keep any independently verified traffic writes and their
+	// receipts, but defer every traffic-state decision that can renew, expire,
+	// quota-disable, or remove a user. This is the shared enforcement boundary
+	// for config generation and every protocol collector, including ones that
+	// may run while the replacement panel is coming up.
+	if UpdateMaintenanceActive() {
+		return false, false, nil, nil
+	}
+
 	// Keep the just-written traffic even if a renewal cannot be completed,
 	// while ensuring no partially archived/reset renewal is committed.
 	if err = tx.SavePoint("automatic_renewal").Error; err != nil {

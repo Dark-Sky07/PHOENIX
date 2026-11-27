@@ -728,8 +728,12 @@ func (a *ResellerController) reconciliationRepair(c *gin.Context) {
 		return
 	}
 	var options service.ReconcileOptions
-	if err := c.ShouldBindJSON(&options); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "msg": "invalid reconciliation request"})
+	// The current SPA sends JSON explicitly. Accept URL-encoded form data too
+	// so an already-cached pre-fix SPA (whose shared Axios default was form
+	// encoding) cannot turn a safety repair into an opaque HTTP 400. Both
+	// bindings retain the same confirmation-token and dry-run safeguards below.
+	if err := c.ShouldBind(&options); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "msg": "invalid reconciliation request; send a JSON or URL-encoded form object"})
 		return
 	}
 	result, err := service.ReconcileCounterIncidents(database.GetDB(), options)

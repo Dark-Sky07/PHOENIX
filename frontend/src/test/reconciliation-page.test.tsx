@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const api = vi.hoisted(() => ({
@@ -78,5 +78,20 @@ describe('ReconciliationPage', () => {
     });
 
     expect(container.querySelector('.ant-alert-error')).toBeNull();
+  });
+
+  it('sends the repair contract as JSON instead of inheriting the legacy form default', async () => {
+    renderPage();
+
+    await waitFor(() => expect(api.get).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole('button', { name: /dry run/i }));
+
+    await waitFor(() => {
+      expect(api.post).toHaveBeenCalledWith(
+        '/panel/api/resellers/reconciliation/repair',
+        { confirm: '', dryRun: true },
+        { silent: true, headers: { 'Content-Type': 'application/json' } },
+      );
+    });
   });
 });

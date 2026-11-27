@@ -70,8 +70,8 @@ export class HttpUtil {
       return msg;
     } catch (error) {
       console.error('GET request failed:', error);
-      const err = error as AxiosError<{ message?: string }>;
-      const errorMsg = new Msg<T>(false, err.response?.data?.message || err.message || 'Request failed');
+      const err = error as AxiosError<{ message?: string; msg?: string }>;
+      const errorMsg = new Msg<T>(false, err.response?.data?.msg || err.response?.data?.message || err.message || 'Request failed');
       if (!silent) this._handleMsg(errorMsg);
       return errorMsg;
     }
@@ -86,8 +86,8 @@ export class HttpUtil {
       return msg;
     } catch (error) {
       console.error('POST request failed:', error);
-      const err = error as AxiosError<{ message?: string }>;
-      const errorMsg = new Msg<T>(false, err.response?.data?.message || err.message || 'Request failed');
+      const err = error as AxiosError<{ message?: string; msg?: string }>;
+      const errorMsg = new Msg<T>(false, err.response?.data?.msg || err.response?.data?.message || err.message || 'Request failed');
       if (!silent) this._handleMsg(errorMsg);
       return errorMsg;
     }

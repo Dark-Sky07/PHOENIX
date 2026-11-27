@@ -184,7 +184,17 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 	xrayConfig.API = ensureAPIServices(xrayConfig.API)
 	xrayConfig.Policy = ensureStatsPolicy(xrayConfig.Policy)
 
-	_, _, _ = s.inboundService.AddTraffic(nil, nil)
+	// Config generation runs on Xray startup and restart as well as ordinary
+	// admin reads. During a transactional panel replacement the updater keeps a
+	// durable marker until the replacement runtime is stable; traffic counters
+	// are intentionally unavailable in that interval. Do not turn this read-like
+	// path into renewal, expiry, or quota enforcement while that marker exists:
+	// doing so can persistently disable otherwise valid users before the first
+	// safe traffic poll. The configuration still reflects the existing durable
+	// enable state and is therefore safe to generate for the replacement core.
+	if !UpdateMaintenanceActive() {
+		_, _, _ = s.inboundService.AddTraffic(nil, nil)
+	}
 
 	inbounds, err := s.inboundService.GetAllInbounds()
 	if err != nil {
