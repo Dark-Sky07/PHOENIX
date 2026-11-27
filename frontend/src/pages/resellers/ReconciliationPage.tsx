@@ -76,11 +76,86 @@ interface ReconcileResult {
   warnings: string[];
 }
 
-function nameList(values: string[]): ReactNode {
-  if (!values || values.length === 0) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />;
+type UnknownRecord = Record<string, unknown>;
+
+function recordOrEmpty(value: unknown): UnknownRecord {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as UnknownRecord : {};
+}
+
+function arrayOrEmpty<T>(value: unknown): T[] {
+  return Array.isArray(value) ? value as T[] : [];
+}
+
+function stringArrayOrEmpty(value: unknown): string[] {
+  return arrayOrEmpty<unknown>(value).filter((item): item is string => typeof item === 'string');
+}
+
+function numberOr(value: unknown, fallback = 0): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+/**
+ * Reconciliation was added after existing installations had already written
+ * empty evidence collections. Go encodes a nil slice as null, so normalize the
+ * wire response at the page boundary. This keeps an incomplete/degraded report
+ * visible to the operator instead of letting a nullable collection crash the
+ * whole safety page.
+ */
+export function normalizeReconciliationReport(value: unknown): ReconciliationReport {
+  const raw = recordOrEmpty(value);
+  const counterIncident = recordOrEmpty(raw.counterIncident);
+  const xrayApi = recordOrEmpty(raw.xrayApi);
+
+  return {
+    available: raw.available === true,
+    generatedAt: numberOr(raw.generatedAt),
+    counterIncident: {
+      available: counterIncident.available === true,
+      databaseCount: numberOr(counterIncident.databaseCount),
+      fallbackPresent: counterIncident.fallbackPresent === true,
+      pendingInProcess: counterIncident.pendingInProcess === true,
+      daemonIdentityCount: numberOr(counterIncident.daemonIdentityCount),
+    },
+    danglingMappings: arrayOrEmpty<ReconciliationReport['danglingMappings'][number]>(raw.danglingMappings),
+    dbIncidents: arrayOrEmpty<ReconciliationReport['dbIncidents'][number]>(raw.dbIncidents),
+    inFlightPolls: stringArrayOrEmpty(raw.inFlightPolls),
+    fallbackFiles: stringArrayOrEmpty(raw.fallbackFiles),
+    l2tpMarkerPresent: raw.l2tpMarkerPresent === true,
+    l2tpEvidenceFiles: stringArrayOrEmpty(raw.l2tpEvidenceFiles),
+    xrayJournals: stringArrayOrEmpty(raw.xrayJournals),
+    tuicJournals: stringArrayOrEmpty(raw.tuicJournals),
+    xrayApi: {
+      port: numberOr(xrayApi.port),
+      reachable: xrayApi.reachable === true,
+      ...(typeof xrayApi.error === 'string' ? { error: xrayApi.error } : {}),
+    },
+    warnings: stringArrayOrEmpty(raw.warnings),
+  };
+}
+
+function normalizeReconcileResult(value: unknown): ReconcileResult | null {
+  const raw = recordOrEmpty(value);
+  if (Object.keys(raw).length === 0) return null;
+
+  return {
+    dryRun: raw.dryRun === true,
+    ...(typeof raw.backupDir === 'string' ? { backupDir: raw.backupDir } : {}),
+    archivedMappings: numberOr(raw.archivedMappings),
+    clearedIncidents: numberOr(raw.clearedIncidents),
+    clearedPolls: numberOr(raw.clearedPolls),
+    movedFallbackFiles: numberOr(raw.movedFallbackFiles),
+    movedL2tpMarker: raw.movedL2tpMarker === true,
+    movedL2tpEvidenceFiles: numberOr(raw.movedL2tpEvidenceFiles),
+    warnings: stringArrayOrEmpty(raw.warnings),
+  };
+}
+
+function nameList(values: readonly string[] | null | undefined): ReactNode {
+  const names = Array.isArray(values) ? values : [];
+  if (names.length === 0) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} />;
   return (
     <Space direction="vertical" size={2} style={{ maxHeight: 180, overflowY: 'auto' }}>
-      {values.map((value) => (
+      {names.map((value) => (
         <Typography.Text key={value} code>
           {value}
         </Typography.Text>
@@ -111,7 +186,7 @@ export default function ReconciliationPage() {
         silent: true,
       });
       if (!msg.success) throw new Error(msg.msg || 'failed');
-      return msg.obj as ReconciliationReport;
+      return normalizeReconciliationReport(msg.obj);
     },
     refetchInterval: 15_000,
   });
@@ -144,7 +219,7 @@ export default function ReconciliationPage() {
           messageApi.error(msg.msg || t('somethingWentWrong'));
           return;
         }
-        setLastResult(msg.obj || null);
+        setLastResult(normalizeReconcileResult(msg.obj));
         await queryClient.invalidateQueries({ queryKey: RECONCILIATION_KEY });
       } finally {
         setBusy(false);

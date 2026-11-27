@@ -73,6 +73,33 @@ func TestResellerReadOnlyViewsDegradeCounterIncident(t *testing.T) {
 	}
 }
 
+func TestReadReconciliationReportSerializesEmptyCollectionsAsArrays(t *testing.T) {
+	setupConflictDB(t)
+
+	data, err := json.Marshal(ReadReconciliationReport(database.GetDB()))
+	if err != nil {
+		t.Fatalf("marshal reconciliation report: %v", err)
+	}
+	var wire map[string]json.RawMessage
+	if err := json.Unmarshal(data, &wire); err != nil {
+		t.Fatalf("decode reconciliation report: %v", err)
+	}
+	for _, field := range []string{
+		"danglingMappings",
+		"dbIncidents",
+		"inFlightPolls",
+		"fallbackFiles",
+		"l2tpEvidenceFiles",
+		"xrayJournals",
+		"tuicJournals",
+		"warnings",
+	} {
+		if got := string(wire[field]); got != "[]" {
+			t.Errorf("%s serialized as %s; empty reconciliation collections must be []", field, got)
+		}
+	}
+}
+
 func TestReconcileCounterIncidentsBacksUpBeforeClearing(t *testing.T) {
 	seedResellerWithDanglingMapping(t)
 	db := database.GetDB()
