@@ -457,6 +457,26 @@ export const sections: readonly Section[] = [
       },
       {
         method: 'POST',
+        path: '/panel/api/server/stopPPPVPNService',
+        summary: 'Stop all managed SSTP/PPTP daemons and hold reconciliation until the service is started again.',
+      },
+      {
+        method: 'POST',
+        path: '/panel/api/server/startPPPVPNService',
+        summary: 'Resume managed SSTP/PPTP reconciliation and reconcile enabled inbounds immediately.',
+      },
+      {
+        method: 'POST',
+        path: '/panel/api/server/restartPPPVPNService',
+        summary: 'Stop and start the managed SSTP/PPTP daemons using the current inbound configuration.',
+      },
+      {
+        method: 'POST',
+        path: '/panel/api/server/updatePPPVPNService',
+        summary: 'Resume SSTP/PPTP reconciliation and apply the current inbound configuration.',
+      },
+      {
+        method: 'POST',
         path: '/panel/api/server/installXray/:version',
         summary: 'Download, verify, and install the latest compatible Xray-core release; failed updates roll back automatically.',
         params: [

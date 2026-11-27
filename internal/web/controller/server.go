@@ -15,6 +15,7 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/l2tp"
 	"github.com/Dark-Sky07/phoenix/internal/logger"
 	"github.com/Dark-Sky07/phoenix/internal/openvpn"
+	"github.com/Dark-Sky07/phoenix/internal/pppvpn"
 	"github.com/Dark-Sky07/phoenix/internal/web/entity"
 	"github.com/Dark-Sky07/phoenix/internal/web/global"
 	"github.com/Dark-Sky07/phoenix/internal/web/job"
@@ -81,6 +82,10 @@ func (a *ServerController) initRouter(g *gin.RouterGroup) {
 	g.POST("/startL2TPService", a.startL2TPService)
 	g.POST("/restartL2TPService", a.restartL2TPService)
 	g.POST("/updateL2TPService", a.updateL2TPService)
+	g.POST("/stopPPPVPNService", a.stopPPPVPNService)
+	g.POST("/startPPPVPNService", a.startPPPVPNService)
+	g.POST("/restartPPPVPNService", a.restartPPPVPNService)
+	g.POST("/updatePPPVPNService", a.updatePPPVPNService)
 	g.POST("/installXray/:version", a.installXray)
 	g.POST("/updatePanel", a.updatePanel)
 	g.POST("/updateGeofile", a.updateGeofile)
@@ -341,6 +346,37 @@ func (a *ServerController) updateL2TPService(c *gin.Context) {
 	l2tp.GetManager().Resume()
 	job.NewL2TPJob().Run()
 	jsonMsg(c, "L2TP service updated", nil)
+}
+
+// PPPVPN controls mirror OpenVPN/L2TP. The reconcile job is paused after a
+// manual stop so it cannot immediately recreate the SSTP/PPTP daemons.
+func (a *ServerController) stopPPPVPNService(c *gin.Context) {
+	if err := pppvpn.GetManager().StopManually(); err != nil {
+		jsonMsg(c, "SSTP/PPTP service stop failed", err)
+		return
+	}
+	jsonMsg(c, "SSTP/PPTP stop requested", nil)
+}
+
+func (a *ServerController) startPPPVPNService(c *gin.Context) {
+	pppvpn.GetManager().Resume()
+	job.NewPPPVPNJob().Run()
+	jsonMsg(c, "SSTP/PPTP start requested", nil)
+}
+
+func (a *ServerController) restartPPPVPNService(c *gin.Context) {
+	if err := pppvpn.GetManager().Restart(); err != nil {
+		jsonMsg(c, "SSTP/PPTP service restart failed", err)
+		return
+	}
+	job.NewPPPVPNJob().Run()
+	jsonMsg(c, "SSTP/PPTP restart requested", nil)
+}
+
+func (a *ServerController) updatePPPVPNService(c *gin.Context) {
+	pppvpn.GetManager().Resume()
+	job.NewPPPVPNJob().Run()
+	jsonMsg(c, "SSTP/PPTP update requested", nil)
 }
 
 // getLogs retrieves the application logs based on count, level, and syslog filters.

@@ -102,31 +102,64 @@ is_port_in_use() {
 install_base() {
     case "${release}" in
         ubuntu | debian | armbian)
-            apt_get_locked update && apt_get_locked install -y -q cron curl tar tzdata socat ca-certificates openssl unzip
+            apt_get_locked update && apt_get_locked install -y -q cron curl tar tzdata socat ca-certificates openssl unzip iproute2 procps kmod psmisc coreutils findutils grep gawk sudo
             ;;
         fedora | amzn | virtuozzo | rhel | almalinux | rocky | ol)
-            dnf -y update && dnf install -y -q cronie curl tar tzdata socat ca-certificates openssl unzip
+            dnf -y update && dnf install -y -q cronie curl tar tzdata socat ca-certificates openssl unzip iproute procps-ng kmod psmisc gawk sudo
             ;;
         centos)
             if [[ "${VERSION_ID}" =~ ^7 ]]; then
-                yum -y update && yum install -y cronie curl tar tzdata socat ca-certificates openssl unzip
+                yum -y update && yum install -y cronie curl tar tzdata socat ca-certificates openssl unzip iproute procps kmod psmisc gawk sudo
             else
-                dnf -y update && dnf install -y -q cronie curl tar tzdata socat ca-certificates openssl unzip
+                dnf -y update && dnf install -y -q cronie curl tar tzdata socat ca-certificates openssl unzip iproute procps-ng kmod psmisc gawk sudo
             fi
             ;;
         arch | manjaro | parch)
-            pacman -Syu && pacman -Syu --noconfirm cronie curl tar tzdata socat ca-certificates openssl unzip
+            pacman -Syu && pacman -Syu --noconfirm cronie curl tar tzdata socat ca-certificates openssl unzip iproute2 procps kmod psmisc gawk sudo
             ;;
         opensuse-tumbleweed | opensuse-leap)
-            zypper refresh && zypper -q install -y cron curl tar timezone socat ca-certificates openssl unzip
+            zypper refresh && zypper -q install -y cron curl tar timezone socat ca-certificates openssl unzip iproute2 procps kmod psmisc gawk sudo
             ;;
         alpine)
-            apk update && apk add dcron curl tar tzdata socat ca-certificates openssl unzip
+            apk update && apk add dcron curl tar tzdata socat ca-certificates openssl unzip iproute2 procps kmod psmisc gawk sudo
             ;;
         *)
-            apt_get_locked update && apt_get_locked install -y -q cron curl tar tzdata socat ca-certificates openssl unzip
+            apt_get_locked update && apt_get_locked install -y -q cron curl tar tzdata socat ca-certificates openssl unzip iproute2 procps kmod psmisc coreutils findutils grep gawk sudo
             ;;
     esac
+}
+
+# Verify every command the installer and the panel rely on. install_base is
+# idempotent, so a second pass repairs hosts where a minimal image shipped
+# without one of these tools. PostgreSQL client tools are checked separately
+# because they are needed for in-panel backup/restore and incident tooling.
+verify_runtime_prerequisites() {
+    local required_commands=(curl tar unzip openssl socat crontab ip ss sysctl modprobe sha256sum mktemp find grep sed awk sudo)
+    local missing=() command_name
+    for command_name in "${required_commands[@]}"; do
+        command -v "$command_name" > /dev/null 2>&1 || missing+=("$command_name")
+    done
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        echo -e "${yellow}Installing missing runtime prerequisites: ${missing[*]}${plain}"
+        install_base || return 1
+        missing=()
+        for command_name in "${required_commands[@]}"; do
+            command -v "$command_name" > /dev/null 2>&1 || missing+=("$command_name")
+        done
+        if [[ ${#missing[@]} -gt 0 ]]; then
+            echo -e "${red}These required commands are still unavailable: ${missing[*]}${plain}"
+            return 1
+        fi
+    fi
+
+    if ! command -v psql > /dev/null 2>&1 || ! command -v pg_dump > /dev/null 2>&1 || ! command -v pg_restore > /dev/null 2>&1; then
+        ensure_pg_client || {
+            echo -e "${red}PostgreSQL client tools (psql/pg_dump/pg_restore) could not be installed.${plain}"
+            return 1
+        }
+    fi
+    echo -e "${green}Runtime prerequisites checked: commands and PostgreSQL client tools are available.${plain}"
 }
 
 gen_random_string() {
@@ -1788,6 +1821,10 @@ install_x-ui() {
 
 echo -e "${green}Running...${plain}"
 install_base
+if ! verify_runtime_prerequisites; then
+    echo -e "${red}Runtime prerequisite check failed; installation aborted.${plain}"
+    exit 1
+fi
 # OpenVPN inbounds are served by a host-side OpenVPN daemon. Install and
 # validate the dependency during both fresh installs and updates so a valid
 # .ovpn profile never points at a panel whose VPN listener is silently absent.

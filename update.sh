@@ -245,31 +245,91 @@ install_base() {
     echo -e "${green}Updating and install dependency packages...${plain}"
     case "${release}" in
         ubuntu | debian | armbian)
-            apt_get_locked update > /dev/null 2>&1 && apt_get_locked install -y -q cron curl tar unzip tzdata socat openssl > /dev/null 2>&1
+            apt_get_locked update > /dev/null 2>&1 && apt_get_locked install -y -q cron curl tar unzip tzdata socat openssl ca-certificates iproute2 procps kmod psmisc coreutils findutils grep gawk sudo > /dev/null 2>&1
             ;;
         fedora | amzn | virtuozzo | rhel | almalinux | rocky | ol)
-            dnf -y update > /dev/null 2>&1 && dnf install -y -q cronie curl tar unzip tzdata socat openssl > /dev/null 2>&1
+            dnf -y update > /dev/null 2>&1 && dnf install -y -q cronie curl tar unzip tzdata socat openssl ca-certificates iproute procps-ng kmod psmisc gawk sudo > /dev/null 2>&1
             ;;
         centos)
             if [[ "${VERSION_ID}" =~ ^7 ]]; then
-                yum -y update > /dev/null 2>&1 && yum install -y -q cronie curl tar unzip tzdata socat openssl > /dev/null 2>&1
+                yum -y update > /dev/null 2>&1 && yum install -y -q cronie curl tar unzip tzdata socat openssl ca-certificates iproute procps kmod psmisc gawk sudo > /dev/null 2>&1
             else
-                dnf -y update > /dev/null 2>&1 && dnf install -y -q cronie curl tar unzip tzdata socat openssl > /dev/null 2>&1
+                dnf -y update > /dev/null 2>&1 && dnf install -y -q cronie curl tar unzip tzdata socat openssl ca-certificates iproute procps-ng kmod psmisc gawk sudo > /dev/null 2>&1
             fi
             ;;
         arch | manjaro | parch)
-            pacman -Syu > /dev/null 2>&1 && pacman -Syu --noconfirm cronie curl tar unzip tzdata socat openssl > /dev/null 2>&1
+            pacman -Syu > /dev/null 2>&1 && pacman -Syu --noconfirm cronie curl tar unzip tzdata socat openssl ca-certificates iproute2 procps kmod psmisc gawk sudo > /dev/null 2>&1
             ;;
         opensuse-tumbleweed | opensuse-leap)
-            zypper refresh > /dev/null 2>&1 && zypper -q install -y cron curl tar unzip timezone socat openssl > /dev/null 2>&1
+            zypper refresh > /dev/null 2>&1 && zypper -q install -y cron curl tar unzip timezone socat openssl ca-certificates iproute2 procps kmod psmisc gawk sudo > /dev/null 2>&1
             ;;
         alpine)
-            apk update > /dev/null 2>&1 && apk add dcron curl tar unzip tzdata socat openssl > /dev/null 2>&1
+            apk update > /dev/null 2>&1 && apk add dcron curl tar unzip tzdata socat openssl ca-certificates iproute2 procps kmod psmisc gawk sudo > /dev/null 2>&1
             ;;
         *)
-            apt_get_locked update > /dev/null 2>&1 && apt_get_locked install -y -q cron curl tar unzip tzdata socat openssl > /dev/null 2>&1
+            apt_get_locked update > /dev/null 2>&1 && apt_get_locked install -y -q cron curl tar unzip tzdata socat openssl ca-certificates iproute2 procps kmod psmisc coreutils findutils grep gawk sudo > /dev/null 2>&1
             ;;
     esac
+}
+
+ensure_pg_client() {
+    if command -v pg_dump > /dev/null 2>&1 && command -v pg_restore > /dev/null 2>&1 && command -v psql > /dev/null 2>&1; then
+        return 0
+    fi
+    echo -e "${yellow}Installing PostgreSQL client tools (psql/pg_dump/pg_restore) for database backup and rollback...${plain}" >&2
+    case "${release}" in
+        ubuntu | debian | armbian)
+            apt_get_locked update > /dev/null 2>&1 && apt_get_locked install -y -q postgresql-client > /dev/null 2>&1 || return 1
+            ;;
+        fedora | amzn | virtuozzo | rhel | almalinux | rocky | ol)
+            dnf install -y -q postgresql > /dev/null 2>&1 || return 1
+            ;;
+        centos)
+            if [[ "${VERSION_ID}" =~ ^7 ]]; then
+                yum install -y postgresql > /dev/null 2>&1 || return 1
+            else
+                dnf install -y -q postgresql > /dev/null 2>&1 || return 1
+            fi
+            ;;
+        arch | manjaro | parch)
+            pacman -Sy --noconfirm postgresql > /dev/null 2>&1 || return 1
+            ;;
+        opensuse-tumbleweed | opensuse-leap)
+            zypper -q install -y postgresql > /dev/null 2>&1 || return 1
+            ;;
+        alpine)
+            apk add --no-cache postgresql-client > /dev/null 2>&1 || return 1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    command -v psql > /dev/null 2>&1 && command -v pg_dump > /dev/null 2>&1 && command -v pg_restore > /dev/null 2>&1
+}
+
+verify_runtime_prerequisites() {
+    local required_commands=(curl tar unzip openssl crontab ip ss sysctl sha256sum mktemp find grep sed awk sudo)
+    local missing=() command_name
+    for command_name in "${required_commands[@]}"; do
+        command -v "$command_name" > /dev/null 2>&1 || missing+=("$command_name")
+    done
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        echo -e "${yellow}Installing missing runtime prerequisites: ${missing[*]}${plain}"
+        install_base || return 1
+        missing=()
+        for command_name in "${required_commands[@]}"; do
+            command -v "$command_name" > /dev/null 2>&1 || missing+=("$command_name")
+        done
+        if [[ ${#missing[@]} -gt 0 ]]; then
+            echo -e "${red}These required commands are still unavailable: ${missing[*]}${plain}"
+            return 1
+        fi
+    fi
+    ensure_pg_client || {
+        echo -e "${red}PostgreSQL client tools (psql/pg_dump/pg_restore) could not be installed.${plain}"
+        return 1
+    }
+    echo -e "${green}Runtime prerequisites checked.${plain}"
 }
 
 build_pptpd_from_source() {
@@ -1599,6 +1659,9 @@ update_x-ui() {
 
 echo -e "${green}Running...${plain}"
 install_base
+if ! verify_runtime_prerequisites; then
+    _fail "ERROR: runtime prerequisite check failed; the installation was not touched."
+fi
 if ! install_pppvpn; then
     _fail "ERROR: SSTP/PPTP dependency setup failed. Fix the prerequisite above and rerun the update."
 fi

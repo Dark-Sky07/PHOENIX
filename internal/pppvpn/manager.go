@@ -19,8 +19,18 @@ type managed struct {
 	lastErr     time.Time
 }
 type Manager struct {
-	mu       sync.Mutex
-	inbounds map[int]*managed
+	mu         sync.Mutex
+	inbounds   map[int]*managed
+	manualStop bool
+	lastError  string
+}
+
+// RuntimeStatus is the dashboard-facing summary of the local SSTP/PPTP
+// daemon group. It deliberately contains no client identities or file paths.
+type RuntimeStatus struct {
+	Running    bool
+	Error      string
+	ManualStop bool
 }
 
 var managerOnce sync.Once
@@ -159,6 +169,10 @@ func (m *Manager) Remove(id int) {
 
 func (m *Manager) Reconcile(desired []Instance) {
 	m.mu.Lock()
+	if m.manualStop {
+		m.mu.Unlock()
+		return
+	}
 	wanted := make(map[int]struct{}, len(desired))
 	for _, i := range desired {
 		wanted[i.ID] = struct{}{}
@@ -201,6 +215,52 @@ func (m *Manager) StopAll() {
 	for _, id := range ids {
 		m.Remove(id)
 	}
+}
+
+// StopManually records a dashboard stop request. The reconcile job must not
+// recreate PPP daemons until Resume or Restart clears the flag.
+func (m *Manager) StopManually() error {
+	m.mu.Lock()
+	m.manualStop = true
+	m.lastError = ""
+	m.mu.Unlock()
+	m.StopAll()
+	return nil
+}
+
+// Resume clears a dashboard stop request; the next reconcile tick starts the
+// enabled SSTP/PPTP inbounds again from the database's desired state.
+func (m *Manager) Resume() {
+	m.mu.Lock()
+	m.manualStop = false
+	m.lastError = ""
+	m.mu.Unlock()
+}
+
+// Restart stops current daemons without leaving a manual-stop flag, so the
+// following reconcile pass rebuilds them from current settings.
+func (m *Manager) Restart() error {
+	m.mu.Lock()
+	m.manualStop = false
+	m.lastError = ""
+	m.mu.Unlock()
+	m.StopAll()
+	return nil
+}
+
+// Status reports only process-level state; traffic counters and quota changes
+// continue to be owned by the shared accounting pipeline.
+func (m *Manager) Status() RuntimeStatus {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	status := RuntimeStatus{ManualStop: m.manualStop, Error: m.lastError}
+	for _, cur := range m.inbounds {
+		if cur.process != nil && cur.process.IsRunning() {
+			status.Running = true
+			break
+		}
+	}
+	return status
 }
 
 func IsAvailable(protocol Protocol) bool { _, err := daemonPath(protocol); return err == nil }

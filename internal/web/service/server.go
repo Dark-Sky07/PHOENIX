@@ -32,6 +32,7 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/l2tp"
 	"github.com/Dark-Sky07/phoenix/internal/logger"
 	"github.com/Dark-Sky07/phoenix/internal/openvpn"
+	"github.com/Dark-Sky07/phoenix/internal/pppvpn"
 	"github.com/Dark-Sky07/phoenix/internal/util/common"
 	"github.com/Dark-Sky07/phoenix/internal/util/sys"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
@@ -104,6 +105,7 @@ type Status struct {
 	} `json:"xray"`
 	OpenVPN   DaemonStatus `json:"openvpn"`
 	L2TP      DaemonStatus `json:"l2tp"`
+	PPPVPN    DaemonStatus `json:"pppvpn"`
 	AmneziaWG struct {
 		Configured bool `json:"configured"`
 		Running    bool `json:"running"`
@@ -657,6 +659,22 @@ func (s *ServerService) GetStatus(lastStatus *Status) *Status {
 		l2tpStatus.InboundCount,
 		l2tpStatus.OnlineClients,
 		l2tpStatus.ManualStop,
+	)
+	pppStatus := pppvpn.GetManager().Status()
+	var pppInbounds int64
+	if err := database.GetDB().Model(model.Inbound{}).
+		Where("protocol IN ? AND enable = ? AND node_id IS NULL", []model.Protocol{model.SSTP, model.PPTP}, true).
+		Count(&pppInbounds).Error; err != nil {
+		logger.Warning("count SSTP/PPTP inbounds failed:", err)
+	}
+	// PPP session counters are durable checkpoints, not live presence; the
+	// panel does not claim an online number it cannot verify from this table.
+	status.PPPVPN = daemonStatus(
+		pppStatus.Running,
+		pppStatus.Error,
+		int(pppInbounds),
+		0,
+		pppStatus.ManualStop,
 	)
 	status.PanelVersion = config.GetVersion()
 	if guid, err := s.settingService.GetPanelGuid(); err == nil {

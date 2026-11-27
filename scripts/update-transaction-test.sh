@@ -73,3 +73,44 @@ for raw in sys.argv[1:]:
             raise SystemExit(f"{name}:{number}: raw apt bypasses the lock helper")
 print("apt lock static checks passed")
 PY
+
+python3 - "${root_dir}/install-phoenix.sh" "${root_dir}/install.sh" <<'PY'
+from pathlib import Path
+import sys
+
+for raw in sys.argv[1:]:
+    text = Path(raw).read_text()
+    name = Path(raw).name
+    require = lambda needle: (_ for _ in ()).throw(SystemExit(f"{name}: missing runtime prerequisite guard: {needle}")) if needle not in text else None
+    require("verify_runtime_prerequisites() {")
+    require("install_base\nif ! verify_runtime_prerequisites; then")
+    require("local required_commands=(curl tar unzip openssl socat crontab ip ss sysctl modprobe sha256sum mktemp find grep sed awk sudo)")
+    require("command -v psql")
+    require("command -v pg_dump")
+    require("command -v pg_restore")
+    require("ensure_pg_client || {")
+    # The verification pass must happen before any daemon-specific installer.
+    if text.index("if ! verify_runtime_prerequisites; then") >= text.index("if ! install_openvpn; then"):
+        raise SystemExit(f"{name}: prerequisite check must run before daemon installers")
+print("installer runtime prerequisite static checks passed")
+PY
+
+python3 - "${root_dir}/update.sh" <<'PY'
+from pathlib import Path
+import sys
+
+text = Path(sys.argv[1]).read_text()
+for needle in (
+    "verify_runtime_prerequisites() {",
+    "install_base\nif ! verify_runtime_prerequisites; then",
+    "ensure_pg_client() {",
+    "command -v psql",
+    "command -v pg_dump",
+    "command -v pg_restore",
+):
+    if needle not in text:
+        raise SystemExit(f"update.sh: missing runtime prerequisite guard: {needle}")
+if text.index("if ! verify_runtime_prerequisites; then") >= text.index("if ! install_pppvpn; then"):
+    raise SystemExit("update.sh: prerequisite check must run before daemon installers")
+print("update runtime prerequisite static checks passed")
+PY

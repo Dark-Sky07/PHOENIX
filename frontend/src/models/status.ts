@@ -101,6 +101,7 @@ interface StatusInput {
   xray?: Partial<XrayInfo>;
   openvpn?: Partial<DaemonInfo>;
   l2tp?: Partial<DaemonInfo>;
+  pppvpn?: Partial<DaemonInfo>;
 }
 
 export class Status {
@@ -125,6 +126,7 @@ export class Status {
   xray: XrayInfo = { state: 'stop', errorMsg: '', version: '', color: '' };
   openvpn: DaemonInfo = { state: 'stop', errorMsg: '', inboundCount: 0, onlineClients: 0, manualStop: false, color: '' };
   l2tp: DaemonInfo = { state: 'stop', errorMsg: '', inboundCount: 0, onlineClients: 0, manualStop: false, color: '' };
+  pppvpn: DaemonInfo = { state: 'stop', errorMsg: '', inboundCount: 0, onlineClients: 0, manualStop: false, color: '' };
 
   constructor(data?: StatusInput | null) {
     if (data == null) return;
@@ -158,5 +160,7 @@ export class Status {
     this.openvpn.color = XRAY_STATE_COLORS[this.openvpn.state] ?? 'gray';
     this.l2tp = { ...this.l2tp, ...(data.l2tp || {}) };
     this.l2tp.color = XRAY_STATE_COLORS[this.l2tp.state] ?? 'gray';
+    this.pppvpn = { ...this.pppvpn, ...(data.pppvpn || {}) };
+    this.pppvpn.color = XRAY_STATE_COLORS[this.pppvpn.state] ?? 'gray';
   }
 }
