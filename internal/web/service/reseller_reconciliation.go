@@ -70,8 +70,8 @@ type ReconciliationReport struct {
 }
 
 type ReconcileOptions struct {
-	Confirm string `json:"confirm"`
-	DryRun  bool   `json:"dryRun"`
+	Confirm string `json:"confirm" form:"confirm"`
+	DryRun  bool   `json:"dryRun" form:"dryRun"`
 }
 
 type ReconcileResult struct {

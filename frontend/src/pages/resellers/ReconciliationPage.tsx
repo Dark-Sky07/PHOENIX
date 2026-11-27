@@ -213,7 +213,10 @@ export default function ReconciliationPage() {
         const msg = await HttpUtil.post<ReconcileResult>(
           '/panel/api/resellers/reconciliation/repair',
           { confirm: token || '', dryRun },
-          { silent: true },
+          // Axios defaults to form encoding for legacy panel endpoints, while
+          // the reconciliation contract is a JSON object. Be explicit so this
+          // high-impact repair cannot be rejected by JSON binding as HTTP 400.
+          { silent: true, headers: { 'Content-Type': 'application/json' } },
         );
         if (!msg.success) {
           messageApi.error(msg.msg || t('somethingWentWrong'));
