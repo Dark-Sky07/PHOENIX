@@ -162,6 +162,65 @@ verify_runtime_prerequisites() {
     echo -e "${green}Runtime prerequisites checked: commands and PostgreSQL client tools are available.${plain}"
 }
 
+# Do not report a fresh install as healthy merely because systemd/OpenRC accepted
+# the process. Xray's loopback API is required for panel reconciliation and
+# traffic accounting, so wait for its configured listener as well.
+verify_started_panel_runtime() {
+    local config_path port attempt
+    if [[ "$release" == "alpine" ]]; then
+        rc-service x-ui status >/dev/null 2>&1 || {
+            echo -e "${red}x-ui service is not active after installation.${plain}"
+            return 1
+        }
+    else
+        systemctl is-active --quiet x-ui || {
+            echo -e "${red}x-ui service is not active after installation.${plain}"
+            return 1
+        }
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo -e "${red}Python 3 is required to validate the Xray API listener.${plain}"
+        return 1
+    fi
+    config_path="${xui_folder}/bin/config.json"
+    if ! port="$(python3 - "$config_path" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        config = json.load(handle)
+    port = next(
+        inbound.get("port")
+        for inbound in config.get("inbounds", [])
+        if isinstance(inbound, dict) and inbound.get("tag") == "api"
+    )
+    if not isinstance(port, int) or not 1 <= port <= 65535:
+        raise ValueError("invalid API port")
+except Exception:
+    raise SystemExit(1)
+print(port)
+PY
+)"; then
+        echo -e "${red}Could not read the Xray API port from ${config_path}.${plain}"
+        return 1
+    fi
+    for attempt in {1..15}; do
+        if (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null; then
+            echo -e "${green}Verified Xray API listener on 127.0.0.1:${port}.${plain}"
+            return 0
+        fi
+        if [[ "$release" == "alpine" ]]; then
+            rc-service x-ui status >/dev/null 2>&1 || return 1
+        else
+            systemctl is-active --quiet x-ui || return 1
+        fi
+        sleep 1
+    done
+    echo -e "${red}Xray API listener 127.0.0.1:${port} did not become ready within 15 seconds.${plain}"
+    return 1
+}
+
 gen_random_string() {
     local length="$1"
     openssl rand -base64 $((length * 2)) \
@@ -1795,6 +1854,11 @@ install_x-ui() {
             echo -e "${red}Failed to install x-ui.service file${plain}"
             exit 1
         fi
+    fi
+
+    if ! verify_started_panel_runtime; then
+        echo -e "${red}PHOENIX was installed but its runtime verification failed. Inspect the x-ui service logs before using the panel.${plain}"
+        exit 1
     fi
 
     echo -e "${green}PHOENIX ${tag_version}${plain} installation finished, it is running now..."

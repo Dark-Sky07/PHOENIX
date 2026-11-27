@@ -69,17 +69,31 @@ tuic_journal_dir="$db_folder/tuic-traffic-journal"
 incident_table="reseller_node_counter_incidents"
 poll_table="xray_traffic_inflights"
 
-incidents="$(psql "$dsn" -tAc "SELECT COUNT(*) FROM $incident_table" | tr -d ' ')"
+# Snapshot exact primary keys before any backup or repair. Another panel can
+# persist new evidence while this operator reviews the output; that later row
+# must never be deleted by this run because it is absent from this snapshot.
+incident_ids="$(psql "$dsn" -tAc "SELECT COALESCE(string_agg(id::text, ',' ORDER BY id), '') FROM $incident_table" | tr -d '[:space:]')"
+incidents=0
+if [ -n "$incident_ids" ]; then
+  incidents="$(printf '%s' "$incident_ids" | awk -F, '{print NF}')"
+fi
+poll_ids=""
 polls="0"
 if psql "$dsn" -tAc "SELECT to_regclass('public.$poll_table') IS NOT NULL" | grep -qx t; then
-  polls="$(psql "$dsn" -tAc "SELECT COUNT(*) FROM $poll_table" | tr -d ' ')"
+  poll_ids="$(psql "$dsn" -tAc "SELECT COALESCE(string_agg(id::text, ',' ORDER BY id), '') FROM $poll_table" | tr -d '[:space:]')"
+  if [ -n "$poll_ids" ]; then
+    polls="$(printf '%s' "$poll_ids" | awk -F, '{print NF}')"
+  fi
 else
   echo "NOTE: table $poll_table does not exist; no poll markers to clear"
 fi
-fallback_count=0
+fallback_files=()
 if [ -d "$fallback_dir" ]; then
-  fallback_count="$(find "$fallback_dir" -maxdepth 1 -type f | wc -l | tr -d ' ')"
+  while IFS= read -r -d '' file; do
+    fallback_files+=("${file##*/}")
+  done < <(find "$fallback_dir" -maxdepth 1 -mindepth 1 \( -type f -o -type l \) -print0)
 fi
+fallback_count="${#fallback_files[@]}"
 xray_journal_count=0
 tuic_journal_count=0
 if [ -d "$xray_journal_dir" ]; then
@@ -109,14 +123,25 @@ fi
 
 if [ "$fallback_count" -gt 0 ]; then
   mkdir -p "$backup/counter-incident-fallback"
-  find "$fallback_dir" -maxdepth 1 -type f -exec cp -p -t "$backup/counter-incident-fallback/" {} +
-  find "$fallback_dir" -maxdepth 1 -type f -exec mv -t "$backup/counter-incident-fallback/" {} +
+  for name in "${fallback_files[@]}"; do
+    source="$fallback_dir/$name"
+    target="$backup/counter-incident-fallback/$name"
+    # A new incident may have been written after the initial listing. Move
+    # only the exact snapshotted entry, and preserve symlinks as evidence
+    # instead of following them while running as root.
+    if [ -e "$source" ] || [ -L "$source" ]; then
+      cp -Pp -- "$source" "$target"
+      mv -- "$source" "$target"
+    fi
+  done
 fi
 
 echo "BACKUP=$backup"
-psql "$dsn" -c "DELETE FROM $incident_table;"
-if psql "$dsn" -tAc "SELECT to_regclass('public.$poll_table') IS NOT NULL" | grep -qx t; then
-  psql "$dsn" -c "DELETE FROM $poll_table;"
+if [ -n "$incident_ids" ]; then
+  psql "$dsn" -v incident_ids="$incident_ids" -c "DELETE FROM $incident_table WHERE id = ANY(string_to_array(:'incident_ids', ',')::integer[]);"
+fi
+if [ -n "$poll_ids" ] && psql "$dsn" -tAc "SELECT to_regclass('public.$poll_table') IS NOT NULL" | grep -qx t; then
+  psql "$dsn" -v poll_ids="$poll_ids" -c "DELETE FROM $poll_table WHERE id = ANY(string_to_array(:'poll_ids', ','));"
 fi
 
 echo "RECONCILED=1 service was not stopped or restarted"

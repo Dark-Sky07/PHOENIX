@@ -8,7 +8,7 @@ package model
 type ResellerNodeCounterIncident struct {
 	Id           int    `gorm:"primaryKey;autoIncrement"`
 	NodeId       int    `gorm:"uniqueIndex:idx_reseller_node_counter_incident,priority:1;not null"`
-	Direction    string // Empty for node snapshots, uplink/downlink for local resets, core-exited, global-decreased or l2tp-orphan.
+	Direction    string // Empty for node snapshots, uplink/downlink for local resets, core-exited, api-unreachable, global-decreased or l2tp-orphan.
 	SourceGuid   string // Claimed upstream identity for global snapshot incidents; not an authentication proof.
 	Email        string `gorm:"uniqueIndex:idx_reseller_node_counter_incident,priority:2;not null"`
 	PreviousUp   int64

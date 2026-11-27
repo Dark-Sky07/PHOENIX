@@ -40,7 +40,7 @@ require("update_db_snapshot_ready=0")
 # old service.
 order("if ! service_stop_for_update; then return 1; fi", "if ! snapshot_update_database; then")
 order("if ! snapshot_update_database; then", "if ! mv \"$xui_folder\" \"$update_backup_dir\"; then")
-order("if ! config_after_update; then", "if ! service_start_after_update || ! service_is_active; then")
+order("if ! config_after_update; then", "if ! service_start_after_update || ! verify_post_update_runtime; then")
 order("if ! restore_update_database; then", "service_start_after_update >/dev/null 2>&1 || true")
 
 # Migration/configuration failures must escape config_after_update instead of
@@ -89,6 +89,9 @@ for raw in sys.argv[1:]:
     require("command -v pg_dump")
     require("command -v pg_restore")
     require("ensure_pg_client || {")
+    require("verify_started_panel_runtime() {")
+    require("if ! verify_started_panel_runtime; then")
+    require("Verified Xray API listener on 127.0.0.1:${port}.")
     # The verification pass must happen before any daemon-specific installer.
     if text.index("if ! verify_runtime_prerequisites; then") >= text.index("if ! install_openvpn; then"):
         raise SystemExit(f"{name}: prerequisite check must run before daemon installers")
@@ -107,6 +110,10 @@ for needle in (
     "command -v psql",
     "command -v pg_dump",
     "command -v pg_restore",
+    "verify_xray_api_listener() {",
+    "verify_post_update_runtime() {",
+    "if ! service_start_after_update || ! verify_post_update_runtime; then",
+    "Verified Xray API listener on 127.0.0.1:${port}.",
 ):
     if needle not in text:
         raise SystemExit(f"update.sh: missing runtime prerequisite guard: {needle}")
