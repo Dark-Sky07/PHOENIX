@@ -166,3 +166,8 @@ for raw in sys.argv[1:]:
         raise SystemExit(f"{name}: update still uses destructive installer route")
 print("management-script transactional update checks passed")
 PY
+
+# Exercise the swap boundary itself with private paths and a fake service
+# manager. Static ordering checks alone cannot catch a platform-specific
+# systemctl no-op being treated as a transactional activation failure.
+bash "${root_dir}/scripts/update-runtime-safety-test.sh"

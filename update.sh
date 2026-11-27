@@ -8,6 +8,15 @@ plain='\033[0m'
 
 xui_folder="${XUI_MAIN_FOLDER:=/usr/local/x-ui}"
 xui_service="${XUI_SERVICE:=/etc/systemd/system}"
+# Production paths are deliberately fixed. The opt-in updater harness can
+# substitute them so the complete swap/rollback boundary is testable without
+# ever writing a host's real management commands.
+xui_command_path="/usr/bin/x-ui"
+phoenix_command_path="/usr/bin/phoenix"
+if [[ "${PHOENIX_UPDATE_TEST_LIB:-0}" == "1" ]]; then
+    xui_command_path="${PHOENIX_UPDATE_TEST_XUI_COMMAND_PATH:-$xui_command_path}"
+    phoenix_command_path="${PHOENIX_UPDATE_TEST_PHOENIX_COMMAND_PATH:-$phoenix_command_path}"
+fi
 
 # PHOENIX repository. Override PHOENIX_REPO to update from a different
 # fork/mirror.
@@ -1645,19 +1654,34 @@ wait_for_service_stop() {
 
 service_stop_for_update() {
     if [[ "$release" == "alpine" ]]; then
-        rc-service x-ui stop >/dev/null 2>&1 || return 1
+        if ! rc-service x-ui stop; then
+            echo -e "${red}Could not ask OpenRC to stop x-ui; the installation was not replaced.${plain}"
+            return 1
+        fi
     else
-        systemctl stop x-ui >/dev/null 2>&1 || return 1
+        if ! systemctl stop x-ui; then
+            echo -e "${red}Could not ask systemd to stop x-ui; inspect: journalctl -u x-ui -n 100 --no-pager${plain}"
+            return 1
+        fi
     fi
     wait_for_service_stop
 }
 
 service_start_after_update() {
     if [[ "$release" == "alpine" ]]; then
-        rc-service x-ui start >/dev/null 2>&1
+        if ! rc-service x-ui start; then
+            echo -e "${red}Could not ask OpenRC to start x-ui; inspect its service log before retrying.${plain}"
+            return 1
+        fi
     else
-        systemctl daemon-reload >/dev/null 2>&1 || return 1
-        systemctl start x-ui >/dev/null 2>&1
+        if ! systemctl daemon-reload; then
+            echo -e "${red}systemd could not reload unit definitions; inspect: systemctl status x-ui -l --no-pager${plain}"
+            return 1
+        fi
+        if ! systemctl start x-ui; then
+            echo -e "${red}Could not ask systemd to start x-ui; inspect: journalctl -u x-ui -n 100 --no-pager${plain}"
+            return 1
+        fi
     fi
 }
 
@@ -1682,7 +1706,10 @@ service_reload_after_update() {
     if [[ "$release" == "alpine" ]]; then
         return 0
     fi
-    systemctl daemon-reload >/dev/null 2>&1
+    if ! systemctl daemon-reload; then
+        echo -e "${red}systemd could not reload the staged x-ui unit; inspect: systemctl status x-ui -l --no-pager${plain}"
+        return 1
+    fi
 }
 
 restore_update_service() {
@@ -1722,10 +1749,10 @@ rollback_update() {
         fi
         restore_update_service || return 1
         if [[ -n "$update_wrapper_backup" && -e "$update_wrapper_backup" ]]; then
-            rm -f /usr/bin/x-ui
-            cp -a "$update_wrapper_backup" /usr/bin/x-ui || return 1
+            rm -f "$xui_command_path"
+            cp -a "$update_wrapper_backup" "$xui_command_path" || return 1
         elif [[ -n "$update_wrapper_backup" ]]; then
-            rm -f /usr/bin/x-ui
+            rm -f "$xui_command_path"
         fi
         if [[ "$update_db_snapshot_ready" -eq 1 ]]; then
             echo -e "${yellow}Restoring the pre-update database/migration state.${plain}"
@@ -1778,8 +1805,8 @@ commit_update_transaction() {
     fi
 
     update_wrapper_backup="${update_stage_root}/old-wrapper"
-    if [[ -e /usr/bin/x-ui || -L /usr/bin/x-ui ]]; then
-        cp -a /usr/bin/x-ui "$update_wrapper_backup" || return 1
+    if [[ -e "$xui_command_path" || -L "$xui_command_path" ]]; then
+        cp -a "$xui_command_path" "$update_wrapper_backup" || return 1
     fi
 
     if service_is_active; then update_old_service_active=1; fi
@@ -1798,8 +1825,8 @@ commit_update_transaction() {
     if ! mv "$xui_folder" "$update_backup_dir"; then return 1; fi
     if ! mv "$update_stage_dir" "$xui_folder"; then return 1; fi
 
-    if ! install -m 0755 "$update_wrapper_stage" /usr/bin/x-ui; then return 1; fi
-    install -m 0755 "$update_wrapper_stage" /usr/bin/phoenix || true
+    if ! install -m 0755 "$update_wrapper_stage" "$xui_command_path"; then return 1; fi
+    install -m 0755 "$update_wrapper_stage" "$phoenix_command_path" || true
     rm -f "$service_path"
     if ! cp -a "$update_service_stage" "$service_path"; then return 1; fi
     if [[ "$release" == "alpine" ]]; then
@@ -1810,11 +1837,12 @@ commit_update_transaction() {
         chown root:root "$service_path" 2>/dev/null || true
         chmod 0644 "$service_path" || return 1
         service_reload_after_update || return 1
-        if [[ "$update_old_service_enabled" -eq 1 ]]; then
-            systemctl enable x-ui >/dev/null 2>&1 || return 1
-        else
-            systemctl disable x-ui >/dev/null 2>&1 || return 1
-        fi
+
+        # The enablement symlink points at this stable unit path, not the
+        # replaceable panel tree, so it survives the atomic unit replacement.
+        # Do not call `systemctl disable` for an intentionally disabled unit:
+        # systemd versions differ on whether that no-op is an error, which
+        # must not turn a valid replacement into a rollback.
     fi
 
     # Do not start the candidate here. Migration and post-update settings are
