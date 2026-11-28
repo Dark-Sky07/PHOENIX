@@ -14,14 +14,16 @@ import (
 const cloudflaredTestTunnelID = "11111111-1111-4111-8111-111111111111"
 
 func cloudflaredTestConfig() json.RawMessage {
-	return json.RawMessage(`{
-		"tunnelId":"11111111-1111-4111-8111-111111111111",
-		"credentials":{
-			"AccountTag":"account-tag",
-			"TunnelSecret":"secret-material",
-			"TunnelID":"11111111-1111-4111-8111-111111111111"
-		}
-	}`)
+	raw, err := json.Marshal(map[string]any{
+		"tunnelId": cloudflaredTestTunnelID,
+		"credentials": map[string]string{
+			"AccountTag": "account-tag", "TunnelSecret": "secret-material", "TunnelID": cloudflaredTestTunnelID,
+		},
+	})
+	if err != nil {
+		panic(err)
+	}
+	return raw
 }
 
 func TestCloudflaredProviderConfigRequiresMatchingCredentialIdentity(t *testing.T) {
