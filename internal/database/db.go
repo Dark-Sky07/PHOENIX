@@ -119,6 +119,7 @@ func initModels() error {
 		&model.FleetAssignment{},
 		&model.FleetPool{},
 		&model.FleetPoolMember{},
+		&model.FleetAgentTunnelStatus{},
 		&model.ManagedTunnel{},
 		&model.ApiToken{},
 		&model.InitialSetup{},

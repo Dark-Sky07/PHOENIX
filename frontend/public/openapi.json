@@ -3009,6 +3009,10 @@
       "description": "All endpoints in this section require an interactive superadmin browser session and reject API bearer tokens. Mutating endpoints additionally require a password-confirmed recent authentication (valid for 10 minutes); call POST /reauth first when necessary."
     },
     {
+      "name": "Phase C fleet control plane",
+      "description": "Opt-in outbound Node Agent enrollment, immutable fleet template revisions, explicit staged deployment/rollback, and provider-neutral managed tunnel contracts. Read endpoints work for authenticated administrators. Every mutation requires a recently reauthenticated interactive superadmin; copied API bearer tokens are refused. Bootstrap and rotating agent credentials are returned exactly once and are never returned by reads."
+    },
+    {
       "name": "Phase B integrations",
       "description": "DNS-01 profiles, secure Prometheus scraping, cached routing-list catalogs, and per-administrator dashboard preferences. Certificate and catalog mutations require an interactive superadmin with recent authentication; secrets are never returned after storage."
     },
@@ -15308,6 +15312,832 @@
         ],
         "summary": "Queue one durable delivery for a fresh retry.",
         "operationId": "post_panel_api_setting_webhooks_deliveries_id_replay",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "",
+            "schema": {
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/fleet/templates": {
+      "get": {
+        "tags": [
+          "Phase C fleet control plane"
+        ],
+        "summary": "List opt-in fleet templates and their current revisions.",
+        "operationId": "get_panel_api_fleet_templates",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Phase C fleet control plane"
+        ],
+        "summary": "Create an enabled fleet template at immutable revision 1. The document only permits labels, inbound-sync policy, and managed-tunnel IDs.",
+        "operationId": "post_panel_api_fleet_templates",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              },
+              "example": {
+                "name": "de-fra-edge",
+                "description": "Frankfurt edge",
+                "document": {
+                  "schemaVersion": 1,
+                  "labels": {
+                    "region": "de-fra"
+                  },
+                  "node": {
+                    "inboundSyncMode": "all"
+                  },
+                  "managedTunnelIds": []
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/fleet/templates/{id}": {
+      "get": {
+        "tags": [
+          "Phase C fleet control plane"
+        ],
+        "summary": "Read one template with its immutable revision history and canonical desired-state documents.",
+        "operationId": "get_panel_api_fleet_templates_id",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "",
+            "schema": {
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/fleet/templates/{id}/disable": {
+      "post": {
+        "tags": [
+          "Phase C fleet control plane"
+        ],
+        "summary": "Pause or resume desired-state delivery from a template without mutating its immutable revision history.",
+        "operationId": "post_panel_api_fleet_templates_id_disable",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "",
+            "schema": {
+              "type": "number"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              },
+              "example": {
+                "enabled": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/fleet/templates/{id}/revisions": {
+      "post": {
+        "tags": [
+          "Phase C fleet control plane"
+        ],
+        "summary": "Append a new immutable canonical configuration revision. Creating a revision does not deploy it.",
+        "operationId": "post_panel_api_fleet_templates_id_revisions",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "",
+            "schema": {
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/fleet/templates/{id}/deploy": {
+      "post": {
+        "tags": [
+          "Phase C fleet control plane"
+        ],
+        "summary": "Stage one existing revision to an explicit canary/cohort list of enabled enrollments. No implicit all-node rollout occurs.",
+        "operationId": "post_panel_api_fleet_templates_id_deploy",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "",
+            "schema": {
+              "type": "number"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              },
+              "example": {
+                "revision": 2,
+                "enrollmentIds": [
+                  4,
+                  9
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/fleet/templates/{id}/rollback": {
+      "post": {
+        "tags": [
+          "Phase C fleet control plane"
+        ],
+        "summary": "Explicitly target a prior immutable revision to selected enrolled agents; it uses the same safe staged machinery as deploy.",
+        "operationId": "post_panel_api_fleet_templates_id_rollback",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "",
+            "schema": {
+              "type": "number"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              },
+              "example": {
+                "revision": 1,
+                "enrollmentIds": [
+                  4
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/fleet/pools": {
+      "get": {
+        "tags": [
+          "Phase C fleet control plane"
+        ],
+        "summary": "List reusable fleet cohorts, optional template bindings, and their enrollment IDs.",
+        "operationId": "get_panel_api_fleet_pools",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Phase C fleet control plane"
+        ],
+        "summary": "Create a reusable canary or regional pool. Bind templateId to reject accidental deployments of a different template.",
+        "operationId": "post_panel_api_fleet_pools",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              },
+              "example": {
+                "name": "fra-canary",
+                "templateId": 2,
+                "enrollmentIds": [
+                  4,
+                  9
+                ],
+                "enabled": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/fleet/pools/{id}": {
+      "post": {
+        "tags": [
+          "Phase C fleet control plane"
+        ],
+        "summary": "Replace a pool’s membership/binding and enabled state.",
+        "operationId": "post_panel_api_fleet_pools_id",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "",
+            "schema": {
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/fleet/pools/{id}/delete": {
+      "post": {
+        "tags": [
+          "Phase C fleet control plane"
+        ],
+        "summary": "Delete a fleet cohort without deleting its agents, assignments, template history, or legacy nodes.",
+        "operationId": "post_panel_api_fleet_pools_id_delete",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "",
+            "schema": {
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/fleet/enrollments": {
+      "get": {
+        "tags": [
+          "Phase C fleet control plane"
+        ],
+        "summary": "List fleet agent enrollment health, non-secret capability metadata, credential expiry, and desired/applied assignment state.",
+        "operationId": "get_panel_api_fleet_enrollments",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Phase C fleet control plane"
+        ],
+        "summary": "Create a one-time outbound Agent bootstrap enrollment. Optionally link it to an existing legacy node without changing the node transport. The bootstrap token is returned once.",
+        "operationId": "post_panel_api_fleet_enrollments",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              },
+              "example": {
+                "name": "fra-agent-1",
+                "nodeId": 3
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/fleet/enrollments/{id}/rotate": {
+      "post": {
+        "tags": [
+          "Phase C fleet control plane"
+        ],
+        "summary": "Rotate a live agent credential and return the replacement once. The current agent must be updated before its next check-in.",
+        "operationId": "post_panel_api_fleet_enrollments_id_rotate",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "",
+            "schema": {
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/fleet/enrollments/{id}/disable": {
+      "post": {
+        "tags": [
+          "Phase C fleet control plane"
+        ],
+        "summary": "Disable or re-enable an enrollment. A reachable disabled agent receives a terminal response, stops managed connectors, and receives no desired state; offline nodes need local isolation.",
+        "operationId": "post_panel_api_fleet_enrollments_id_disable",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "",
+            "schema": {
+              "type": "number"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              },
+              "example": {
+                "enabled": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/fleet/tunnels": {
+      "get": {
+        "tags": [
+          "Phase C fleet control plane"
+        ],
+        "summary": "List provider-neutral managed tunnel endpoint contracts without exposing provider configuration.",
+        "operationId": "get_panel_api_fleet_tunnels",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Phase C fleet control plane"
+        ],
+        "summary": "Create a managed tunnel endpoint. Target hosts are limited to localhost/private IPs and providerConfig is encrypted at rest. The built-in cloudflared adapter expects tunnelId plus Cloudflare credential JSON under credentials; the agent chooses its locally configured executable, never the panel.",
+        "operationId": "post_panel_api_fleet_tunnels",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              },
+              "example": {
+                "name": "app-public",
+                "provider": "cloudflared",
+                "publicHostname": "app.example.com",
+                "targetHost": "127.0.0.1",
+                "targetPort": 3000,
+                "protocol": "http",
+                "providerConfig": {
+                  "tunnelId": "11111111-1111-4111-8111-111111111111",
+                  "credentials": {
+                    "AccountTag": "…",
+                    "TunnelSecret": "…",
+                    "TunnelID": "11111111-1111-4111-8111-111111111111"
+                  }
+                },
+                "enabled": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/fleet/tunnels/{id}": {
+      "post": {
+        "tags": [
+          "Phase C fleet control plane"
+        ],
+        "summary": "Update an endpoint contract. Omit providerConfig to retain a stored encrypted provider configuration.",
+        "operationId": "post_panel_api_fleet_tunnels_id",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "",
+            "schema": {
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/fleet/tunnels/{id}/delete": {
+      "post": {
+        "tags": [
+          "Phase C fleet control plane"
+        ],
+        "summary": "Delete an unused managed tunnel endpoint contract.",
+        "operationId": "post_panel_api_fleet_tunnels_id_delete",
         "parameters": [
           {
             "name": "id",

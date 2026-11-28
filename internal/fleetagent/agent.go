@@ -32,27 +32,31 @@ const (
 )
 
 type Config struct {
-	PanelURL       string
-	BootstrapToken string
-	StatePath      string
-	PollInterval   time.Duration
-	CertSHA256     string
-	AllowHTTP      bool
+	PanelURL        string
+	BootstrapToken  string
+	StatePath       string
+	TunnelDir       string
+	CloudflaredPath string
+	PollInterval    time.Duration
+	CertSHA256      string
+	AllowHTTP       bool
 }
 
 type State struct {
 	AgentID         string                     `json:"agentId"`
 	Credential      string                     `json:"credential"`
 	DesiredState    *service.AgentDesiredState `json:"desiredState,omitempty"`
+	DesiredActive   bool                       `json:"desiredActive"`
 	AppliedRevision int                        `json:"appliedRevision"`
 	ApplyError      string                     `json:"applyError,omitempty"`
 	UpdatedAt       int64                      `json:"updatedAt"`
 }
 
 type Agent struct {
-	config Config
-	client *http.Client
-	state  State
+	config  Config
+	client  *http.Client
+	state   State
+	tunnels *tunnelManager
 }
 
 func New(config Config) (*Agent, error) {
@@ -64,6 +68,9 @@ func New(config Config) (*Agent, error) {
 	}
 	if config.PollInterval < 5*time.Second || config.PollInterval > 5*time.Minute {
 		return nil, errors.New("agent poll interval must be between 5 seconds and 5 minutes")
+	}
+	if config.TunnelDir == "" {
+		config.TunnelDir = filepath.Join(filepath.Dir(config.StatePath), "managed-tunnels")
 	}
 	if _, err := parsePanelURL(config.PanelURL, config.AllowHTTP); err != nil {
 		return nil, err
@@ -80,7 +87,11 @@ func New(config Config) (*Agent, error) {
 		// needing a different base URL must be configured explicitly instead.
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
 	}
-	a := &Agent{config: config, client: client}
+	tunnels, err := newTunnelManager(config.TunnelDir, config.CloudflaredPath)
+	if err != nil {
+		return nil, err
+	}
+	a := &Agent{config: config, client: client, tunnels: tunnels}
 	if err := a.loadState(); err != nil {
 		return nil, err
 	}
@@ -95,6 +106,7 @@ func New(config Config) (*Agent, error) {
 }
 
 func (a *Agent) Run(ctx context.Context) error {
+	defer a.tunnels.Close()
 	if err := a.SyncOnce(ctx); err != nil {
 		return err
 	}
@@ -120,34 +132,72 @@ func (a *Agent) SyncOnce(ctx context.Context) error {
 		if a.config.BootstrapToken == "" {
 			return errors.New("agent is not enrolled and no bootstrap token was supplied")
 		}
-		if err := a.enroll(ctx); err != nil {
-			return err
+		return a.enroll(ctx)
+	}
+
+	// A restarted agent must re-establish any previously acknowledged managed
+	// tunnel before it tells the panel that revision is still healthy.
+	if a.state.DesiredActive && a.state.DesiredState != nil {
+		if err := a.applyDesiredState(a.state.DesiredState); err != nil {
+			a.state.ApplyError = truncateError(err)
+		} else {
+			a.state.ApplyError = ""
+			a.state.AppliedRevision = a.state.DesiredState.Revision
 		}
-		return nil
 	}
 	request := service.AgentCheckInRequest{
 		AgentID:         a.state.AgentID,
 		Version:         "phoenix-agent/1",
-		Capabilities:    json.RawMessage(`{"desiredState":"stage-only","managedTunnels":"contract-v1"}`),
+		Capabilities:    a.capabilities(),
 		AppliedRevision: a.state.AppliedRevision,
 		ApplyError:      a.state.ApplyError,
+		Tunnels:         a.tunnels.Reports(),
 	}
 	var response service.AgentCheckInResponse
 	if err := a.post(ctx, "/panel/agent/v1/checkin", a.state.Credential, request, &response); err != nil {
 		return err
 	}
-	if response.Credential != "" {
-		a.state.Credential = response.Credential
-	}
-	if response.DesiredState != nil && !desiredStateMatches(a.state.DesiredState, response.DesiredState) {
-		if err := validateDesiredState(response.DesiredState); err != nil {
-			a.state.ApplyError = truncateError(err)
-			a.state.UpdatedAt = time.Now().UnixMilli()
-			return a.saveState()
-		}
-		a.state.DesiredState = response.DesiredState
-		a.state.AppliedRevision = response.DesiredState.Revision
+	if response.Disabled {
+		// Disabled enrollments get one safe terminal response rather than an
+		// arbitrary remote command. Stop connectors and persist inactive state;
+		// a later re-enable can deliver a normal desired state on the next poll.
+		a.tunnels.StopAll()
+		a.state.DesiredActive = false
 		a.state.ApplyError = ""
+	} else {
+		if response.Credential != "" {
+			a.state.Credential = response.Credential
+			a.state.UpdatedAt = time.Now().UnixMilli()
+			// Persist a replacement before it can be used on a later poll. This
+			// avoids losing a rotated credential if connector reconciliation fails.
+			if err := a.saveState(); err != nil {
+				return err
+			}
+		}
+		if response.DesiredState != nil && (!a.state.DesiredActive || !desiredStateMatches(a.state.DesiredState, response.DesiredState) || a.state.ApplyError != "") {
+			if err := a.applyDesiredState(response.DesiredState); err != nil {
+				// Persist the desired contract despite a failed reconciliation so a
+				// later heartbeat can retry it. AppliedRevision intentionally stays
+				// unchanged until every managed connector converges.
+				a.state.DesiredState = response.DesiredState
+				a.state.DesiredActive = true
+				a.state.ApplyError = truncateError(err)
+			} else {
+				a.state.DesiredState = response.DesiredState
+				a.state.DesiredActive = true
+				a.state.AppliedRevision = response.DesiredState.Revision
+				a.state.ApplyError = ""
+			}
+		} else if response.DesiredState != nil {
+			// A previously applied contract remains active and does not need to be
+			// restarted after every response; it was reconciled before this request.
+			a.state.DesiredActive = true
+		} else {
+			// No assignment or a disabled template withdraws the desired endpoint.
+			a.tunnels.StopAll()
+			a.state.DesiredActive = false
+			a.state.ApplyError = ""
+		}
 	}
 	a.state.UpdatedAt = time.Now().UnixMilli()
 	return a.saveState()
@@ -158,7 +208,7 @@ func (a *Agent) enroll(ctx context.Context) error {
 		BootstrapToken: a.config.BootstrapToken,
 		AgentID:        a.state.AgentID,
 		Version:        "phoenix-agent/1",
-		Capabilities:   json.RawMessage(`{"desiredState":"stage-only","managedTunnels":"contract-v1"}`),
+		Capabilities:   a.capabilities(),
 	}
 	var response service.AgentEnrollResponse
 	if err := a.post(ctx, "/panel/agent/v1/enroll", "", request, &response); err != nil {
@@ -168,17 +218,44 @@ func (a *Agent) enroll(ctx context.Context) error {
 		return errors.New("panel returned invalid agent credential")
 	}
 	a.state.Credential = response.Credential
+	// The one-time bootstrap value has been consumed; do not retain it in the
+	// long-lived agent object after a credential is minted.
+	a.config.BootstrapToken = ""
+	a.state.UpdatedAt = time.Now().UnixMilli()
+	if err := a.saveState(); err != nil {
+		return err
+	}
 	if response.DesiredState != nil {
-		if err := validateDesiredState(response.DesiredState); err != nil {
+		if err := a.applyDesiredState(response.DesiredState); err != nil {
+			// Keep the contract for retry, but never acknowledge its revision
+			// until the supervisor has reconciled every supported connector.
+			a.state.DesiredState = response.DesiredState
+			a.state.DesiredActive = true
 			a.state.ApplyError = truncateError(err)
 		} else {
 			a.state.DesiredState = response.DesiredState
+			a.state.DesiredActive = true
 			a.state.AppliedRevision = response.DesiredState.Revision
 			a.state.ApplyError = ""
 		}
 	}
 	a.state.UpdatedAt = time.Now().UnixMilli()
 	return a.saveState()
+}
+
+func (a *Agent) capabilities() json.RawMessage {
+	managed := "contract-v1"
+	if a.tunnels.SupportsCloudflared() {
+		managed = "cloudflared-v1"
+	}
+	return json.RawMessage(fmt.Sprintf(`{"desiredState":"apply-v1","managedTunnels":%q}`, managed))
+}
+
+func (a *Agent) applyDesiredState(state *service.AgentDesiredState) error {
+	if err := validateDesiredState(state); err != nil {
+		return err
+	}
+	return a.tunnels.Reconcile(state.Tunnels)
 }
 
 func (a *Agent) post(ctx context.Context, endpoint, credential string, input, output any) error {
@@ -352,9 +429,12 @@ func validateDesiredState(state *service.AgentDesiredState) error {
 	if state.Document.Node.InboundSyncMode != "all" && state.Document.Node.InboundSyncMode != "selected" {
 		return errors.New("invalid desired node policy")
 	}
+	if len(state.Tunnels) > 64 {
+		return errors.New("too many managed tunnel contracts")
+	}
 	seen := make(map[int]struct{}, len(state.Tunnels))
 	for _, tunnel := range state.Tunnels {
-		if tunnel.ID <= 0 || tunnel.Name == "" || tunnel.Provider == "" || tunnel.TargetPort < 1 || tunnel.TargetPort > 65535 {
+		if tunnel.ID <= 0 || tunnel.Name == "" || tunnel.Provider == "" || tunnel.TargetPort < 1 || tunnel.TargetPort > 65535 || !validTunnelHostname(tunnel.PublicHostname) {
 			return errors.New("invalid managed tunnel contract")
 		}
 		if _, exists := seen[tunnel.ID]; exists {
@@ -364,7 +444,7 @@ func validateDesiredState(state *service.AgentDesiredState) error {
 		if tunnel.Protocol != "http" && tunnel.Protocol != "https" && tunnel.Protocol != "tcp" && tunnel.Protocol != "udp" {
 			return errors.New("invalid managed tunnel protocol")
 		}
-		if !localTarget(tunnel.TargetHost) {
+		if !localTarget(tunnel.TargetHost) || tunnel.TargetHost != canonicalTunnelHost(tunnel.TargetHost) {
 			return errors.New("managed tunnel target is not local/private")
 		}
 		if len(tunnel.ProviderConfig) > 16*1024 || (len(tunnel.ProviderConfig) > 0 && !json.Valid(tunnel.ProviderConfig)) {
@@ -375,12 +455,33 @@ func validateDesiredState(state *service.AgentDesiredState) error {
 }
 
 func localTarget(host string) bool {
-	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	host = canonicalTunnelHost(host)
 	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
 		return true
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && (ip.IsLoopback() || ip.IsPrivate())
+}
+
+func canonicalTunnelHost(host string) string {
+	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+}
+
+func validTunnelHostname(host string) bool {
+	if host != canonicalTunnelHost(host) || len(host) == 0 || len(host) > 253 || net.ParseIP(host) != nil || !strings.Contains(host, ".") {
+		return false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, r := range label {
+			if !(r == '-' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func randomAgentID() (string, error) {

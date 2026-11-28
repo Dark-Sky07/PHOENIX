@@ -104,6 +104,23 @@ type FleetPoolMember struct {
 
 func (FleetPoolMember) TableName() string { return "fleet_pool_members" }
 
+// FleetAgentTunnelStatus is the agent-reported runtime observation for an
+// assigned managed tunnel. It is operational telemetry only: it never carries
+// provider credentials or is used as a traffic/accounting authority.
+type FleetAgentTunnelStatus struct {
+	ID           int    `json:"id" gorm:"primaryKey;autoIncrement"`
+	EnrollmentID int    `json:"enrollmentId" gorm:"not null;uniqueIndex:idx_fleet_agent_tunnel_status,priority:1;index"`
+	TunnelID     int    `json:"tunnelId" gorm:"not null;uniqueIndex:idx_fleet_agent_tunnel_status,priority:2;index"`
+	Provider     string `json:"provider" gorm:"size:32;not null"`
+	Status       string `json:"status" gorm:"size:24;not null;default:unknown;index"`
+	PID          int    `json:"pid"`
+	LastError    string `json:"lastError" gorm:"size:512"`
+	ObservedAt   int64  `json:"observedAt"`
+	UpdatedAt    int64  `json:"updatedAt" gorm:"autoUpdateTime:milli"`
+}
+
+func (FleetAgentTunnelStatus) TableName() string { return "fleet_agent_tunnel_status" }
+
 // ManagedTunnel is a provider-neutral connector endpoint contract. The
 // provider credential is encrypted with the panel secret and has no JSON tag
 // so it cannot be returned to an operator by accident.

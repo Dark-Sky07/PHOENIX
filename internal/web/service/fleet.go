@@ -30,6 +30,7 @@ const (
 	fleetCredentialLifetime    = 90 * 24 * time.Hour
 	fleetCredentialRotateAhead = 7 * 24 * time.Hour
 	managedTunnelSecretPurpose = "managed-tunnel-provider-v1"
+	maxAgentDesiredStateBytes  = 96 * 1024
 )
 
 var fleetIdentifierRE = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
@@ -82,24 +83,25 @@ type FleetEnrollmentInput struct {
 }
 
 type FleetEnrollmentView struct {
-	ID                  int                  `json:"id"`
-	Name                string               `json:"name"`
-	NodeID              *int                 `json:"nodeId,omitempty"`
-	AgentID             string               `json:"agentId,omitempty"`
-	BootstrapExpiresAt  int64                `json:"bootstrapExpiresAt,omitempty"`
-	BootstrapUsedAt     int64                `json:"bootstrapUsedAt,omitempty"`
-	CredentialExpiresAt int64                `json:"credentialExpiresAt,omitempty"`
-	CredentialRotatedAt int64                `json:"credentialRotatedAt,omitempty"`
-	HasCredential       bool                 `json:"hasCredential"`
-	Enabled             bool                 `json:"enabled"`
-	Capabilities        any                  `json:"capabilities,omitempty"`
-	Version             string               `json:"version,omitempty"`
-	Status              string               `json:"status"`
-	LastCheckInAt       int64                `json:"lastCheckInAt,omitempty"`
-	LastError           string               `json:"lastError,omitempty"`
-	Assignment          *FleetAssignmentView `json:"assignment,omitempty"`
-	CreatedAt           int64                `json:"createdAt"`
-	UpdatedAt           int64                `json:"updatedAt"`
+	ID                  int                          `json:"id"`
+	Name                string                       `json:"name"`
+	NodeID              *int                         `json:"nodeId,omitempty"`
+	AgentID             string                       `json:"agentId,omitempty"`
+	BootstrapExpiresAt  int64                        `json:"bootstrapExpiresAt,omitempty"`
+	BootstrapUsedAt     int64                        `json:"bootstrapUsedAt,omitempty"`
+	CredentialExpiresAt int64                        `json:"credentialExpiresAt,omitempty"`
+	CredentialRotatedAt int64                        `json:"credentialRotatedAt,omitempty"`
+	HasCredential       bool                         `json:"hasCredential"`
+	Enabled             bool                         `json:"enabled"`
+	Capabilities        any                          `json:"capabilities,omitempty"`
+	Version             string                       `json:"version,omitempty"`
+	Status              string                       `json:"status"`
+	LastCheckInAt       int64                        `json:"lastCheckInAt,omitempty"`
+	LastError           string                       `json:"lastError,omitempty"`
+	Assignment          *FleetAssignmentView         `json:"assignment,omitempty"`
+	TunnelStatuses      []FleetAgentTunnelStatusView `json:"tunnelStatuses,omitempty"`
+	CreatedAt           int64                        `json:"createdAt"`
+	UpdatedAt           int64                        `json:"updatedAt"`
 }
 
 type FleetAssignmentView struct {
@@ -111,6 +113,16 @@ type FleetAssignmentView struct {
 	LastError       string `json:"lastError,omitempty"`
 	LastAttemptAt   int64  `json:"lastAttemptAt,omitempty"`
 	AppliedAt       int64  `json:"appliedAt,omitempty"`
+}
+
+type FleetAgentTunnelStatusView struct {
+	TunnelID   int    `json:"tunnelId"`
+	Provider   string `json:"provider"`
+	Status     string `json:"status"`
+	PID        int    `json:"pid,omitempty"`
+	LastError  string `json:"lastError,omitempty"`
+	ObservedAt int64  `json:"observedAt,omitempty"`
+	UpdatedAt  int64  `json:"updatedAt,omitempty"`
 }
 
 type FleetEnrollmentCreateResult struct {
@@ -184,11 +196,24 @@ type AgentEnrollRequest struct {
 }
 
 type AgentCheckInRequest struct {
-	AgentID         string          `json:"agentId"`
-	Version         string          `json:"version"`
-	Capabilities    json.RawMessage `json:"capabilities,omitempty"`
-	AppliedRevision int             `json:"appliedRevision"`
-	ApplyError      string          `json:"applyError,omitempty"`
+	AgentID         string              `json:"agentId"`
+	Version         string              `json:"version"`
+	Capabilities    json.RawMessage     `json:"capabilities,omitempty"`
+	AppliedRevision int                 `json:"appliedRevision"`
+	ApplyError      string              `json:"applyError,omitempty"`
+	Tunnels         []AgentTunnelReport `json:"tunnels,omitempty"`
+}
+
+// AgentTunnelReport is bounded operational status, not connector output. It
+// lets the panel expose a failed/stopped tunnel without receiving a secret,
+// command line, or unbounded provider log.
+type AgentTunnelReport struct {
+	TunnelID   int    `json:"tunnelId"`
+	Provider   string `json:"provider"`
+	Status     string `json:"status"`
+	PID        int    `json:"pid,omitempty"`
+	LastError  string `json:"lastError,omitempty"`
+	ObservedAt int64  `json:"observedAt,omitempty"`
 }
 
 type AgentTunnelDelivery struct {
@@ -219,6 +244,7 @@ type AgentCheckInResponse struct {
 	Credential          string             `json:"credential,omitempty"`
 	CredentialExpiresAt int64              `json:"credentialExpiresAt"`
 	DesiredState        *AgentDesiredState `json:"desiredState,omitempty"`
+	Disabled            bool               `json:"disabled,omitempty"`
 }
 
 type FleetService struct{}
@@ -333,10 +359,15 @@ func (FleetService) ListEnrollments() ([]FleetEnrollmentView, error) {
 	if err != nil {
 		return nil, err
 	}
+	tunnelStatuses, err := fleetTunnelStatusesByEnrollment()
+	if err != nil {
+		return nil, err
+	}
 	out := make([]FleetEnrollmentView, 0, len(rows))
 	for i := range rows {
 		view := fleetEnrollmentView(&rows[i])
 		view.Assignment = assignments[rows[i].ID]
+		view.TunnelStatuses = tunnelStatuses[rows[i].ID]
 		out = append(out, view)
 	}
 	return out, nil
@@ -696,12 +727,21 @@ func (FleetService) AgentCheckIn(ctx context.Context, credential string, in Agen
 	if enrollment.AgentID == nil || in.AgentID != *enrollment.AgentID || !validAgentID(in.AgentID) {
 		return nil, errFleetAgentUnauthorized
 	}
+	// A disabled enrollment is permitted to receive this terminal response so a
+	// reachable outbound-only agent can stop local connectors. It receives no
+	// desired state and cannot update fleet health or mutate assignments.
+	if !enrollment.Enabled {
+		return &AgentCheckInResponse{CredentialExpiresAt: enrollment.CredentialExpiresAt, Disabled: true}, nil
+	}
 	capabilities, capErr := normalizeAgentCapabilities(in.Capabilities)
 	if capErr != nil {
 		return nil, common.NewError("invalid agent capabilities")
 	}
-	if in.AppliedRevision < 0 || len(in.ApplyError) > 512 {
+	if in.AppliedRevision < 0 || len(in.ApplyError) > 512 || len(in.Tunnels) > 64 {
 		return nil, common.NewError("invalid agent acknowledgement")
+	}
+	if err := validateAgentTunnelReports(enrollment.ID, in.AppliedRevision, in.Tunnels); err != nil {
+		return nil, err
 	}
 	now := time.Now()
 	version := trimBounded(in.Version, 128)
@@ -713,6 +753,9 @@ func (FleetService) AgentCheckIn(ctx context.Context, credential string, in Agen
 		return nil, err
 	}
 	if err := updateAssignmentAcknowledgement(enrollment.ID, in.AppliedRevision, in.ApplyError, now); err != nil {
+		return nil, err
+	}
+	if err := updateAgentTunnelStatuses(enrollment.ID, in.AppliedRevision, in.Tunnels, now); err != nil {
 		return nil, err
 	}
 	if err := database.GetDB().First(enrollment, enrollment.ID).Error; err != nil {
@@ -778,6 +821,10 @@ func (FleetService) desiredStateForEnrollment(enrollment *model.FleetAgentEnroll
 			item.ProviderConfig = json.RawMessage(config)
 		}
 		state.Tunnels = append(state.Tunnels, item)
+	}
+	encoded, err := json.Marshal(state)
+	if err != nil || len(encoded) > maxAgentDesiredStateBytes {
+		return nil, common.NewError("fleet desired state is too large")
 	}
 	return state, nil
 }
@@ -1066,6 +1113,166 @@ func validManagedTunnelTarget(host string) bool {
 	return ip != nil && (ip.IsLoopback() || ip.IsPrivate())
 }
 
+func updateAgentTunnelStatuses(enrollmentID, appliedRevision int, reports []AgentTunnelReport, observed time.Time) error {
+	if len(reports) == 0 {
+		return nil
+	}
+	if err := validateAgentTunnelReports(enrollmentID, appliedRevision, reports); err != nil {
+		return err
+	}
+	for _, report := range reports {
+		row := model.FleetAgentTunnelStatus{
+			EnrollmentID: enrollmentID,
+			TunnelID:     report.TunnelID,
+			Provider:     report.Provider,
+			Status:       report.Status,
+			PID:          report.PID,
+			LastError:    trimBounded(report.LastError, 512),
+			ObservedAt:   observed.UnixMilli(),
+		}
+		if err := database.GetDB().Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "enrollment_id"}, {Name: "tunnel_id"}},
+			DoUpdates: clause.AssignmentColumns([]string{"provider", "status", "pid", "last_error", "observed_at", "updated_at"}),
+		}).Create(&row).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateAgentTunnelReports(enrollmentID, appliedRevision int, reports []AgentTunnelReport) error {
+	if len(reports) == 0 {
+		return nil
+	}
+	allowed, err := reportableTunnelProvidersForEnrollment(enrollmentID, appliedRevision)
+	if err != nil {
+		return err
+	}
+	seen := make(map[int]struct{}, len(reports))
+	for _, report := range reports {
+		_, exists := allowed[report.TunnelID]
+		if !exists || !fleetIdentifierRE.MatchString(report.Provider) || report.PID < 0 || report.PID > 10_000_000 || len(report.LastError) > 512 {
+			return common.NewError("invalid managed tunnel report")
+		}
+		if _, duplicate := seen[report.TunnelID]; duplicate {
+			return common.NewError("duplicate managed tunnel report")
+		}
+		seen[report.TunnelID] = struct{}{}
+		switch report.Status {
+		case "starting", "running", "stopping", "stopped", "error", "unsupported":
+		default:
+			return common.NewError("invalid managed tunnel status")
+		}
+	}
+	return nil
+}
+
+// reportableTunnelProvidersForEnrollment accepts bounded status for the
+// assignment's desired revision and its last applied revision. During a
+// rollout an agent can have a partially reconciled desired contract while it
+// still reports the prior revision, so both tunnel sets are valid evidence.
+// Reports for any other historical revision are rejected.
+func reportableTunnelProvidersForEnrollment(enrollmentID, appliedRevision int) (map[int]string, error) {
+	var assignment model.FleetAssignment
+	if err := database.GetDB().Where("enrollment_id = ?", enrollmentID).First(&assignment).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+		return map[int]string{}, nil
+	} else if err != nil {
+		return nil, err
+	}
+	if appliedRevision != 0 && appliedRevision != assignment.DesiredRevision && appliedRevision != assignment.AppliedRevision {
+		return map[int]string{}, nil
+	}
+	revisions := map[int]struct{}{assignment.DesiredRevision: struct{}{}}
+	if assignment.AppliedRevision > 0 {
+		revisions[assignment.AppliedRevision] = struct{}{}
+	}
+	out := make(map[int]string)
+	for revisionNumber := range revisions {
+		var revision model.FleetTemplateRevision
+		if err := database.GetDB().Where("template_id = ? AND revision = ?", assignment.TemplateID, revisionNumber).First(&revision).Error; err != nil {
+			return nil, err
+		}
+		doc, err := decodeFleetDocument(revision.Document)
+		if err != nil {
+			return nil, err
+		}
+		for _, id := range doc.ManagedTunnelIDs {
+			var tunnel model.ManagedTunnel
+			if err := database.GetDB().First(&tunnel, id).Error; err != nil {
+				return nil, err
+			}
+			// A disabled/changed tunnel can still be reported by an agent that has
+			// not received its withdrawal. The operator view filters it below.
+			out[id] = tunnel.Provider
+		}
+	}
+	return out, nil
+}
+
+// fleetTunnelStatusesByEnrollment returns current desired tunnel telemetry.
+// Historical rows are intentionally retained for diagnostics, but a status for
+// a removed, disabled, or superseded contract is not shown as current health.
+func fleetTunnelStatusesByEnrollment() (map[int][]FleetAgentTunnelStatusView, error) {
+	visible, err := visibleTunnelProvidersByEnrollment()
+	if err != nil {
+		return nil, err
+	}
+	var rows []model.FleetAgentTunnelStatus
+	if err := database.GetDB().Order("enrollment_id asc, tunnel_id asc").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make(map[int][]FleetAgentTunnelStatusView)
+	for _, row := range rows {
+		if provider := visible[row.EnrollmentID][row.TunnelID]; provider == "" || provider != row.Provider {
+			continue
+		}
+		out[row.EnrollmentID] = append(out[row.EnrollmentID], FleetAgentTunnelStatusView{
+			TunnelID: row.TunnelID, Provider: row.Provider, Status: row.Status, PID: row.PID,
+			LastError: row.LastError, ObservedAt: row.ObservedAt, UpdatedAt: row.UpdatedAt,
+		})
+	}
+	return out, nil
+}
+
+func visibleTunnelProvidersByEnrollment() (map[int]map[int]string, error) {
+	var assignments []model.FleetAssignment
+	if err := database.GetDB().Find(&assignments).Error; err != nil {
+		return nil, err
+	}
+	out := make(map[int]map[int]string, len(assignments))
+	for _, assignment := range assignments {
+		var template model.FleetTemplate
+		if err := database.GetDB().First(&template, assignment.TemplateID).Error; err != nil {
+			return nil, err
+		}
+		if !template.Enabled {
+			continue
+		}
+		var revision model.FleetTemplateRevision
+		if err := database.GetDB().Where("template_id = ? AND revision = ?", assignment.TemplateID, assignment.DesiredRevision).First(&revision).Error; err != nil {
+			return nil, err
+		}
+		doc, err := decodeFleetDocument(revision.Document)
+		if err != nil {
+			return nil, err
+		}
+		for _, id := range doc.ManagedTunnelIDs {
+			var tunnel model.ManagedTunnel
+			if err := database.GetDB().First(&tunnel, id).Error; err != nil {
+				return nil, err
+			}
+			if !tunnel.Enabled {
+				continue
+			}
+			if out[assignment.EnrollmentID] == nil {
+				out[assignment.EnrollmentID] = make(map[int]string)
+			}
+			out[assignment.EnrollmentID][id] = tunnel.Provider
+		}
+	}
+	return out, nil
+}
+
 func fleetAssignmentsByEnrollment() (map[int]*FleetAssignmentView, error) {
 	var rows []model.FleetAssignment
 	if err := database.GetDB().Order("enrollment_id asc").Find(&rows).Error; err != nil {
@@ -1117,7 +1324,7 @@ func authenticateFleetAgent(credential string) (*model.FleetAgentEnrollment, err
 	if err := database.GetDB().Where("credential_hash = ?", hash).First(&enrollment).Error; err != nil {
 		return nil, errFleetAgentUnauthorized
 	}
-	if !enrollment.Enabled || enrollment.CredentialExpiresAt <= time.Now().UnixMilli() || !constantHashEqual(enrollment.CredentialHash, hash) {
+	if enrollment.CredentialExpiresAt <= time.Now().UnixMilli() || !constantHashEqual(enrollment.CredentialHash, hash) {
 		return nil, errFleetAgentUnauthorized
 	}
 	return &enrollment, nil

@@ -531,10 +531,11 @@ func loadServiceEnvFile() {
 
 // runFleetAgent starts the outbound-only Phase C node agent. It deliberately
 // does not initialize this host's panel database or Xray: the agent's narrow
-// job is to stage authenticated fleet state for a local connector adapter.
-func runFleetAgent(panelURL, bootstrapToken, statePath, certSHA256 string, interval time.Duration, allowHTTP bool) error {
+// job is to reconcile authenticated fleet state through fixed local adapters.
+func runFleetAgent(panelURL, bootstrapToken, statePath, tunnelDir, cloudflaredPath, certSHA256 string, interval time.Duration, allowHTTP bool) error {
 	agent, err := fleetagent.New(fleetagent.Config{
 		PanelURL: panelURL, BootstrapToken: bootstrapToken, StatePath: statePath,
+		TunnelDir: tunnelDir, CloudflaredPath: cloudflaredPath,
 		PollInterval: interval, CertSHA256: certSHA256, AllowHTTP: allowHTTP,
 	})
 	if err != nil {
@@ -564,12 +565,16 @@ func main() {
 	var agentPanelURL string
 	var agentBootstrapToken string
 	var agentStatePath string
+	var agentTunnelDir string
+	var agentCloudflaredPath string
 	var agentCertSHA256 string
 	var agentPollInterval time.Duration
 	var agentAllowHTTP bool
 	agentCmd.StringVar(&agentPanelURL, "panel", "", "Central panel base URL (HTTPS)")
 	agentCmd.StringVar(&agentBootstrapToken, "bootstrap-token", "", "One-time fleet enrollment token (not stored in the state file)")
 	agentCmd.StringVar(&agentStatePath, "state", "/etc/x-ui/phoenix-agent.json", "Owner-only agent state file")
+	agentCmd.StringVar(&agentTunnelDir, "tunnel-dir", "/etc/x-ui/managed-tunnels", "Owner-only managed tunnel configuration directory")
+	agentCmd.StringVar(&agentCloudflaredPath, "cloudflared-path", "", "Absolute path to the locally installed cloudflared executable")
 	agentCmd.StringVar(&agentCertSHA256, "cert-sha256", "", "Optional base64 SHA-256 pin for the central panel TLS certificate")
 	agentCmd.DurationVar(&agentPollInterval, "interval", 15*time.Second, "Control-plane polling interval (5s-5m)")
 	agentCmd.BoolVar(&agentAllowHTTP, "allow-http", false, "Allow HTTP only for a trusted development network")
@@ -657,7 +662,7 @@ func main() {
 			fmt.Println("agent requires --panel <https://central-panel[/base-path]>")
 			return
 		}
-		if err := runFleetAgent(agentPanelURL, agentBootstrapToken, agentStatePath, agentCertSHA256, agentPollInterval, agentAllowHTTP); err != nil {
+		if err := runFleetAgent(agentPanelURL, agentBootstrapToken, agentStatePath, agentTunnelDir, agentCloudflaredPath, agentCertSHA256, agentPollInterval, agentAllowHTTP); err != nil {
 			fmt.Println("fleet agent stopped:", err)
 			return
 		}

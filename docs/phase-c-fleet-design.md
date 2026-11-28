@@ -22,12 +22,14 @@ traffic accounting, and heartbeat exactly as it did before this release.
   safe foundation for future persistent transports, but does not require a
   public agent listener, SSH access, or a particular tunnel vendor.
 
-The initial agent persists and acknowledges its desired fleet document.  It
-never executes a command from that document.  Connector providers are expected
-to consume the validated endpoint contract through a dedicated agent adapter;
-this prevents a template editor from gaining arbitrary code execution on a
-node.  Existing Xray Tunnel/WireGuard/AmneziaWG inbounds are unrelated and
-remain unchanged.
+The agent persists and acknowledges its desired fleet document. It never
+executes a command from that document. Connector execution is available only
+through a built-in, locally configured adapter: the `cloudflared` adapter runs
+a locally installed executable selected with the agent's `--cloudflared-path`,
+not with a path or command supplied by the panel. Other providers remain
+contract-only until PHOENIX ships a dedicated adapter. This prevents a template
+editor from gaining arbitrary code execution on a node. Existing Xray
+Tunnel/WireGuard/AmneziaWG inbounds are unrelated and remain unchanged.
 
 ## Data model and migration contract
 
@@ -43,6 +45,7 @@ settings and no changed node behavior.
 | `fleet_assignments` | Explicit agent-to-template assignment, desired/applied revision and rollout state. |
 | `fleet_pools` / `fleet_pool_members` | Reusable regional, canary, or maintenance cohorts; pools may bind a template to prevent a mistaken deploy. |
 | `managed_tunnels` | Validated public endpoint/localhost target contract and encrypted provider credential. |
+| `fleet_agent_tunnel_status` | Bounded agent-reported runtime observation for each assigned tunnel; no logs, command lines, or credentials. |
 
 The optional `node_id` on an enrollment is a compatibility bridge only.  It
 allows an operator to associate an outbound-only agent with an existing legacy
@@ -120,10 +123,19 @@ that replacement atomically before using it on the next poll.  Credentials are
 rotated by an operator or periodically by the panel and the previous hash is
 not retained.
 
-The agent reports an acknowledgement for a revision it has durably staged.  A
-failed validation or persistence attempt is reported as a bounded diagnostic
-message.  The control plane treats agent reports as health evidence, not as a
-source of billing or traffic authority.
+The agent reports an acknowledgement only after it has durably staged the
+revision and reconciled its supported managed-tunnel adapters. A failed
+validation, persistence, or connector start keeps the revision unacknowledged,
+persists it for a later reconciliation retry, and is reported as a bounded
+diagnostic message. Check-ins also carry bounded per-tunnel runtime status
+(`running`, `stopping`, `stopped`, `error`, or `unsupported`), which the panel
+persists as operational telemetry. During a rollout, the panel accepts reports
+for both the current desired and last applied revision while the agent
+reconciles the change, but only displays telemetry for the currently enabled
+desired tunnel contract.
+Historical status rows remain diagnostic evidence rather than appearing as
+current health. The control plane treats agent reports as health evidence, not
+as a source of billing or traffic authority.
 
 ## Managed tunnel contract
 
@@ -135,9 +147,26 @@ is encrypted with the panel secret using distinct authenticated-data purpose
 `managed-tunnel-provider-v1`, never appears in operator read APIs, and is sent
 only in an assigned agent's TLS response.
 
-No tunnel starts on upgrade.  A tunnel is not supplied to an agent unless it is
+No tunnel starts on upgrade. A tunnel is not supplied to an agent unless it is
 enabled, referenced by the revision assigned to that agent, and the agent has
 checked in successfully.
+
+The shipped `cloudflared` adapter supports `http`, `https`, and `tcp` targets.
+It requires a locally installed `cloudflared` binary passed by absolute path to
+`phoenix agent --cloudflared-path`; the panel cannot choose that path. Its
+provider configuration is a JSON object with `tunnelId` and a Cloudflare
+credential JSON object under `credentials`. The agent writes the generated
+YAML and credential JSON only below its owner-only tunnel directory, invokes
+`cloudflared --no-autoupdate --config … tunnel run` without a shell, and
+supervises/reports the child process. An IPv6 local target is rendered with a
+bracketed host/port. A changed contract stops the old connector before a later
+heartbeat starts a replacement, so two processes do not overlap for one tunnel.
+On endpoint withdrawal, disablement, or a terminal disabled-enrollment response,
+the agent stops the connector and removes that tunnel's generated credential and
+configuration directory. A normal agent process restart preserves owner-only
+generated files and rehydrates its protected state before it reports health.
+`udp` and unimplemented providers stay rejected/`unsupported` rather than being
+guessed or run with arbitrary flags.
 
 ## Rollback and failure handling
 
@@ -145,6 +174,10 @@ A deployment is an explicit desired-revision update.  Operators can first
 deploy to a canary enrollment set, inspect each assignment's `appliedRevision`,
 `status`, `lastError`, and timestamps, and then target the remaining set.
 Rollback selects an already immutable prior revision and creates no mutation of
-revision history.  Disabled enrollments receive no desired state.  Agents keep
-the last durably staged configuration during control-plane outages; they do
-not erase or mutate legacy node configuration.
+revision history. Disabled enrollments receive a terminal `disabled` check-in
+response when they are reachable; the agent stops managed connectors but keeps
+its protected last state so re-enabling can resume the explicit assignment. An
+offline node cannot be stopped through an outbound-only transport, so operators
+must stop its local service if immediate isolation is required. Agents keep the
+last durably staged configuration during control-plane outages; they do not
+erase or mutate legacy node configuration.
