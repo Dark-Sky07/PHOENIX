@@ -66,7 +66,7 @@ type ApiTokenView struct {
 	Token      string   `json:"token,omitempty" example:"new-token-string"`
 	Prefix     string   `json:"prefix" example:"a1b2c3d4"`
 	Scope      string   `json:"scope" example:"read"`
-	Scopes     []string `json:"scopes,omitempty" example:"clients:read"`
+	Scopes     []string `json:"scopes,omitempty" example:"[\"clients:read\"]"`
 	Enabled    bool     `json:"enabled" example:"true"`
 	ExpiresAt  int64    `json:"expiresAt" example:"0"`
 	LastUsedAt int64    `json:"lastUsedAt" example:"0"`

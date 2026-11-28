@@ -1463,7 +1463,9 @@ export const SCHEMAS: Record<string, unknown> = {
         "type": "string"
       },
       "scopes": {
-        "example": "clients:read",
+        "example": [
+          "clients:read"
+        ],
         "items": {
           "type": "string"
         },
