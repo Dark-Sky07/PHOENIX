@@ -331,6 +331,7 @@ export const ApiTokenViewSchema = z.object({
   name: z.string(),
   prefix: z.string(),
   scope: z.string(),
+  scopes: z.array(z.string()).optional(),
   token: z.string().optional(),
 });
 export type ApiTokenView = z.infer<typeof ApiTokenViewSchema>;
