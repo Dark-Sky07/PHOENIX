@@ -214,7 +214,7 @@ export default function ClientsPage() {
     refresh,
     hydrate,
     ownerOf,
-    resellerOptions,
+    resellerOptions = [],
   } = useClients();
 
   useWebSocket({

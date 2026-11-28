@@ -244,11 +244,7 @@ export function useClients() {
     const byEmail = new Map<string, string>();
     const options: { id: number; label: string }[] = [];
     for (const a of ownershipQuery.data ?? []) {
-      const name = a.name?.trim() || '';
-      const username = a.username?.trim() || '';
-      const label = name
-        ? (username && username !== name ? `${name} (@${username})` : name)
-        : (username || `#${a.resellerId}`);
+      const label = a.name || a.username || `#${a.resellerId}`;
       options.push({ id: a.resellerId, label });
       for (const email of a.emails ?? []) {
         byEmail.set(email.trim().toLowerCase(), label);
