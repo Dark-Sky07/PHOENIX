@@ -38,6 +38,8 @@ func (a *FleetController) initRouter(g *gin.RouterGroup) {
 
 	g.GET("/enrollments", a.listEnrollments)
 	g.POST("/enrollments", a.createEnrollment)
+	g.POST("/enrollments/:id/installer", a.createEnrollmentInstaller)
+	g.POST("/enrollments/:id/update", a.requestEnrollmentUpdate)
 	g.POST("/enrollments/:id/rotate", a.rotateEnrollment)
 	g.POST("/enrollments/:id/disable", a.setEnrollmentEnabled)
 
@@ -200,6 +202,40 @@ func (a *FleetController) createEnrollment(c *gin.Context) {
 		return
 	}
 	row, err := a.fleet.CreateEnrollment(in)
+	jsonObj(c, row, err)
+}
+
+// createEnrollmentInstaller creates a reviewed, one-time local bootstrap
+// script. It intentionally returns text for the operator to run on the node;
+// it never makes the panel dial a node or carry SSH credentials.
+func (a *FleetController) createEnrollmentInstaller(c *gin.Context) {
+	if !requireRecentInteractiveSuperAdmin(c) {
+		return
+	}
+	id, err := fleetPathID(c)
+	if err != nil {
+		jsonMsg(c, "invalid fleet enrollment id", err)
+		return
+	}
+	var in service.FleetInstallerInput
+	if err := c.ShouldBindJSON(&in); err != nil {
+		jsonMsg(c, "invalid fleet installer", err)
+		return
+	}
+	row, err := a.fleet.CreateEnrollmentInstaller(id, in)
+	jsonObj(c, row, err)
+}
+
+func (a *FleetController) requestEnrollmentUpdate(c *gin.Context) {
+	if !requireRecentInteractiveSuperAdmin(c) {
+		return
+	}
+	id, err := fleetPathID(c)
+	if err != nil {
+		jsonMsg(c, "invalid fleet enrollment id", err)
+		return
+	}
+	row, err := a.fleet.RequestEnrollmentUpdate(id)
 	jsonObj(c, row, err)
 }
 

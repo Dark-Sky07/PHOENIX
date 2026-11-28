@@ -15910,6 +15910,102 @@
         }
       }
     },
+    "/panel/api/fleet/enrollments/{id}/installer": {
+      "post": {
+        "tags": [
+          "Phase C fleet control plane"
+        ],
+        "summary": "Invalidate an unused bootstrap token and return a reviewed local installer script. The panel never dials the node, stores SSH credentials, or executes this script. The script only downloads a checksum-verified official PHOENIX release over HTTPS, enrolls once, then writes a token-free systemd unit.",
+        "operationId": "post_panel_api_fleet_enrollments_id_installer",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "",
+            "schema": {
+              "type": "number"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              },
+              "example": {
+                "panelUrl": "https://panel.example.com/panel-base",
+                "certSha256": "optional-base64-certificate-sha256"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/fleet/enrollments/{id}/update": {
+      "post": {
+        "tags": [
+          "Phase C fleet control plane"
+        ],
+        "summary": "Queue one enrolled official-update-capable agent as an explicit canary. The panel pins the latest numeric official release tag and matching architecture-specific SHA-256 at queue time. This route has no request body and accepts no URL, binary, version, arguments, environment, upload, or script.",
+        "operationId": "post_panel_api_fleet_enrollments_id_update",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "",
+            "schema": {
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/panel/api/fleet/enrollments/{id}/rotate": {
       "post": {
         "tags": [

@@ -53,6 +53,15 @@ type FleetAgentEnrollment struct {
 	Status              string  `json:"status" gorm:"size:24;not null;default:pending"`
 	LastCheckInAt       int64   `json:"lastCheckInAt"`
 	LastError           string  `json:"lastError" gorm:"size:512"`
+	UpdateRequestedAt   int64   `json:"updateRequestedAt" gorm:"index"`
+	UpdateDeadlineAt    int64   `json:"updateDeadlineAt" gorm:"index"`
+	UpdateStatus        string  `json:"updateStatus" gorm:"size:24;index"`
+	UpdateReleaseTag    string  `json:"updateReleaseTag" gorm:"size:32"`
+	UpdateArchitecture  string  `json:"updateArchitecture" gorm:"size:16"`
+	UpdateArchiveSHA256 string  `json:"updateArchiveSha256" gorm:"column:update_archive_sha256;size:64"`
+	UpdateError         string  `json:"updateError" gorm:"size:512"`
+	UpdateAttemptedAt   int64   `json:"updateAttemptedAt"`
+	UpdateAppliedAt     int64   `json:"updateAppliedAt"`
 	CreatedAt           int64   `json:"createdAt" gorm:"autoCreateTime:milli"`
 	UpdatedAt           int64   `json:"updatedAt" gorm:"autoUpdateTime:milli"`
 }

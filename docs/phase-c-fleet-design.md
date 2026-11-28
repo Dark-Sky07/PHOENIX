@@ -90,10 +90,15 @@ Authenticated administrator endpoints are mounted below `/panel/api/fleet`:
   mechanism.
 * `POST /templates/:id/rollback` moves explicitly requested enrolled agents to
   a prior revision.
-* `GET/POST /enrollments`, `POST /enrollments/:id/rotate`, and
-  `POST /enrollments/:id/disable` manage the agent lifecycle.  Create and
-  rotate responses contain the plaintext bootstrap/agent credential exactly
-  once; later reads only expose `hasCredential`.
+* `GET/POST /enrollments`, `POST /enrollments/:id/installer`,
+  `POST /enrollments/:id/update`, `POST /enrollments/:id/rotate`, and
+  `POST /enrollments/:id/disable` manage
+  the agent lifecycle. Create and rotate responses contain the plaintext
+  bootstrap/agent credential exactly once; later reads only expose
+  `hasCredential`. The installer endpoint reissues a pending enrollment's
+  one-time bootstrap token and returns a reviewed **local** bootstrap script;
+  it does not dial the node, retain SSH credentials, or execute a remote
+  command.
 * `GET/POST /tunnels`, `POST /tunnels/:id`, and
   `POST /tunnels/:id/delete` manage managed endpoint contracts.  Credentials
   have write-only semantics.
@@ -136,6 +141,60 @@ desired tunnel contract.
 Historical status rows remain diagnostic evidence rather than appearing as
 current health. The control plane treats agent reports as health evidence, not
 as a source of billing or traffic authority.
+
+## Node installation and updates
+
+A node that has no PHOENIX agent cannot be safely installed by an outbound-only
+control plane: accepting a panel-originated shell command would turn an
+unmanaged host into remote-code-execution surface. For a pending enrollment,
+an operator may instead request `POST /enrollments/:id/installer` after recent
+superadmin authentication. The panel invalidates the prior unused bootstrap
+value and returns a short-lived script for the operator to review and run
+**locally as root**.
+
+The script only downloads the latest official `Dark-Sky07/PHOENIX` release,
+requires a numeric `vX.Y.Z-phoenix` tag, downloads the matching published
+SHA-256 sidecar, and refuses extraction unless that checksum verifies. It
+installs only `/usr/local/bin/x-ui`, performs one agent enrollment with
+`phoenix agent --once`, and writes a hardened systemd unit that contains no
+bootstrap token. It has no user-selectable repository, URL, executable,
+arguments, shell fragment, or HTTP override. Its fixed CPU detection passes a
+local architecture enum only to preserve the reviewed official ARM artifact
+selection; the panel cannot choose it. A self-signed panel can be pinned with
+the optional base64 certificate SHA-256 supplied to the installer request.
+
+For a previously enrolled Fleet node, a recent superadmin can explicitly
+request `POST /enrollments/:id/update`. This is deliberately a one-agent
+canary operation; the operator repeats it only for the next reviewed cohort.
+When queued, the panel resolves the latest official numeric release **once**
+and records its release tag, the enrolled agent's declared architecture, and
+the corresponding official archive SHA-256. The agent receives only that
+pinned identity/digest plus the enum `official-release-v1`; it constructs the
+fixed GitHub asset path itself and refuses any URL, binary, path, argument,
+environment, command, or source supplied by the panel.
+
+The agent checks both the published sidecar and downloaded archive against the
+panel-pinned digest, extracts only `x-ui/x-ui`, and atomically replaces only
+its installer-owned `/usr/local/bin/x-ui`. It persists bounded `accepted`,
+`installed`, or 512-byte `failed` status. A request accepts acknowledgement for
+at most 30 minutes; a later agent check-in marks an unacknowledged request as
+failed. After success, the agent exits so systemd restarts the new binary to
+acknowledge it. A download, checksum, layout, or write failure leaves the
+running binary untouched; a disabled enrollment
+cancels an outstanding request. There is no arbitrary rollback artifact: a
+new explicit request is another pinned official-release rollout, while the
+atomic replacement provides failure rollback before a version is installed.
+
+All queueing actions are covered by the panel's standard redacted mutation
+audit trail under the `fleet` module; it records actor, target enrollment, and
+HTTP status. Pinned metadata remains visible in enrollment state without ever
+recording agent credentials.
+
+The existing **Nodes → Update Panel** action remains the backward-compatible
+update path for legacy direct nodes: it invokes the already-authenticated
+remote panel updater. It never makes Fleet agents execute an operator-supplied
+command. Fleet bootstrap artifacts and legacy panel updates therefore remain
+limited to PHOENIX's official release/checksum pipeline.
 
 ## Managed tunnel contract
 
