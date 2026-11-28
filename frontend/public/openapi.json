@@ -1488,6 +1488,15 @@
             "example": "read",
             "type": "string"
           },
+          "scopes": {
+            "example": [
+              "clients:read"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "token": {
             "example": "new-token-string",
             "type": "string"
@@ -2936,6 +2945,10 @@
       "description": "Two authentication modes are supported. UI sessions use a cookie set by the login endpoint. Programmatic clients (bots, scripts, remote panels) authenticate with a Bearer token taken from Settings → Security → API Token. Both work for routine endpoints under /panel/api/*. High-impact operations deliberately require an interactive superadmin browser session and refuse Bearer tokens: API-token/admin-account management, certificate issuance, database export or restore, external backups, audit-log erasure, accounting reconciliation repair, and OpenVPN revocation."
     },
     {
+      "name": "Bootstrap and session security",
+      "description": "Fresh panels have no shared credential. The local operator reads the short-lived setup token from the protected server file and enters it in the setup form. Setup tokens are never returned by an API or placed in a URL."
+    },
+    {
       "name": "Inbounds",
       "description": "Manage inbound configurations and their clients. All endpoints live under /panel/api/inbounds and require a logged-in session or Bearer token. Link-generating endpoints honour forwarded headers only when the request comes from a configured trusted proxy."
     },
@@ -2990,6 +3003,10 @@
     {
       "name": "OpenVPN revocation",
       "description": "Explicit superadmin revocation of an OpenVPN client. The endpoint removes the current certificate fingerprint from the daemon allowlist and kills managed sessions after validating their numeric client IDs. It does not prove final traffic or release quota."
+    },
+    {
+      "name": "Sessions, recovery codes, and webhooks",
+      "description": "All endpoints in this section require an interactive superadmin browser session and reject API bearer tokens. Mutating endpoints additionally require a password-confirmed recent authentication (valid for 10 minutes); call POST /reauth first when necessary."
     },
     {
       "name": "WebSocket",
@@ -3181,6 +3198,94 @@
                 "example": {
                   "success": true,
                   "obj": false
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/setup": {
+      "get": {
+        "tags": [
+          "Bootstrap and session security"
+        ],
+        "summary": "Render the first-administrator setup form only while no administrator exists.",
+        "operationId": "get_setup",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Bootstrap and session security"
+        ],
+        "summary": "Atomically consume the one-time local setup token and create the first superadmin. The form accepts token, username, password, and confirmPassword.",
+        "operationId": "post_setup",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/reauth": {
+      "post": {
+        "tags": [
+          "Bootstrap and session security"
+        ],
+        "summary": "Reconfirm the current browser session with password and, when enabled, TOTP or a single-use recovery code. Renews the short recent-authentication proof; bearer tokens are refused.",
+        "operationId": "post_reauth",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
                 }
               }
             }
@@ -9666,7 +9771,7 @@
         "tags": [
           "API Tokens"
         ],
-        "summary": "Mint a new API token. Name must be unique and 1-64 characters; the token string is server-generated and returned only in this response — it is stored hashed and cannot be retrieved later. Requires an interactive superadmin browser session; Bearer tokens are refused.",
+        "summary": "Mint a new API token. Name must be unique and 1-64 characters; the token string is server-generated and returned only in this response — it is stored hashed and cannot be retrieved later. Requires an interactive superadmin browser session plus a recent password confirmation; Bearer tokens are refused.",
         "operationId": "post_panel_api_setting_apiTokens_create",
         "requestBody": {
           "required": true,
@@ -9720,6 +9825,9 @@
                     "name": "central-panel-a",
                     "prefix": "a1b2c3d4",
                     "scope": "read",
+                    "scopes": [
+                      "clients:read"
+                    ],
                     "token": "new-token-string"
                   }
                 }
@@ -9756,7 +9864,7 @@
         "tags": [
           "API Tokens"
         ],
-        "summary": "Permanently delete a token. Any caller using it stops authenticating immediately. Requires an interactive superadmin browser session; Bearer tokens are refused.",
+        "summary": "Permanently delete a token. Any caller using it stops authenticating immediately. Requires an interactive superadmin browser session plus a recent password confirmation; Bearer tokens are refused.",
         "operationId": "post_panel_api_setting_apiTokens_delete_id",
         "parameters": [
           {
@@ -9800,7 +9908,7 @@
         "tags": [
           "API Tokens"
         ],
-        "summary": "Toggle a token enabled/disabled without deleting it. Disabled tokens are rejected by checkAPIAuth on the next request. Requires an interactive superadmin browser session; Bearer tokens are refused.",
+        "summary": "Toggle a token enabled/disabled without deleting it. Disabled tokens are rejected by checkAPIAuth on the next request. Requires an interactive superadmin browser session plus a recent password confirmation; Bearer tokens are refused.",
         "operationId": "post_panel_api_setting_apiTokens_setEnabled_id",
         "parameters": [
           {
@@ -14231,7 +14339,7 @@
         "tags": [
           "Resellers (نمایندگی)"
         ],
-        "summary": "Create a new panel admin account with an RBAC role and granular permissions (interactive superadmin browser session only; Bearer tokens are refused).",
+        "summary": "Create a new panel admin account with an RBAC role and granular permissions. Requires an interactive superadmin browser session plus a recent password confirmation; Bearer tokens are refused.",
         "operationId": "post_panel_api_setting_admins_create",
         "responses": {
           "200": {
@@ -14261,7 +14369,7 @@
         "tags": [
           "Resellers (نمایندگی)"
         ],
-        "summary": "Update a panel admin account RBAC role, permissions, or status (interactive superadmin browser session only; Bearer tokens are refused).",
+        "summary": "Update a panel admin account RBAC role, permissions, or status. Requires an interactive superadmin browser session plus a recent password confirmation; Bearer tokens are refused.",
         "operationId": "post_panel_api_setting_admins_update_id",
         "parameters": [
           {
@@ -14302,7 +14410,7 @@
         "tags": [
           "Resellers (نمایندگی)"
         ],
-        "summary": "Delete a secondary panel admin account (interactive superadmin browser session only; Bearer tokens are refused).",
+        "summary": "Delete a secondary panel admin account. Requires an interactive superadmin browser session plus a recent password confirmation; Bearer tokens are refused.",
         "operationId": "post_panel_api_setting_admins_delete_id",
         "parameters": [
           {
@@ -14806,7 +14914,7 @@
         "tags": [
           "OpenVPN revocation"
         ],
-        "summary": "Revoke one client on every managed OpenVPN daemon generation. Requires an interactive superadmin browser session; Bearer tokens are refused. A conflict response means the operation is incomplete and quota must not be released.",
+        "summary": "Revoke one client on every managed OpenVPN daemon generation. Requires an interactive superadmin browser session plus a recent password confirmation; Bearer tokens are refused. A conflict response means the operation is incomplete and quota must not be released.",
         "operationId": "post_panel_api_openvpn_revoke",
         "requestBody": {
           "required": true,
@@ -14872,6 +14980,357 @@
                 "example": {
                   "success": false,
                   "msg": "revocation incomplete; verify sessions and accounting before releasing quota"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/setting/sessions": {
+      "get": {
+        "tags": [
+          "Sessions, recovery codes, and webhooks"
+        ],
+        "summary": "List the current administrator’s tracked browser sessions. Legacy pre-upgrade cookies remain valid until normal expiry but are not retroactively listed.",
+        "operationId": "get_panel_api_setting_sessions",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/setting/sessions/revoke/{id}": {
+      "post": {
+        "tags": [
+          "Sessions, recovery codes, and webhooks"
+        ],
+        "summary": "Revoke one tracked browser session immediately.",
+        "operationId": "post_panel_api_setting_sessions_revoke_id",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "",
+            "schema": {
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/setting/recoveryCodes/regenerate": {
+      "post": {
+        "tags": [
+          "Sessions, recovery codes, and webhooks"
+        ],
+        "summary": "Invalidate unused recovery codes and return ten new high-entropy codes once. Only hashes are stored.",
+        "operationId": "post_panel_api_setting_recoveryCodes_regenerate",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/setting/webhooks": {
+      "get": {
+        "tags": [
+          "Sessions, recovery codes, and webhooks"
+        ],
+        "summary": "List configured webhook destinations without exposing signing secrets.",
+        "operationId": "get_panel_api_setting_webhooks",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/setting/webhooks/create": {
+      "post": {
+        "tags": [
+          "Sessions, recovery codes, and webhooks"
+        ],
+        "summary": "Create an HTTPS-only, SSRF-checked webhook subscription. The HMAC signing secret is returned once and stored encrypted.",
+        "operationId": "post_panel_api_setting_webhooks_create",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              },
+              "example": {
+                "name": "security-events",
+                "url": "https://events.example.com/phoenix",
+                "events": [
+                  "security.login.success",
+                  "audit.mutation"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/setting/webhooks/delete/{id}": {
+      "post": {
+        "tags": [
+          "Sessions, recovery codes, and webhooks"
+        ],
+        "summary": "Delete a webhook subscription and its queued deliveries.",
+        "operationId": "post_panel_api_setting_webhooks_delete_id",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "",
+            "schema": {
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/setting/webhooks/setEnabled/{id}": {
+      "post": {
+        "tags": [
+          "Sessions, recovery codes, and webhooks"
+        ],
+        "summary": "Enable or disable a webhook subscription without deleting its configuration.",
+        "operationId": "post_panel_api_setting_webhooks_setEnabled_id",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "",
+            "schema": {
+              "type": "number"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean",
+                    "description": ""
+                  }
+                },
+                "required": [
+                  "enabled"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/setting/webhooks/deliveries": {
+      "get": {
+        "tags": [
+          "Sessions, recovery codes, and webhooks"
+        ],
+        "summary": "List durable webhook delivery status, attempts, HTTP response status, and redacted error information.",
+        "operationId": "get_panel_api_setting_webhooks_deliveries",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/setting/webhooks/deliveries/{id}/replay": {
+      "post": {
+        "tags": [
+          "Sessions, recovery codes, and webhooks"
+        ],
+        "summary": "Queue one durable delivery for a fresh retry.",
+        "operationId": "post_panel_api_setting_webhooks_deliveries_id_replay",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "",
+            "schema": {
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
                 }
               }
             }

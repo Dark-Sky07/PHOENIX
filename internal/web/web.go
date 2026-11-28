@@ -242,6 +242,19 @@ func (s *Server) initRouter() (*gin.Engine, error) {
 
 	g := engine.Group(basePath)
 
+	// Fresh installations expose only this one-time setup flow. It is registered
+	// before the gate; every established installation bypasses the gate.
+	setup := controller.NewInitialSetupController(g)
+	if token, setupErr := (service.InitialSetupService{}).Ensure(); setupErr != nil {
+		return nil, setupErr
+	} else if token != "" {
+		// Do not log the token: request logs, log collectors, and browser
+		// history are not secret stores. It is available only in the 0600
+		// local file named below.
+		logger.Warningf("PHOENIX initial setup required. Open %ssetup and read the one-time token from %s", basePath, (service.InitialSetupService{}).TokenFilePath())
+	}
+	g.Use(setup.Gate)
+
 	s.index = controller.NewIndexController(g)
 	s.panel = controller.NewXUIController(g)
 	g.GET("/panel/api/openapi.json", controller.ServeOpenAPISpec)
@@ -374,6 +387,15 @@ func (s *Server) startTask(restartXray bool) {
 
 	// Reseller quota/expiry in-panel notifications (once per episode)
 	s.cron.AddJob("@every 10m", job.NewResellerNotifyJob())
+
+	// Durable, signed webhook deliveries. This worker only handles events an
+	// administrator explicitly subscribed to; it does no outbound work on a
+	// default/upgrade installation.
+	s.cron.AddFunc("@every 30s", func() {
+		if err := (service.WebhookService{}).ProcessDue(50); err != nil {
+			logger.Warning("process webhook deliveries failed:", err)
+		}
+	})
 
 	// Inbound traffic reset jobs
 	// Run every hour

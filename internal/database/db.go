@@ -53,11 +53,6 @@ func Dialect() string {
 	return db.Dialector.Name()
 }
 
-const (
-	defaultUsername = "admin"
-	defaultPassword = "admin"
-)
-
 // A second panel process, migrate CLI or old service still shutting down can
 // race GORM's first CREATE TYPE/INDEX during AutoMigrate. PostgreSQL reports
 // that race as SQLSTATE 23505 on pg_type/pg_index. Serialize schema migration
@@ -116,6 +111,12 @@ func initModels() error {
 		&model.HistoryOfSeeders{},
 		&model.Node{},
 		&model.ApiToken{},
+		&model.InitialSetup{},
+		&model.LoginProtection{},
+		&model.UserSession{},
+		&model.RecoveryCode{},
+		&model.WebhookSubscription{},
+		&model.WebhookDelivery{},
 		&model.ClientRecord{},
 		&model.ClientInbound{},
 		&model.ClientDevice{},
@@ -278,29 +279,11 @@ func isIgnorableDuplicateColumnErr(err error, mdl any) bool {
 	return false
 }
 
-// initUser creates a default admin user if the users table is empty.
-func initUser() error {
-	empty, err := isTableEmpty("users")
-	if err != nil {
-		log.Printf("Error checking if users table is empty: %v", err)
-		return err
-	}
-	if empty {
-		hashedPassword, err := crypto.HashPasswordAsBcrypt(defaultPassword)
-
-		if err != nil {
-			log.Printf("Error hashing default password: %v", err)
-			return err
-		}
-
-		user := &model.User{
-			Username: defaultUsername,
-			Password: hashedPassword,
-		}
-		return db.Create(user).Error
-	}
-	return nil
-}
+// initUser intentionally leaves a fresh panel without an account. The web
+// bootstrap service creates the first superadmin through a short-lived,
+// one-time setup link. Existing installations already have users and are not
+// modified by this behavior.
+func initUser() error { return nil }
 
 // runSeeders migrates user passwords to bcrypt and records seeder execution to prevent re-running.
 func runSeeders(isUsersEmpty bool) error {

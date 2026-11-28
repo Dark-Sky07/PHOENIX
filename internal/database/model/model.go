@@ -162,12 +162,26 @@ type HistoryOfSeeders struct {
 	SeederName string `json:"seederName"`
 }
 
+// InitialSetup holds only a digest of the one-time token used to create the
+// first administrator on a brand-new installation. Existing installations
+// bypass it because they already have a user row.
+type InitialSetup struct {
+	ID        uint   `json:"-" gorm:"primaryKey"`
+	TokenHash string `json:"-" gorm:"size:64;not null"`
+	ExpiresAt int64  `json:"-" gorm:"not null;index"`
+	Completed bool   `json:"-" gorm:"not null;default:false"`
+	CreatedAt int64  `json:"-" gorm:"autoCreateTime:milli"`
+}
+
+func (InitialSetup) TableName() string { return "initial_setup" }
+
 type ApiToken struct {
 	Id         int    `json:"id" gorm:"primaryKey;autoIncrement"`
 	Name       string `json:"name" gorm:"uniqueIndex;not null"`
 	Token      string `json:"token" gorm:"not null"` // SHA-256 hash; the plaintext is shown only once at creation
 	Prefix     string `json:"prefix" gorm:"size:16"` // leading plaintext characters, for identifying a token in the list
 	Scope      string `json:"scope" gorm:"size:16"`  // "full" or "read"; empty means "full" (legacy rows)
+	Scopes     string `json:"-" gorm:"type:text"`    // JSON granular permissions; empty preserves legacy Scope behavior
 	Enabled    bool   `json:"enabled" gorm:"default:true"`
 	ExpiresAt  int64  `json:"expiresAt"`  // unix millis; 0 = never expires
 	LastUsedAt int64  `json:"lastUsedAt"` // unix millis of the last successful authentication

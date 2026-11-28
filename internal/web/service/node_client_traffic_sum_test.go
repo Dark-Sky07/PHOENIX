@@ -20,6 +20,10 @@ func initTrafficTestDB(t *testing.T) *gorm.DB {
 		t.Fatalf("InitDB: %v", err)
 	}
 	t.Cleanup(func() { _ = database.CloseDB() })
+	user := &model.User{Username: "traffic-test-admin", Password: "test-hash", Role: "superadmin"}
+	if err := database.GetDB().Create(user).Error; err != nil {
+		t.Fatalf("seed traffic test admin: %v", err)
+	}
 	return database.GetDB()
 }
 

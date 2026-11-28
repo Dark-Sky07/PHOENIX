@@ -8,6 +8,8 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
 	"github.com/Dark-Sky07/phoenix/internal/logger"
+	"github.com/Dark-Sky07/phoenix/internal/util/crypto"
+	"github.com/Dark-Sky07/phoenix/internal/util/random"
 
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-gonic/gin"
@@ -16,11 +18,16 @@ import (
 const (
 	loginUserKey       = "LOGIN_USER"
 	loginEpochKey      = "LOGIN_EPOCH"
+	sessionIDKey       = "SESSION_ID"
+	recentAuthKey      = "RECENT_AUTH_AT"
 	loginResellerKey   = "LOGIN_RESELLER"
 	resellerEpochKey   = "LOGIN_RESELLER_EPOCH"
 	apiAuthUserKey     = "api_auth_user"
 	requestResellerKey = "authenticated_reseller"
 	sessionCookieName  = "phoenix"
+	trackedSessionTTL  = 30 * 24 * time.Hour
+	trackedTouchEvery  = 5 * time.Minute
+	reauthTTL          = 10 * time.Minute
 )
 
 func init() {
@@ -35,8 +42,11 @@ func SetLoginReseller(c *gin.Context, reseller *model.Reseller) error {
 		return nil
 	}
 	s := sessions.Default(c)
+	removeTrackedSession(stringValue(s.Get(sessionIDKey)))
 	s.Delete(loginUserKey)
 	s.Delete(loginEpochKey)
+	s.Delete(sessionIDKey)
+	s.Delete(recentAuthKey)
 	s.Set(loginResellerKey, reseller.Id)
 	s.Set(resellerEpochKey, reseller.LoginEpoch)
 	return s.Save()
@@ -98,13 +108,26 @@ func IsResellerLogin(c *gin.Context) bool {
 	return GetLoginReseller(c) != nil
 }
 
+// SetLoginUser records a new individually-revocable browser session. Cookies
+// issued before this feature deliberately have no SESSION_ID and continue to
+// work through their normal lifetime; this prevents an upgrade from logging
+// out a panel's current operators.
 func SetLoginUser(c *gin.Context, user *model.User) error {
 	if user == nil {
 		return nil
 	}
 	s := sessions.Default(c)
+	removeTrackedSession(stringValue(s.Get(sessionIDKey)))
+	trackedID, err := createTrackedSession(c, user)
+	if err != nil {
+		return err
+	}
 	s.Set(loginUserKey, user.Id)
 	s.Set(loginEpochKey, user.LoginEpoch)
+	if trackedID != "" {
+		s.Set(sessionIDKey, trackedID)
+	}
+	SetRecentAuthentication(c)
 	return s.Save()
 }
 
@@ -160,10 +183,24 @@ func GetLoginUser(c *gin.Context) *model.User {
 	if !sessionEpochMatches(s.Get(loginEpochKey), user.LoginEpoch) {
 		s.Delete(loginUserKey)
 		s.Delete(loginEpochKey)
+		s.Delete(sessionIDKey)
 		if saveErr := s.Save(); saveErr != nil {
 			logger.Warning("session: failed to drop stale epoch:", saveErr)
 		}
 		return nil
+	}
+	// No session ID means a pre-upgrade cookie. Do not turn a security
+	// migration into an involuntary logout. Every subsequently created login
+	// receives a row and is checked/revocable below.
+	if trackedID := stringValue(s.Get(sessionIDKey)); trackedID != "" {
+		if !trackedSessionValid(c, trackedID, user) {
+			s.Delete(loginUserKey)
+			s.Delete(loginEpochKey)
+			s.Delete(sessionIDKey)
+			s.Delete(recentAuthKey)
+			_ = s.Save()
+			return nil
+		}
 	}
 	return user
 }
@@ -285,6 +322,7 @@ func getUserByID(id int) (*model.User, error) {
 
 func ClearSession(c *gin.Context) error {
 	s := sessions.Default(c)
+	removeTrackedSession(stringValue(s.Get(sessionIDKey)))
 	s.Clear()
 	cookiePath := c.GetString("base_path")
 	if cookiePath == "" {
@@ -314,4 +352,94 @@ func ClearSession(c *gin.Context) error {
 		})
 	}
 	return nil
+}
+
+func stringValue(obj any) string {
+	v, _ := obj.(string)
+	return v
+}
+
+func createTrackedSession(c *gin.Context, user *model.User) (string, error) {
+	db := database.GetDB()
+	if db == nil {
+		return "", nil
+	}
+	id := random.Seq(48)
+	now := time.Now().UnixMilli()
+	ua := c.Request.UserAgent()
+	if len(ua) > 256 {
+		ua = ua[:256]
+	}
+	row := &model.UserSession{
+		UserID:      user.Id,
+		SessionHash: crypto.HashTokenSHA256(id),
+		LoginEpoch:  user.LoginEpoch,
+		LastSeenAt:  now,
+		ExpiresAt:   time.Now().Add(trackedSessionTTL).UnixMilli(),
+		IP:          c.ClientIP(),
+		UserAgent:   ua,
+	}
+	if err := db.Create(row).Error; err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+func removeTrackedSession(rawID string) {
+	if rawID == "" {
+		return
+	}
+	if db := database.GetDB(); db != nil {
+		_ = db.Where("session_hash = ?", crypto.HashTokenSHA256(rawID)).Delete(&model.UserSession{}).Error
+	}
+}
+
+func trackedSessionValid(c *gin.Context, rawID string, user *model.User) bool {
+	db := database.GetDB()
+	if db == nil {
+		return false
+	}
+	var row model.UserSession
+	if err := db.Where("session_hash = ? AND user_id = ?", crypto.HashTokenSHA256(rawID), user.Id).First(&row).Error; err != nil {
+		return false
+	}
+	now := time.Now().UnixMilli()
+	if row.LoginEpoch != user.LoginEpoch || row.ExpiresAt <= now {
+		_ = db.Where("id = ?", row.ID).Delete(&model.UserSession{}).Error
+		return false
+	}
+	if now-row.LastSeenAt >= trackedTouchEvery.Milliseconds() {
+		_ = db.Model(&model.UserSession{}).Where("id = ?", row.ID).Update("last_seen_at", now).Error
+	}
+	return true
+}
+
+// ListTrackedSessions returns only session metadata; the bearer value is never
+// persisted or returned. The caller must scope this to the authenticated user.
+func ListTrackedSessions(userID int) ([]model.UserSession, error) {
+	if userID <= 0 {
+		return nil, nil
+	}
+	var rows []model.UserSession
+	err := database.GetDB().Where("user_id = ?", userID).Order("last_seen_at DESC").Find(&rows).Error
+	return rows, err
+}
+
+func RevokeTrackedSession(userID, sessionID int) error {
+	if userID <= 0 || sessionID <= 0 {
+		return nil
+	}
+	return database.GetDB().Where("id = ? AND user_id = ?", sessionID, userID).Delete(&model.UserSession{}).Error
+}
+
+// SetRecentAuthentication creates the short reauthentication proof after a
+// successful password/TOTP login or explicit /reauth request. It stays inside
+// the signed session cookie and is not an API-token capability.
+func SetRecentAuthentication(c *gin.Context) {
+	sessions.Default(c).Set(recentAuthKey, time.Now().UnixMilli())
+}
+
+func HasRecentAuthentication(c *gin.Context) bool {
+	at := int64Value(sessions.Default(c).Get(recentAuthKey))
+	return at > 0 && time.Now().UnixMilli()-at >= 0 && time.Now().UnixMilli()-at <= reauthTTL.Milliseconds()
 }

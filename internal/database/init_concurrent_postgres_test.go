@@ -86,7 +86,10 @@ func TestInitDBConcurrentPostgres(t *testing.T) {
 	if err := admin.Table(schema + ".users").Count(&count).Error; err != nil {
 		t.Fatal(err)
 	}
-	if count != 1 {
-		t.Fatalf("expected one seeded admin across four processes, got %d", count)
+	// Fresh Phase-A panels deliberately remain userless until the local,
+	// one-time setup flow creates the first administrator. Concurrent schema
+	// startup must not reintroduce a shared seeded account.
+	if count != 0 {
+		t.Fatalf("expected no seeded admin across four processes, got %d", count)
 	}
 }

@@ -25,3 +25,21 @@ func requireInteractiveSuperAdmin(c *gin.Context) bool {
 	}
 	return true
 }
+
+// requireRecentInteractiveSuperAdmin adds a short proof-of-presence check to
+// operations that mint credentials or alter another administrator's ability to
+// access the panel. A successful login or /reauth grants the proof for a
+// limited interval; a bearer token is never an alternative credential.
+func requireRecentInteractiveSuperAdmin(c *gin.Context) bool {
+	if !requireInteractiveSuperAdmin(c) {
+		return false
+	}
+	if session.HasRecentAuthentication(c) {
+		return true
+	}
+	c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+		"success": false,
+		"msg":     "recent reauthentication required; confirm your password before this sensitive action",
+	})
+	return false
+}

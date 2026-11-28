@@ -314,6 +314,9 @@ export const EXAMPLES: Record<string, unknown> = {
     "name": "central-panel-a",
     "prefix": "a1b2c3d4",
     "scope": "read",
+    "scopes": [
+      "clients:read"
+    ],
     "token": "new-token-string"
   },
   "Client": {

@@ -2,7 +2,9 @@ package panel
 
 import (
 	"crypto/subtle"
+	"encoding/json"
 	"errors"
+	"sort"
 	"strings"
 	"time"
 
@@ -33,6 +35,21 @@ const (
 	ApiTokenScopeRead = "read"
 )
 
+// These capability names are stable API contract values. A token with an
+// explicit list uses least privilege; a legacy empty list continues to honor
+// its established full/read behavior after an upgrade.
+var knownTokenPermissions = map[string]struct{}{
+	"clients:read": {}, "clients:write": {},
+	"inbounds:read": {}, "inbounds:write": {},
+	"nodes:read": {}, "nodes:write": {},
+	"resellers:read": {}, "resellers:write": {},
+	"server:read": {}, "server:write": {},
+	"xray:read": {}, "xray:write": {},
+	"settings:read": {}, "settings:write": {},
+	"audit:read": {}, "sessions:manage": {},
+	"tokens:manage": {}, "webhooks:manage": {}, "admins:manage": {},
+}
+
 // IsReadOnlyAPIRequest reports whether the HTTP method is safe to serve to a
 // read-only token. Pure helper so the policy is unit-testable.
 func IsReadOnlyAPIRequest(method string) bool {
@@ -44,15 +61,16 @@ func IsReadOnlyAPIRequest(method string) bool {
 }
 
 type ApiTokenView struct {
-	Id         int    `json:"id" example:"2"`
-	Name       string `json:"name" example:"central-panel-a"`
-	Token      string `json:"token,omitempty" example:"new-token-string"`
-	Prefix     string `json:"prefix" example:"a1b2c3d4"`
-	Scope      string `json:"scope" example:"read"`
-	Enabled    bool   `json:"enabled" example:"true"`
-	ExpiresAt  int64  `json:"expiresAt" example:"0"`
-	LastUsedAt int64  `json:"lastUsedAt" example:"0"`
-	CreatedAt  int64  `json:"createdAt" example:"1736000000"`
+	Id         int      `json:"id" example:"2"`
+	Name       string   `json:"name" example:"central-panel-a"`
+	Token      string   `json:"token,omitempty" example:"new-token-string"`
+	Prefix     string   `json:"prefix" example:"a1b2c3d4"`
+	Scope      string   `json:"scope" example:"read"`
+	Scopes     []string `json:"scopes,omitempty" example:"[\"clients:read\"]"`
+	Enabled    bool     `json:"enabled" example:"true"`
+	ExpiresAt  int64    `json:"expiresAt" example:"0"`
+	LastUsedAt int64    `json:"lastUsedAt" example:"0"`
+	CreatedAt  int64    `json:"createdAt" example:"1736000000"`
 }
 
 // NormalizeTokenScope maps any accepted scope spelling to its canonical
@@ -69,11 +87,13 @@ func NormalizeTokenScope(scope string) string {
 // exactly once at creation time.
 func toView(t *model.ApiToken) *ApiTokenView {
 	scope := NormalizeTokenScope(t.Scope)
+	permissions, _ := tokenPermissions(t)
 	return &ApiTokenView{
 		Id:         t.Id,
 		Name:       t.Name,
 		Prefix:     t.Prefix,
 		Scope:      scope,
+		Scopes:     permissions,
 		Enabled:    t.Enabled,
 		ExpiresAt:  t.ExpiresAt,
 		LastUsedAt: t.LastUsedAt,
@@ -103,6 +123,23 @@ func (s *ApiTokenService) Create(name string) (*ApiTokenView, error) {
 // CreateWithOptions generates a new token. scope is one of the ApiTokenScope*
 // values (empty means full); expireDays of 0 means the token never expires.
 func (s *ApiTokenService) CreateWithOptions(name string, scope string, expireDays int) (*ApiTokenView, error) {
+	return s.create(name, scope, nil, expireDays)
+}
+
+// CreateWithPermissions mints a least-privilege token. Explicit permissions
+// are additive schema data; old consumers can continue using Scope unchanged.
+func (s *ApiTokenService) CreateWithPermissions(name string, permissions []string, expireDays int) (*ApiTokenView, error) {
+	permissions, err := normalizeTokenPermissions(permissions)
+	if err != nil {
+		return nil, err
+	}
+	if len(permissions) == 0 {
+		return nil, common.NewError("at least one permission is required")
+	}
+	return s.create(name, ApiTokenScopeFull, permissions, expireDays)
+}
+
+func (s *ApiTokenService) create(name string, scope string, permissions []string, expireDays int) (*ApiTokenView, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return nil, common.NewError("token name is required")
@@ -122,11 +159,20 @@ func (s *ApiTokenService) CreateWithOptions(name string, scope string, expireDay
 		return nil, common.NewError("a token with that name already exists")
 	}
 	plaintext := random.Seq(apiTokenLength)
+	var encodedPermissions string
+	if len(permissions) > 0 {
+		encoded, err := json.Marshal(permissions)
+		if err != nil {
+			return nil, err
+		}
+		encodedPermissions = string(encoded)
+	}
 	row := &model.ApiToken{
 		Name:    name,
 		Token:   crypto.HashTokenSHA256(plaintext),
 		Prefix:  plaintext[:apiTokenPrefixLen],
 		Scope:   NormalizeTokenScope(scope),
+		Scopes:  encodedPermissions,
 		Enabled: true,
 	}
 	if expireDays > 0 {
@@ -204,4 +250,89 @@ func (s *ApiTokenService) Authenticate(presented string) (*model.ApiToken, bool)
 func (s *ApiTokenService) Match(presented string) bool {
 	_, ok := s.Authenticate(presented)
 	return ok
+}
+
+func normalizeTokenPermissions(in []string) ([]string, error) {
+	out := make([]string, 0, len(in))
+	seen := make(map[string]struct{}, len(in))
+	for _, permission := range in {
+		permission = strings.ToLower(strings.TrimSpace(permission))
+		if _, ok := knownTokenPermissions[permission]; !ok {
+			return nil, common.NewError("unknown token permission: " + permission)
+		}
+		if _, exists := seen[permission]; !exists {
+			seen[permission] = struct{}{}
+			out = append(out, permission)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// tokenPermissions distinguishes legacy (empty storage) from malformed new
+// values. A malformed explicit list fails closed rather than silently becoming
+// a full-access token.
+func tokenPermissions(token *model.ApiToken) ([]string, bool) {
+	if strings.TrimSpace(token.Scopes) == "" {
+		return nil, true
+	}
+	var raw []string
+	if err := json.Unmarshal([]byte(token.Scopes), &raw); err != nil {
+		return nil, false
+	}
+	permissions, err := normalizeTokenPermissions(raw)
+	return permissions, err == nil
+}
+
+// TokenAllowsRequest enforces granular API capabilities. Legacy tokens still
+// use Scope below, preserving all pre-upgrade automation exactly as before.
+func TokenAllowsRequest(token *model.ApiToken, method, path string) bool {
+	permissions, valid := tokenPermissions(token)
+	if !valid {
+		return false
+	}
+	if len(permissions) == 0 {
+		return NormalizeTokenScope(token.Scope) != ApiTokenScopeRead || IsReadOnlyAPIRequest(method)
+	}
+	needed := permissionForRequest(method, path)
+	for _, granted := range permissions {
+		if granted == needed {
+			return true
+		}
+	}
+	return false
+}
+
+func permissionForRequest(method, path string) string {
+	action := "write"
+	if IsReadOnlyAPIRequest(method) {
+		action = "read"
+	}
+	path = strings.ToLower(path)
+	switch {
+	case strings.Contains(path, "/setting/apitokens"):
+		return "tokens:manage"
+	case strings.Contains(path, "/setting/admins"):
+		return "admins:manage"
+	case strings.Contains(path, "/setting/sessions"):
+		return "sessions:manage"
+	case strings.Contains(path, "/setting/webhooks"):
+		return "webhooks:manage"
+	case strings.Contains(path, "/setting/auditlogs"):
+		return "audit:read"
+	case strings.Contains(path, "/clients"):
+		return "clients:" + action
+	case strings.Contains(path, "/inbounds"):
+		return "inbounds:" + action
+	case strings.Contains(path, "/nodes"):
+		return "nodes:" + action
+	case strings.Contains(path, "/reseller"):
+		return "resellers:" + action
+	case strings.Contains(path, "/server"), strings.Contains(path, "/openvpn"):
+		return "server:" + action
+	case strings.Contains(path, "/xray"):
+		return "xray:" + action
+	default:
+		return "settings:" + action
+	}
 }

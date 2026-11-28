@@ -189,3 +189,43 @@ func TestPruneOrphanedClientInboundsPreservesResellerEvidence(t *testing.T) {
 		}
 	}
 }
+
+// Security Phase A migrations are additive. This simulates an older database
+// without the new tables, then verifies an update retains the existing admin
+// row and only creates the supplementary security state.
+func TestSecurityPhaseAUpgradeIsAdditiveForExistingAdmin(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XUI_DB_FOLDER", dir)
+	path := filepath.Join(dir, "x-ui.db")
+	if err := InitDB(path); err != nil {
+		t.Fatal(err)
+	}
+	original := model.User{Username: "upgrade-admin", Password: "preexisting-bcrypt", Role: "superadmin", LoginEpoch: 42, Disabled: false}
+	if err := GetDB().Create(&original).Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []any{&model.InitialSetup{}, &model.LoginProtection{}, &model.UserSession{}, &model.RecoveryCode{}, &model.WebhookSubscription{}, &model.WebhookDelivery{}} {
+		if err := GetDB().Migrator().DropTable(table); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := CloseDB(); err != nil {
+		t.Fatal(err)
+	}
+	if err := InitDB(path); err != nil {
+		t.Fatalf("upgrade InitDB: %v", err)
+	}
+	t.Cleanup(func() { _ = CloseDB() })
+	var got model.User
+	if err := GetDB().First(&got, original.Id).Error; err != nil {
+		t.Fatal(err)
+	}
+	if got.Username != original.Username || got.Password != original.Password || got.LoginEpoch != original.LoginEpoch || got.Disabled != original.Disabled {
+		t.Fatalf("upgrade changed existing administrator: got %#v", got)
+	}
+	for _, table := range []any{&model.InitialSetup{}, &model.LoginProtection{}, &model.UserSession{}, &model.RecoveryCode{}, &model.WebhookSubscription{}, &model.WebhookDelivery{}} {
+		if !GetDB().Migrator().HasTable(table) {
+			t.Fatalf("security migration failed to add %T", table)
+		}
+	}
+}

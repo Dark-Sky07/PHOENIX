@@ -1285,6 +1285,14 @@ prompt_and_setup_ssl() {
 
 config_after_install() {
     local existing_hasDefaultCredential=$(${xui_folder}/x-ui setting -show true | grep -Eo 'hasDefaultCredential: .+' | awk '{print $2}')
+    local existing_hasUser=$(${xui_folder}/x-ui setting -show true | grep -Eo 'hasUser: .+' | awk '{print $2}')
+    # A fresh Phase-A install intentionally has no user yet. It still needs
+    # the same port/base-path/database setup as a legacy fresh install, but
+    # the first admin is created only through the one-time setup screen.
+    local fresh_bootstrap="false"
+    if [[ "$existing_hasUser" != "true" ]]; then
+        fresh_bootstrap="true"
+    fi
     local existing_webBasePath=$(${xui_folder}/x-ui setting -show true | grep -Eo 'webBasePath: .+' | awk '{print $2}' | sed 's#^/##')
     local existing_port=$(${xui_folder}/x-ui setting -show true | grep -Eo 'port: .+' | awk '{print $2}')
     # Properly detect empty cert by checking if cert: line exists and has content after it
@@ -1321,10 +1329,10 @@ config_after_install() {
     fi
 
     if [[ ${#existing_webBasePath} -lt 4 ]]; then
-        if [[ "$existing_hasDefaultCredential" == "true" ]]; then
+        if [[ "$existing_hasDefaultCredential" == "true" || "$fresh_bootstrap" == "true" ]]; then
             local config_webBasePath=$(gen_random_string 18)
-            local config_username=$(gen_random_string 10)
-            local config_password=$(gen_random_string 10)
+            local config_username=$(gen_random_string 24)
+            local config_password=$(gen_random_string 24)
 
             local db_label="SQLite (/etc/x-ui/x-ui.db)"
             echo ""
@@ -1431,7 +1439,14 @@ EOF
                 echo -e "${yellow}Generated random port: ${config_port}${plain}"
             fi
 
-            ${xui_folder}/x-ui setting -username "${config_username}" -password "${config_password}" -port "${config_port}" -webBasePath "${config_webBasePath}"
+            if [[ "$fresh_bootstrap" == "true" ]]; then
+                # Do not smuggle a shared/default credential back in through
+                # the installer. Starting the panel creates the 0600 local
+                # setup token consumed by /setup.
+                ${xui_folder}/x-ui setting -port "${config_port}" -webBasePath "${config_webBasePath}"
+            else
+                ${xui_folder}/x-ui setting -username "${config_username}" -password "${config_password}" -port "${config_port}" -webBasePath "${config_webBasePath}"
+            fi
 
             echo ""
             echo -e "${green}═══════════════════════════════════════════${plain}"
@@ -1452,13 +1467,22 @@ EOF
             echo -e "${green}═══════════════════════════════════════════${plain}"
             echo -e "${green}     Panel Installation Complete!         ${plain}"
             echo -e "${green}═══════════════════════════════════════════${plain}"
-            echo -e "${green}Username:    ${config_username}${plain}"
-            echo -e "${green}Password:    ${config_password}${plain}"
+            if [[ "$fresh_bootstrap" == "true" ]]; then
+                echo -e "${green}First administrator: create it at /setup with the one-time local token${plain}"
+            else
+                echo -e "${green}Username:    ${config_username}${plain}"
+                echo -e "${green}Password:    ${config_password}${plain}"
+            fi
             echo -e "${green}Port:        ${config_port}${plain}"
             echo -e "${green}WebBasePath: ${config_webBasePath}${plain}"
             echo -e "${green}Database:    ${db_label}${plain}"
             echo -e "${green}Access URL:  ${SSL_SCHEME}://${SSL_HOST}:${config_port}/${config_webBasePath}${plain}"
-            echo -e "${green}API Token:   ${config_apiToken}${plain}"
+            if [[ "$fresh_bootstrap" == "true" ]]; then
+                echo -e "${yellow}On this server run: sudo cat /etc/x-ui/initial-setup-token${plain}"
+                echo -e "${yellow}Enter that token at: ${SSL_SCHEME}://${SSL_HOST}:${config_port}/${config_webBasePath}/setup${plain}"
+            else
+                echo -e "${green}API Token:   ${config_apiToken}${plain}"
+            fi
             echo -e "${green}═══════════════════════════════════════════${plain}"
             echo -e "${yellow}⚠ IMPORTANT: Save these credentials securely!${plain}"
             if [[ "$SSL_SCHEME" == "https" ]]; then
@@ -1518,8 +1542,8 @@ EOF
         fi
     else
         if [[ "$existing_hasDefaultCredential" == "true" ]]; then
-            local config_username=$(gen_random_string 10)
-            local config_password=$(gen_random_string 10)
+            local config_username=$(gen_random_string 24)
+            local config_password=$(gen_random_string 24)
 
             echo -e "${yellow}Default credentials detected. Security update required...${plain}"
             ${xui_folder}/x-ui setting -username "${config_username}" -password "${config_password}"

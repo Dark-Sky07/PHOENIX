@@ -311,6 +311,7 @@ export interface ApiTokenView {
   name: string;
   prefix: string;
   scope: string;
+  scopes?: string[];
   token?: string;
 }
 

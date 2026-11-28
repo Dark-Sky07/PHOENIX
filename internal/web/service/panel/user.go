@@ -2,6 +2,7 @@ package panel
 
 import (
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/Dark-Sky07/phoenix/internal/database"
@@ -9,6 +10,7 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/logger"
 	"github.com/Dark-Sky07/phoenix/internal/util/crypto"
 	ldaputil "github.com/Dark-Sky07/phoenix/internal/util/ldap"
+	"github.com/Dark-Sky07/phoenix/internal/util/random"
 	"github.com/Dark-Sky07/phoenix/internal/web/service"
 	"github.com/xlzd/gotp"
 	"gorm.io/gorm"
@@ -97,7 +99,11 @@ func (s *UserService) CheckUser(username string, password string, twoFactorCode 
 		}
 
 		if gotp.NewDefaultTOTP(twoFactorToken).Now() != twoFactorCode {
-			return nil, errors.New("invalid 2fa code")
+			// Recovery codes are high-entropy, per-admin, and atomically
+			// consumed. They are checked only after the password succeeds.
+			if !consumeRecoveryCode(user.Id, twoFactorCode) {
+				return nil, errors.New("invalid 2fa code")
+			}
 		}
 	}
 
@@ -173,4 +179,42 @@ func (s *UserService) UpdateFirstUser(username string, password string) error {
 	user.Password = hashedPassword
 	user.LoginEpoch++
 	return db.Save(user).Error
+}
+
+const recoveryCodeCount = 10
+
+// GenerateRecoveryCodes invalidates the caller's previous unused recovery
+// codes and returns new values exactly once. Only SHA-256 digests are stored.
+func (s *UserService) GenerateRecoveryCodes(userID int) ([]string, error) {
+	if userID <= 0 {
+		return nil, errors.New("invalid user")
+	}
+	db := database.GetDB()
+	codes := make([]string, recoveryCodeCount)
+	rows := make([]model.RecoveryCode, recoveryCodeCount)
+	for i := range codes {
+		codes[i] = random.NumLower(20)
+		rows[i] = model.RecoveryCode{UserID: userID, CodeHash: crypto.HashTokenSHA256(codes[i])}
+	}
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("user_id = ? AND used_at = ?", userID, 0).Delete(&model.RecoveryCode{}).Error; err != nil {
+			return err
+		}
+		return tx.Create(&rows).Error
+	}); err != nil {
+		return nil, err
+	}
+	return codes, nil
+}
+
+func consumeRecoveryCode(userID int, code string) bool {
+	code = strings.TrimSpace(strings.ToLower(code))
+	if userID <= 0 || code == "" {
+		return false
+	}
+	now := time.Now().UnixMilli()
+	result := database.GetDB().Model(&model.RecoveryCode{}).
+		Where("user_id = ? AND code_hash = ? AND used_at = ?", userID, crypto.HashTokenSHA256(code), 0).
+		Update("used_at", now)
+	return result.Error == nil && result.RowsAffected == 1
 }

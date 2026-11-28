@@ -159,7 +159,7 @@ The installer takes care of everything:
 5. keeps an existing database/settings when upgrading, and
 6. restarts the panel and prints the access URL.
 
-Defaults: port **2053**, login **admin / admin** — change both right after your first login.
+Default port is **2053**. New direct/manual installations never create a shared `admin/admin` account: open the panel's `/setup` page and enter the one-time token stored locally in `/etc/x-ui/initial-setup-token` (mode `0600`). The official installer prints the exact `/setup` URL and the local command to read that protected token. Existing administrator accounts are preserved unchanged during updates.
 
 ### Managing the panel
 
@@ -229,7 +229,7 @@ and a defined set of quotas — while the admin keeps full control over everythi
 
 ```mermaid
 flowchart LR
-    A[Admin panel<br/>admin / admin] -->|assign inbounds| B[Reseller: ali]
+    A[Admin panel] -->|assign inbounds| B[Reseller: ali]
     A -->|assign single clients| B
     A -->|quotas: traffic · clients · inbounds| B
     A -->|price per GB · deposit| B
@@ -415,8 +415,7 @@ are the authoritative references.
 - Go and frontend dependencies are pinned by `go.mod` and `frontend/package-lock.json`, but security patches
   are applied when advisories affect shipped code. CI runs `govulncheck` and `npm audit` as blocking checks; do
   not publish a release while either check reports an unresolved vulnerability without a documented exception.
-- Keep the panel on a private port or behind a VPN/HTTPS reverse proxy, change the default `admin/admin` login,
-  and rotate reseller passwords from the **Resellers** page whenever one is shared with too many people.
+- Keep the panel on a private port or behind a VPN/HTTPS reverse proxy. On a manual fresh installation, read the short-lived first-admin token only from `/etc/x-ui/initial-setup-token`; never paste it in tickets or logs. Rotate reseller passwords from the **Resellers** page whenever one is shared with too many people.
 
 ## Credits & License
 

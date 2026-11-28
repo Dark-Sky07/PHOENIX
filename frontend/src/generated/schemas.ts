@@ -1462,6 +1462,15 @@ export const SCHEMAS: Record<string, unknown> = {
         "example": "read",
         "type": "string"
       },
+      "scopes": {
+        "example": [
+          "clients:read"
+        ],
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
       "token": {
         "example": "new-token-string",
         "type": "string"

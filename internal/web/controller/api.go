@@ -46,10 +46,9 @@ func (a *APIController) checkAPIAuth(c *gin.Context) {
 	if after, ok := strings.CutPrefix(auth, "Bearer "); ok {
 		tok := after
 		if token, ok := a.apiTokenService.Authenticate(tok); ok {
-			// Read-only tokens may query but never mutate: every write goes
-			// through a non-safe method, so the scope is enforced right here
-			// for the whole /panel/api surface.
-			if panel.NormalizeTokenScope(token.Scope) == panel.ApiTokenScopeRead && !panel.IsReadOnlyAPIRequest(c.Request.Method) {
+			// Explicit granular permissions are checked for every route. Empty
+			// Scopes preserves the established legacy full/read behavior.
+			if !panel.TokenAllowsRequest(token, c.Request.Method, c.Request.URL.Path) {
 				c.AbortWithStatus(http.StatusForbidden)
 				return
 			}
@@ -137,7 +136,7 @@ func (a *APIController) RevokeOpenVPNClient(c *gin.Context) {
 	// is deliberately narrower: it kills live sessions and needs an explicit
 	// operator review. Do not let that synthetic principal turn a copied
 	// full-scope token into this irreversible authority.
-	if !requireInteractiveSuperAdmin(c) {
+	if !requireRecentInteractiveSuperAdmin(c) {
 		return
 	}
 	var request struct {
@@ -253,14 +252,20 @@ func (a *APIController) auditMiddleware(c *gin.Context) {
 		}
 	}
 
+	module := classifyAuditModule(relPath)
 	a.auditLogService.Record(&model.AuditLog{
 		ActorType: actorType,
 		ActorId:   actorId,
 		ActorName: actorName,
 		Action:    method + " " + relPath,
-		Module:    classifyAuditModule(relPath),
+		Module:    module,
 		Target:    strings.Join(targets, ", "),
 		IP:        getRemoteIp(c),
 		Status:    c.Writer.Status(),
 	})
+	// Never forward request bodies, credentials, or untrusted query data.
+	// The durable webhook outbox receives only this redacted audit metadata.
+	if c.Writer.Status() < http.StatusBadRequest {
+		(service.WebhookService{}).Emit("audit.mutation", map[string]any{"module": module, "method": method, "status": c.Writer.Status(), "actorType": actorType})
+	}
 }
