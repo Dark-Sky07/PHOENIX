@@ -377,6 +377,13 @@ func (s *Server) startTask(restartXray bool) {
 
 	// Outbound subscription auto-refresh (respects per-sub updateInterval)
 	s.cron.AddJob("@every 5m", job.NewOutboundSubscriptionJob())
+	// Rule-set catalogs are cached data, refreshed independently of Xray so a
+	// transient remote outage never rewrites a running configuration.
+	s.cron.AddFunc("@every 5m", func() {
+		if err := (service.RuleSetCatalogService{}).RefreshDue(time.Now()); err != nil {
+			logger.Warning("refresh rule-set catalogs failed:", err)
+		}
+	})
 	s.cron.AddJob("@every 30s", job.NewOutboundWatchdogJob())
 
 	// check client ips from log file every day

@@ -10,7 +10,8 @@ import (
 // CertRenewJob checks the configured panel certificate once a day and renews
 // it via Let's Encrypt when fewer than CertRenewBeforeDays remain.
 type CertRenewJob struct {
-	certService service.CertService
+	certService    service.CertService
+	dnsCertService service.DNSCertificateService
 }
 
 func NewCertRenewJob() *CertRenewJob {
@@ -22,4 +23,5 @@ func (j *CertRenewJob) Run() {
 	defer cancel()
 	_, _ = j.certService.RenewIfDue(ctx)
 	_ = j.certService.RenewResellerDomainsIfDue(ctx)
+	_ = j.dnsCertService.RenewIfDue(ctx)
 }

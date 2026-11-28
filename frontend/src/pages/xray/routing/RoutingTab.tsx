@@ -1,12 +1,13 @@
 import { useCallback, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Modal, Space, Table, Tabs } from 'antd';
-import { AimOutlined, ControlOutlined, FilterOutlined, PlusOutlined, UnorderedListOutlined } from '@ant-design/icons';
+import { AimOutlined, CloudSyncOutlined, ControlOutlined, FilterOutlined, PlusOutlined, UnorderedListOutlined } from '@ant-design/icons';
 
 import { catTabLabel } from '@/pages/settings/catTabLabel';
 import RoutingBasic from './RoutingBasic';
 import InboundFilters from './InboundFilters';
 import RouteTester from './RouteTester';
+import RuleSetCatalogPanel from './RuleSetCatalogPanel';
 import RuleFormModal from './RuleFormModal';
 import type { RoutingRule } from './RuleFormModal';
 import RuleCardList from './RuleCardList';
@@ -142,6 +143,13 @@ export default function RoutingTab({
   function openEdit(idx: number) {
     setEditingRule(rulesRef.current[idx]);
     setEditingIndex(idx);
+    setRuleModalOpen(true);
+  }
+  function reviewCatalogRule(kind: 'domain' | 'ip', entries: string[], _name: string) {
+    // Do not mutate the Xray template here. The regular rule form remains the
+    // explicit review/target-selection step before a catalog is applied.
+    setEditingRule({ type: 'field', [kind]: entries });
+    setEditingIndex(null);
     setRuleModalOpen(true);
   }
   function onRuleConfirm(rule: Record<string, unknown>) {
@@ -332,6 +340,11 @@ export default function RoutingTab({
             key: 'tester',
             label: catTabLabel(<AimOutlined />, t('pages.xray.routeTester'), isMobile),
             children: <RouteTester inboundTags={inboundTagOptions} isMobile={isMobile} />,
+          },
+          {
+            key: 'catalog',
+            label: catTabLabel(<CloudSyncOutlined />, 'Rule-set catalog', isMobile),
+            children: <RuleSetCatalogPanel onApply={reviewCatalogRule} />,
           },
         ]}
       />

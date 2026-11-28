@@ -71,6 +71,14 @@
   }
 }
 
+/* safety -------------------------------------------------------------- */
+
+.dash-widget-safety {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
 /* resources -------------------------------------------------------------- */
 
 .dash-resources {

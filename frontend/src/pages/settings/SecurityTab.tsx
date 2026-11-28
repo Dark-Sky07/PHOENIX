@@ -15,7 +15,7 @@ import {
   Tag,
   message,
 } from 'antd';
-import { ApiOutlined, GlobalOutlined, KeyOutlined, LaptopOutlined, SafetyOutlined, TeamOutlined, UserOutlined } from '@ant-design/icons';
+import { ApiOutlined, CloudOutlined, GlobalOutlined, KeyOutlined, LaptopOutlined, SafetyCertificateOutlined, SafetyOutlined, TeamOutlined, UserOutlined } from '@ant-design/icons';
 import { ClipboardManager, HttpUtil, RandomUtil } from '@/utils';
 import type { AllSetting } from '@/models/setting';
 import { SettingListItem } from '@/components/ui';
@@ -57,6 +57,32 @@ interface WebhookRow {
   url: string;
   events: string[];
   enabled: boolean;
+}
+
+interface DNSCertificateProfile {
+  id: number;
+  name: string;
+  domains: string[];
+  provider: 'manual' | 'cloudflare';
+  hasProviderToken: boolean;
+  email?: string;
+  applyToPanel: boolean;
+  enabled: boolean;
+  lastIssuedAt?: number;
+  lastError?: string;
+  pendingAt?: number;
+}
+
+interface OIDCConfig {
+  enabled: boolean;
+  issuer: string;
+  clientId: string;
+  hasClientSecret: boolean;
+  allowedEmailDomains: string[];
+  autoProvision: boolean;
+  defaultRole: 'viewer' | 'support' | 'admin';
+  groupClaim: string;
+  groupRoleMappings: Record<string, string>;
 }
 
 interface AdminRow {
@@ -142,6 +168,20 @@ export default function SecurityTab({ allSetting, updateSetting }: SecurityTabPr
   const [reauthPassword, setReauthPassword] = useState('');
   const [reauthCode, setReauthCode] = useState('');
   const [reauthing, setReauthing] = useState(false);
+  const [dnsProfiles, setDnsProfiles] = useState<DNSCertificateProfile[]>([]);
+  const [dnsProfilesLoading, setDnsProfilesLoading] = useState(false);
+  const [dnsName, setDnsName] = useState('');
+  const [dnsDomains, setDnsDomains] = useState('');
+  const [dnsProvider, setDnsProvider] = useState<'manual' | 'cloudflare'>('manual');
+  const [dnsToken, setDnsToken] = useState('');
+  const [dnsEmail, setDnsEmail] = useState('');
+  const [dnsChallenges, setDnsChallenges] = useState<{ record: string; value: string }[]>([]);
+  const [oidcConfig, setOidcConfig] = useState<OIDCConfig>({ enabled: false, issuer: '', clientId: '', hasClientSecret: false, allowedEmailDomains: [], autoProvision: false, defaultRole: 'viewer', groupClaim: 'groups', groupRoleMappings: {} });
+  const [oidcClientSecret, setOidcClientSecret] = useState('');
+  const [oidcClearClientSecret, setOidcClearClientSecret] = useState(false);
+  const [oidcDomains, setOidcDomains] = useState('');
+  const [oidcMappings, setOidcMappings] = useState('');
+  const [oidcSaving, setOidcSaving] = useState(false);
 
   const [admins, setAdmins] = useState<AdminRow[]>([]);
   const [adminsLoading, setAdminsLoading] = useState(false);
@@ -261,10 +301,98 @@ export default function SecurityTab({ allSetting, updateSetting }: SecurityTabPr
     }
   }, []);
 
+  const loadDNSProfiles = useCallback(async () => {
+    setDnsProfilesLoading(true);
+    try {
+      const msg = await HttpUtil.get('/panel/api/setting/cert/dns-profiles') as ApiMsg<DNSCertificateProfile[]>;
+      if (msg?.success) setDnsProfiles(Array.isArray(msg.obj) ? msg.obj : []);
+    } finally {
+      setDnsProfilesLoading(false);
+    }
+  }, []);
+
+  const loadOIDCConfig = useCallback(async () => {
+    const msg = await HttpUtil.get('/panel/api/setting/oidc') as ApiMsg<OIDCConfig>;
+    if (msg?.success && msg.obj) {
+      setOidcConfig(msg.obj);
+      setOidcClearClientSecret(false);
+      setOidcDomains((msg.obj.allowedEmailDomains || []).join(', '));
+      setOidcMappings(Object.entries(msg.obj.groupRoleMappings || {}).map(([group, role]) => `${group}=${role}`).join(', '));
+    }
+  }, []);
+
   useEffect(() => {
     void loadSessions();
     void loadWebhooks();
-  }, [loadSessions, loadWebhooks]);
+    void loadDNSProfiles();
+    void loadOIDCConfig();
+  }, [loadSessions, loadWebhooks, loadDNSProfiles, loadOIDCConfig]);
+
+  async function createDNSProfile() {
+    const domains = dnsDomains.split(',').map((value) => value.trim()).filter(Boolean);
+    if (!dnsName.trim() || !domains.length) {
+      messageApi.error('Profile name and one or more DNS names are required');
+      return;
+    }
+    const msg = await HttpUtil.post('/panel/api/setting/cert/dns-profiles', {
+      name: dnsName.trim(), domains, provider: dnsProvider, providerToken: dnsToken, email: dnsEmail.trim(), applyToPanel: true, enabled: true,
+    }) as ApiMsg<DNSCertificateProfile>;
+    if (msg?.success) {
+      setDnsName(''); setDnsDomains(''); setDnsToken(''); setDnsEmail('');
+      await loadDNSProfiles();
+    }
+  }
+
+  async function issueDNSProfile(profile: DNSCertificateProfile, complete = false) {
+    const action = complete ? 'complete' : 'issue';
+    const msg = await HttpUtil.post(`/panel/api/setting/cert/dns-profiles/${profile.id}/${action}`) as ApiMsg<{ challenges?: { record: string; value: string }[] }>;
+    if (msg?.success) {
+      setDnsChallenges(Array.isArray(msg.obj?.challenges) ? msg.obj!.challenges! : []);
+      await loadDNSProfiles();
+    }
+  }
+
+  async function deleteDNSProfile(profile: DNSCertificateProfile) {
+    const msg = await HttpUtil.post(`/panel/api/setting/cert/dns-profiles/${profile.id}/delete`) as ApiMsg;
+    if (msg?.success) await loadDNSProfiles();
+  }
+
+  function parseOIDCGroupMappings(): Record<string, string> | null {
+    const mappings: Record<string, string> = {};
+    for (const item of oidcMappings.split(',')) {
+      const entry = item.trim();
+      if (!entry) continue;
+      const [group, role, ...extra] = entry.split('=').map((value) => value.trim());
+      if (!group || !role || extra.length || !['viewer', 'support', 'admin'].includes(role)) {
+        messageApi.error('Role mappings must use group=viewer, group=support, or group=admin');
+        return null;
+      }
+      mappings[group] = role;
+    }
+    return mappings;
+  }
+
+  async function saveOIDCConfig() {
+    const groupRoleMappings = parseOIDCGroupMappings();
+    if (groupRoleMappings == null) return;
+    setOidcSaving(true);
+    try {
+      const msg = await HttpUtil.post('/panel/api/setting/oidc', {
+        ...oidcConfig,
+        clientSecret: oidcClientSecret,
+        clearClientSecret: oidcClearClientSecret,
+        allowedEmailDomains: oidcDomains.split(',').map((value) => value.trim()).filter(Boolean),
+        groupRoleMappings,
+      }) as ApiMsg<OIDCConfig>;
+      if (msg?.success && msg.obj) {
+        setOidcConfig(msg.obj);
+        setOidcClientSecret('');
+        setOidcClearClientSecret(false);
+      }
+    } finally {
+      setOidcSaving(false);
+    }
+  }
 
   async function revokeSession(row: SessionRow) {
     const msg = await HttpUtil.post(`/panel/api/setting/sessions/revoke/${row.id}`) as ApiMsg;
@@ -730,6 +858,56 @@ export default function SecurityTab({ allSetting, updateSetting }: SecurityTabPr
             </div>
           ),
         },
+        {
+          key: '7',
+          label: catTabLabel(<SafetyCertificateOutlined />, 'DNS-01 certificates', isMobile),
+          children: (
+            <div className="api-token-section">
+              <p className="api-token-hint">Issue wildcard certificates without opening port 80. Manual TXT works with every DNS provider; Cloudflare API tokens enable automatic issue and renewal. Confirm sensitive actions first.</p>
+              <Space direction="vertical" style={{ width: '100%' }}>
+                <Input value={dnsName} placeholder="Profile name" onChange={(event) => setDnsName(event.target.value)} />
+                <Input value={dnsDomains} placeholder="example.com, *.example.com" onChange={(event) => setDnsDomains(event.target.value)} />
+                <Select value={dnsProvider} onChange={setDnsProvider} options={[{ value: 'manual', label: 'Manual DNS TXT (any provider)' }, { value: 'cloudflare', label: 'Cloudflare API token' }]} />
+                {dnsProvider === 'cloudflare' ? <Input.Password value={dnsToken} placeholder="Cloudflare API token (DNS Edit, Zone Read)" onChange={(event) => setDnsToken(event.target.value)} /> : null}
+                <Input value={dnsEmail} placeholder="ACME account email (optional)" onChange={(event) => setDnsEmail(event.target.value)} />
+                <Button type="primary" onClick={createDNSProfile}>Save DNS certificate profile</Button>
+              </Space>
+              <Spin spinning={dnsProfilesLoading}>
+                {dnsProfiles.map((profile) => (
+                  <div key={profile.id} className="api-token-row">
+                    <div className="api-token-row-head">
+                      <div className="api-token-name-wrap"><Space wrap><span className="api-token-name">{profile.name}</span><Tag color={profile.provider === 'cloudflare' ? 'orange' : 'blue'}>{profile.provider}</Tag>{profile.applyToPanel ? <Tag color="green">Panel TLS</Tag> : null}</Space><span className="api-token-created">{profile.domains.join(', ')}{profile.lastError ? ` · ${profile.lastError}` : ''}</span></div>
+                      <div className="api-token-actions"><Button size="small" onClick={() => issueDNSProfile(profile)}>Issue / renew</Button>{profile.pendingAt ? <Button size="small" type="primary" onClick={() => issueDNSProfile(profile, true)}>Verify TXT</Button> : null}<Button size="small" danger type="text" onClick={() => deleteDNSProfile(profile)}>Delete</Button></div>
+                    </div>
+                  </div>
+                ))}
+              </Spin>
+              {dnsChallenges.length ? <div className="api-token-created-notice">Publish every TXT record below, wait for DNS propagation, then press <b>Verify TXT</b> on the profile.<br />{dnsChallenges.map((item) => <code key={`${item.record}-${item.value}`} className="api-token-value">{item.record} TXT {item.value}</code>)}</div> : null}
+            </div>
+          ),
+        },
+        {
+          key: '8',
+          label: catTabLabel(<CloudOutlined />, 'Single sign-on (OIDC)', isMobile),
+          children: (
+            <div className="api-token-section">
+              <p className="api-token-hint">Generic OpenID Connect Discovery with Authorization Code + PKCE. Works with standards-compliant providers such as Keycloak, Authentik, Google Workspace, Azure AD, and GitLab. Existing admin accounts remain available as a recovery path.</p>
+              <Space direction="vertical" style={{ width: '100%' }}>
+                <SettingListItem paddings="small" title="Enable OIDC"><Switch checked={oidcConfig.enabled} onChange={(enabled) => setOidcConfig((prev) => ({ ...prev, enabled }))} /></SettingListItem>
+                <Input value={oidcConfig.issuer} placeholder="https://id.example.com/realms/phoenix" onChange={(event) => setOidcConfig((prev) => ({ ...prev, issuer: event.target.value }))} />
+                <Input value={oidcConfig.clientId} placeholder="OIDC client ID" onChange={(event) => setOidcConfig((prev) => ({ ...prev, clientId: event.target.value }))} />
+                <Input.Password value={oidcClientSecret} placeholder={oidcConfig.hasClientSecret ? 'Leave blank to keep stored client secret' : 'OIDC client secret (optional for public PKCE clients)'} onChange={(event) => setOidcClientSecret(event.target.value)} />
+                {oidcConfig.hasClientSecret ? <SettingListItem paddings="small" title="Clear stored OIDC client secret"><Switch checked={oidcClearClientSecret} onChange={setOidcClearClientSecret} /></SettingListItem> : null}
+                <Input value={oidcDomains} placeholder="Allowed email domains, comma-separated (optional)" onChange={(event) => setOidcDomains(event.target.value)} />
+                <SettingListItem paddings="small" title="Auto-provision approved identities"><Switch checked={oidcConfig.autoProvision} onChange={(autoProvision) => setOidcConfig((prev) => ({ ...prev, autoProvision }))} /></SettingListItem>
+                <Select value={oidcConfig.defaultRole} onChange={(defaultRole) => setOidcConfig((prev) => ({ ...prev, defaultRole }))} options={['viewer', 'support', 'admin'].map((value) => ({ value, label: `Default role: ${value}` }))} />
+                <Input value={oidcConfig.groupClaim} placeholder="Group claim (for example: groups)" onChange={(event) => setOidcConfig((prev) => ({ ...prev, groupClaim: event.target.value }))} />
+                <Input value={oidcMappings} placeholder="Group role mappings: engineering=admin, helpdesk=support" onChange={(event) => setOidcMappings(event.target.value)} />
+                <Button type="primary" loading={oidcSaving} onClick={saveOIDCConfig}>Save OIDC configuration</Button>
+              </Space>
+            </div>
+          ),
+        },
       ]} />
 
       <Modal
@@ -854,7 +1032,7 @@ export default function SecurityTab({ allSetting, updateSetting }: SecurityTabPr
                 'clients:read', 'clients:write', 'inbounds:read', 'inbounds:write',
                 'nodes:read', 'nodes:write', 'resellers:read', 'resellers:write',
                 'server:read', 'server:write', 'xray:read', 'xray:write',
-                'settings:read', 'settings:write', 'audit:read',
+                'settings:read', 'settings:write', 'metrics:read', 'audit:read',
               ].map((value) => ({ value, label: value }))}
             />
           </Form.Item>

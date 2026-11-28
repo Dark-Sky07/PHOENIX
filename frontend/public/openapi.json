@@ -3009,6 +3009,10 @@
       "description": "All endpoints in this section require an interactive superadmin browser session and reject API bearer tokens. Mutating endpoints additionally require a password-confirmed recent authentication (valid for 10 minutes); call POST /reauth first when necessary."
     },
     {
+      "name": "Phase B integrations",
+      "description": "DNS-01 profiles, secure Prometheus scraping, cached routing-list catalogs, and per-administrator dashboard preferences. Certificate and catalog mutations require an interactive superadmin with recent authentication; secrets are never returned after storage."
+    },
+    {
       "name": "WebSocket",
       "description": "Real-time status updates via WebSocket. Connect once at <code>ws://<panel>/ws</code> to receive a stream of JSON messages without polling. Requires an authenticated session cookie (Bearer token auth is not supported). Each message has a <code>type</code> field that identifies the payload shape."
     }
@@ -15304,6 +15308,871 @@
         ],
         "summary": "Queue one durable delivery for a fresh retry.",
         "operationId": "post_panel_api_setting_webhooks_deliveries_id_replay",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "",
+            "schema": {
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "tags": [
+          "Phase B integrations"
+        ],
+        "summary": "Prometheus/OpenMetrics scrape endpoint. Send a Bearer token with legacy read/full access or granular metrics:read capability; responses expose only operational metrics.",
+        "operationId": "get_metrics",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/metrics": {
+      "get": {
+        "tags": [
+          "Phase B integrations"
+        ],
+        "summary": "Authenticated API alias for the Prometheus scrape endpoint; use basePath/metrics for normal Prometheus scrape configuration.",
+        "operationId": "get_panel_api_metrics",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sso/oidc/login": {
+      "get": {
+        "tags": [
+          "Phase B integrations"
+        ],
+        "summary": "Begin standards-based OIDC Authorization Code + PKCE sign-in. Redirects the browser to the configured provider.",
+        "operationId": "get_sso_oidc_login",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sso/oidc/callback": {
+      "get": {
+        "tags": [
+          "Phase B integrations"
+        ],
+        "summary": "OIDC redirect callback. Validates state, nonce, issuer, audience, expiry, and signed ID token before creating a panel session.",
+        "operationId": "get_sso_oidc_callback",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sso/oidc/status": {
+      "get": {
+        "tags": [
+          "Phase B integrations"
+        ],
+        "summary": "Return whether an administrator enabled generic OIDC sign-in, without exposing provider configuration.",
+        "operationId": "get_sso_oidc_status",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/dashboard/preference": {
+      "get": {
+        "tags": [
+          "Phase B integrations"
+        ],
+        "summary": "Return the signed-in administrator’s dashboard layout, hidden widgets, and refresh interval.",
+        "operationId": "get_panel_api_dashboard_preference",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Phase B integrations"
+        ],
+        "summary": "Save the signed-in administrator’s dashboard layout and refresh interval. Bearer tokens are refused.",
+        "operationId": "post_panel_api_dashboard_preference",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              },
+              "example": {
+                "layout": [
+                  "resources",
+                  "services",
+                  "network",
+                  "info"
+                ],
+                "hiddenWidgets": [
+                  "safety"
+                ],
+                "refreshSeconds": 5
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/dashboard/preference": {
+      "get": {
+        "tags": [
+          "Phase B integrations"
+        ],
+        "summary": "Route-registration alias for the dashboard preference read endpoint; clients should use /panel/api/dashboard/preference.",
+        "operationId": "get_dashboard_preference",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Phase B integrations"
+        ],
+        "summary": "Route-registration alias for the dashboard preference write endpoint; clients should use /panel/api/dashboard/preference.",
+        "operationId": "post_dashboard_preference",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/setting/cert/dns-profiles": {
+      "get": {
+        "tags": [
+          "Phase B integrations"
+        ],
+        "summary": "List DNS-01 certificate profiles without revealing provider credentials.",
+        "operationId": "get_panel_api_setting_cert_dns_profiles",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Phase B integrations"
+        ],
+        "summary": "Create a manual or Cloudflare DNS-01 profile. Cloudflare credentials are encrypted at rest.",
+        "operationId": "post_panel_api_setting_cert_dns_profiles",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              },
+              "example": {
+                "name": "wildcard",
+                "domains": [
+                  "example.com",
+                  "*.example.com"
+                ],
+                "provider": "cloudflare",
+                "providerToken": "shown-once",
+                "applyToPanel": true,
+                "enabled": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/setting/cert/dns-profiles/{id}": {
+      "post": {
+        "tags": [
+          "Phase B integrations"
+        ],
+        "summary": "Update a DNS-01 certificate profile. Leaving providerToken empty preserves a stored credential.",
+        "operationId": "post_panel_api_setting_cert_dns_profiles_id",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "",
+            "schema": {
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/setting/cert/dns-profiles/{id}/issue": {
+      "post": {
+        "tags": [
+          "Phase B integrations"
+        ],
+        "summary": "Issue or renew a DNS-01 certificate. Manual profiles return required _acme-challenge TXT values; Cloudflare profiles complete automatically.",
+        "operationId": "post_panel_api_setting_cert_dns_profiles_id_issue",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "",
+            "schema": {
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/setting/cert/dns-profiles/{id}/complete": {
+      "post": {
+        "tags": [
+          "Phase B integrations"
+        ],
+        "summary": "After publishing returned manual DNS TXT records, verify propagation and complete the pending ACME order.",
+        "operationId": "post_panel_api_setting_cert_dns_profiles_id_complete",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "",
+            "schema": {
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/setting/cert/dns-profiles/{id}/delete": {
+      "post": {
+        "tags": [
+          "Phase B integrations"
+        ],
+        "summary": "Delete a DNS-01 certificate profile; managed certificate files are left untouched for explicit operator review.",
+        "operationId": "post_panel_api_setting_cert_dns_profiles_id_delete",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "",
+            "schema": {
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/setting/oidc": {
+      "get": {
+        "tags": [
+          "Phase B integrations"
+        ],
+        "summary": "Return generic OIDC provider configuration without exposing the stored client secret.",
+        "operationId": "get_panel_api_setting_oidc",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Phase B integrations"
+        ],
+        "summary": "Configure or disable a standards-compliant OIDC provider, optional domain allow-list, auto-provisioning policy, and safe group-to-role mappings. Requires recent interactive superadmin authentication.",
+        "operationId": "post_panel_api_setting_oidc",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/xray/rule-sets": {
+      "get": {
+        "tags": [
+          "Phase B integrations"
+        ],
+        "summary": "List cached rule-set catalogs. Pass entries=true to include normalized, reviewable entries.",
+        "operationId": "get_panel_api_xray_rule_sets",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Phase B integrations"
+        ],
+        "summary": "Create a HTTPS-only, SSRF-protected remote domain or IP rule-set catalog.",
+        "operationId": "post_panel_api_xray_rule_sets",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              },
+              "example": {
+                "name": "private-networks",
+                "url": "https://example.com/rules.txt",
+                "kind": "ip",
+                "enabled": true,
+                "refreshMinutes": 360
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/xray/rule-sets/{id}": {
+      "get": {
+        "tags": [
+          "Phase B integrations"
+        ],
+        "summary": "Read one cached routing-list catalog and its entries.",
+        "operationId": "get_panel_api_xray_rule_sets_id",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "",
+            "schema": {
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Phase B integrations"
+        ],
+        "summary": "Update catalog metadata and refresh cadence.",
+        "operationId": "post_panel_api_xray_rule_sets_id",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "",
+            "schema": {
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Phase B integrations"
+        ],
+        "summary": "Delete one cached rule-set catalog.",
+        "operationId": "delete_panel_api_xray_rule_sets_id",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "",
+            "schema": {
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/xray/rule-sets/{id}/refresh": {
+      "post": {
+        "tags": [
+          "Phase B integrations"
+        ],
+        "summary": "Fetch, validate, normalize, and atomically replace the cached entries while retaining the last good cache on failure.",
+        "operationId": "post_panel_api_xray_rule_sets_id_refresh",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "",
+            "schema": {
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/panel/api/xray/rule-sets/{id}/del": {
+      "post": {
+        "tags": [
+          "Phase B integrations"
+        ],
+        "summary": "Axios-friendly alias for deleting one cached rule-set catalog.",
+        "operationId": "post_panel_api_xray_rule_sets_id_del",
         "parameters": [
           {
             "name": "id",

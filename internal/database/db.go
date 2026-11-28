@@ -117,6 +117,10 @@ func initModels() error {
 		&model.RecoveryCode{},
 		&model.WebhookSubscription{},
 		&model.WebhookDelivery{},
+		&model.DNSCertificateProfile{},
+		&model.RuleSetCatalog{},
+		&model.DashboardPreference{},
+		&model.OIDCProviderConfig{},
 		&model.ClientRecord{},
 		&model.ClientInbound{},
 		&model.ClientDevice{},
@@ -175,6 +179,9 @@ func initModels() error {
 			return migrateErr
 		}
 	}
+	if err := ensureOIDCIdentityIndex(); err != nil {
+		return err
+	}
 	if err := dropLegacyForeignKeys(); err != nil {
 		return err
 	}
@@ -192,6 +199,21 @@ func initModels() error {
 			log.Printf("Error resyncing postgres sequences: %v", err)
 			return err
 		}
+	}
+	return nil
+}
+
+// ensureOIDCIdentityIndex prevents one external identity from being bound to
+// two panel users. It is a partial unique index, deliberately excluding legacy
+// empty columns so an additive migration never changes existing user records.
+func ensureOIDCIdentityIndex() error {
+	if db == nil || !db.Migrator().HasTable("users") {
+		return nil
+	}
+	const query = `CREATE UNIQUE INDEX IF NOT EXISTS idx_users_oidc_identity ON users (oidc_issuer, oidc_subject) WHERE oidc_issuer <> '' AND oidc_subject <> ''`
+	if err := db.Exec(query).Error; err != nil {
+		log.Printf("Error creating OIDC identity index: %v", err)
+		return err
 	}
 	return nil
 }

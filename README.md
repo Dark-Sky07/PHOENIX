@@ -323,6 +323,7 @@ Inherited from PHOENIX v3.3.1, untouched:
 - **Built-in subscription server** with multiple output formats and [custom page templates](docs/custom-subscription-templates.md).
 - **Telegram bot** for remote monitoring and management.
 - **RESTful API** with in-panel Swagger documentation.
+- **Phase B operations** — portable DNS-01/wildcard certificates, safe cached routing rule-set catalogs, protected Prometheus metrics, customizable administrator dashboards, and OIDC SSO. See the [operations guide](docs/phase-b-operations.md).
 - **Flexible storage** — SQLite (default) or PostgreSQL.
 - **13 UI languages** with dark and light themes.
 - **Fail2ban integration** for enforcing per-client IP limits.
