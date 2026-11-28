@@ -62,6 +62,8 @@ export interface ClientQueryParams {
   hasTgId?: 'yes' | 'no' | '';
   hasComment?: 'yes' | 'no' | '';
   group?: string;
+  // Comma-separated explicit reseller ownership IDs. Admin-only.
+  reseller?: string;
 }
 
 const DEFAULT_QUERY: ClientQueryParams = { page: 1, pageSize: 25 };
@@ -123,6 +125,7 @@ function buildQS(p: ClientQueryParams): string {
   if (p.hasTgId) sp.set('hasTgId', p.hasTgId);
   if (p.hasComment) sp.set('hasComment', p.hasComment);
   if (p.group) sp.set('group', p.group);
+  if (p.reseller) sp.set('reseller', p.reseller);
   return sp.toString();
 }
 
@@ -185,6 +188,7 @@ export function useClients() {
         && (prev.hasTgId ?? '') === (next.hasTgId ?? '')
         && (prev.hasComment ?? '') === (next.hasComment ?? '')
         && (prev.group ?? '') === (next.group ?? '')
+        && (prev.reseller ?? '') === (next.reseller ?? '')
       ) return prev;
       return next;
     });
@@ -238,13 +242,20 @@ export function useClients() {
 
   const ownership = useMemo(() => {
     const byEmail = new Map<string, string>();
+    const options: { id: number; label: string }[] = [];
     for (const a of ownershipQuery.data ?? []) {
-      const label = a.name || a.username || `#${a.resellerId}`;
+      const name = a.name?.trim() || '';
+      const username = a.username?.trim() || '';
+      const label = name
+        ? (username && username !== name ? `${name} (@${username})` : name)
+        : (username || `#${a.resellerId}`);
+      options.push({ id: a.resellerId, label });
       for (const email of a.emails ?? []) {
         byEmail.set(email.trim().toLowerCase(), label);
       }
     }
-    return { byEmail };
+    options.sort((a, b) => a.label.localeCompare(b.label) || a.id - b.id);
+    return { byEmail, options };
   }, [ownershipQuery.data]);
 
   /**
@@ -584,6 +595,7 @@ export function useClients() {
     allGroups,
     hydrate,
     ownerOf,
+    resellerOptions: ownership.options,
     query,
     setQuery,
     inbounds,

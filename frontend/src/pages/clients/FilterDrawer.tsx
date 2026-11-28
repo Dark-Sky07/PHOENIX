@@ -31,6 +31,8 @@ interface FilterDrawerProps {
   protocols: string[];
   groups: string[];
   nodes: NodeRecord[];
+  // Admin-only explicit reseller ownership options.
+  resellers: { id: number; label: string }[];
 }
 
 const BUCKET_KEYS = ['active', 'expiring', 'depleted', 'deactive', 'online'] as const;
@@ -44,6 +46,7 @@ export default function FilterDrawer({
   protocols,
   groups,
   nodes,
+  resellers,
 }: FilterDrawerProps) {
   const { t } = useTranslation();
 
@@ -67,6 +70,11 @@ export default function FilterDrawer({
   const groupOptions = useMemo(
     () => groups.map((g) => ({ value: g, label: g })),
     [groups],
+  );
+
+  const resellerOptions = useMemo(
+    () => resellers.map((reseller) => ({ value: reseller.id, label: reseller.label })),
+    [resellers],
   );
 
   // 0 is the "local panel" sentinel (inbounds without a nodeId) — see
@@ -176,6 +184,23 @@ export default function FilterDrawer({
             listHeight={220}
           />
         </Form.Item>
+
+        {resellerOptions.length > 0 && (
+          <Form.Item label={t('resellers.reseller')}>
+            <Select
+              mode="multiple"
+              value={filters.resellerIds}
+              onChange={(v) => patch('resellerIds', v as number[])}
+              options={resellerOptions}
+              placeholder={t('resellers.reseller')}
+              maxTagCount="responsive"
+              allowClear
+              showSearch
+              optionFilterProp="label"
+              listHeight={220}
+            />
+          </Form.Item>
+        )}
 
         <Form.Item label={t('pages.clients.expiryTime')}>
           <DatePicker.RangePicker

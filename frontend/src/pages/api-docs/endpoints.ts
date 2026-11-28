@@ -623,6 +623,7 @@ export const sections: readonly Section[] = [
           { name: 'search', in: 'query', type: 'string', desc: 'Case-insensitive substring match on email / subId / comment.' },
           { name: 'filter', in: 'query', type: 'string', desc: 'Status bucket: online | active | deactive | depleted | expiring.' },
           { name: 'protocol', in: 'query', type: 'string', desc: 'Match clients attached to at least one inbound of this protocol (vless, vmess, trojan, shadowsocks, ...).' },
+          { name: 'reseller', in: 'query', type: 'string', optional: true, desc: 'Admin-only comma-separated reseller IDs. Matches only explicit reseller-client ownership mappings, never inbound assignment.' },
           { name: 'sort', in: 'query', type: 'string', desc: 'Sort key: enable | email | inboundIds | traffic | remaining | expiryTime.' },
           { name: 'order', in: 'query', type: 'string', desc: 'ascend or descend.' },
         ],
