@@ -274,6 +274,10 @@ func (s *Server) initRouter() (*gin.Engine, error) {
 	g.GET("/panel/reseller-signup", controller.PublicPanelSPA)
 	g.GET("/panel/reseller-deposit", controller.PublicPanelSPA)
 	s.api = controller.NewAPIController(g)
+	// Agents authenticate with their own one-time/rotating credentials and are
+	// deliberately outside browser session and CSRF middleware. The endpoint is
+	// outbound-only from the node; legacy node polling remains untouched.
+	controller.NewFleetAgentController(g)
 
 	// Initialize WebSocket hub
 	s.wsHub = websocket.NewHub()

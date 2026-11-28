@@ -115,6 +115,10 @@ func (a *APIController) initRouter(g *gin.RouterGroup) {
 	nodes := api.Group("/nodes")
 	a.nodeController = NewNodeController(nodes)
 
+	// Phase C fleet control plane. It remains fully opt-in: creating a
+	// template or enrollment is required before any node agent gets state.
+	NewFleetController(api.Group("/fleet"))
+
 	// Settings + Xray config management live under the API surface too, so the
 	// same API token drives them. Paths are /panel/api/setting/* and
 	// /panel/api/xray/*.

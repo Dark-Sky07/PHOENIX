@@ -2141,6 +2141,33 @@ export const sections: readonly Section[] = [
   },
 
   {
+    id: 'phase-c-fleet',
+    title: 'Phase C fleet control plane',
+    description: 'Opt-in outbound Node Agent enrollment, immutable fleet template revisions, explicit staged deployment/rollback, and provider-neutral managed tunnel contracts. Read endpoints work for authenticated administrators. Every mutation requires a recently reauthenticated interactive superadmin; copied API bearer tokens are refused. Bootstrap and rotating agent credentials are returned exactly once and are never returned by reads.',
+    endpoints: [
+      { method: 'GET', path: '/panel/api/fleet/templates', summary: 'List opt-in fleet templates and their current revisions.' },
+      { method: 'GET', path: '/panel/api/fleet/templates/:id', summary: 'Read one template with its immutable revision history and canonical desired-state documents.', params: [{ name: 'id', in: 'path', type: 'number' }] },
+      { method: 'POST', path: '/panel/api/fleet/templates', summary: 'Create an enabled fleet template at immutable revision 1. The document only permits labels, inbound-sync policy, and managed-tunnel IDs.', body: '{ "name": "de-fra-edge", "description": "Frankfurt edge", "document": { "schemaVersion": 1, "labels": { "region": "de-fra" }, "node": { "inboundSyncMode": "all" }, "managedTunnelIds": [] } }' },
+      { method: 'POST', path: '/panel/api/fleet/templates/:id/disable', summary: 'Pause or resume desired-state delivery from a template without mutating its immutable revision history.', params: [{ name: 'id', in: 'path', type: 'number' }], body: '{ "enabled": false }' },
+      { method: 'POST', path: '/panel/api/fleet/templates/:id/revisions', summary: 'Append a new immutable canonical configuration revision. Creating a revision does not deploy it.', params: [{ name: 'id', in: 'path', type: 'number' }] },
+      { method: 'POST', path: '/panel/api/fleet/templates/:id/deploy', summary: 'Stage one existing revision to an explicit canary/cohort list of enabled enrollments. No implicit all-node rollout occurs.', params: [{ name: 'id', in: 'path', type: 'number' }], body: '{ "revision": 2, "enrollmentIds": [4, 9] }' },
+      { method: 'POST', path: '/panel/api/fleet/templates/:id/rollback', summary: 'Explicitly target a prior immutable revision to selected enrolled agents; it uses the same safe staged machinery as deploy.', params: [{ name: 'id', in: 'path', type: 'number' }], body: '{ "revision": 1, "enrollmentIds": [4] }' },
+      { method: 'GET', path: '/panel/api/fleet/pools', summary: 'List reusable fleet cohorts, optional template bindings, and their enrollment IDs.' },
+      { method: 'POST', path: '/panel/api/fleet/pools', summary: 'Create a reusable canary or regional pool. Bind templateId to reject accidental deployments of a different template.', body: '{ "name": "fra-canary", "templateId": 2, "enrollmentIds": [4, 9], "enabled": true }' },
+      { method: 'POST', path: '/panel/api/fleet/pools/:id', summary: 'Replace a pool’s membership/binding and enabled state.', params: [{ name: 'id', in: 'path', type: 'number' }] },
+      { method: 'POST', path: '/panel/api/fleet/pools/:id/delete', summary: 'Delete a fleet cohort without deleting its agents, assignments, template history, or legacy nodes.', params: [{ name: 'id', in: 'path', type: 'number' }] },
+      { method: 'GET', path: '/panel/api/fleet/enrollments', summary: 'List fleet agent enrollment health, non-secret capability metadata, credential expiry, and desired/applied assignment state.' },
+      { method: 'POST', path: '/panel/api/fleet/enrollments', summary: 'Create a one-time outbound Agent bootstrap enrollment. Optionally link it to an existing legacy node without changing the node transport. The bootstrap token is returned once.', body: '{ "name": "fra-agent-1", "nodeId": 3 }' },
+      { method: 'POST', path: '/panel/api/fleet/enrollments/:id/rotate', summary: 'Rotate a live agent credential and return the replacement once. The current agent must be updated before its next check-in.', params: [{ name: 'id', in: 'path', type: 'number' }] },
+      { method: 'POST', path: '/panel/api/fleet/enrollments/:id/disable', summary: 'Disable or re-enable an enrollment. Disabled agents receive no desired state.', params: [{ name: 'id', in: 'path', type: 'number' }], body: '{ "enabled": false }' },
+      { method: 'GET', path: '/panel/api/fleet/tunnels', summary: 'List provider-neutral managed tunnel endpoint contracts without exposing provider configuration.' },
+      { method: 'POST', path: '/panel/api/fleet/tunnels', summary: 'Create a managed tunnel endpoint. Target hosts are limited to localhost/private IPs and providerConfig is encrypted at rest.', body: '{ "name": "app-public", "provider": "cloudflared", "publicHostname": "app.example.com", "targetHost": "127.0.0.1", "targetPort": 3000, "protocol": "http", "providerConfig": { "token": "shown-only-to-assigned-agent" }, "enabled": true }' },
+      { method: 'POST', path: '/panel/api/fleet/tunnels/:id', summary: 'Update an endpoint contract. Omit providerConfig to retain a stored encrypted provider configuration.', params: [{ name: 'id', in: 'path', type: 'number' }] },
+      { method: 'POST', path: '/panel/api/fleet/tunnels/:id/delete', summary: 'Delete an unused managed tunnel endpoint contract.', params: [{ name: 'id', in: 'path', type: 'number' }] },
+    ],
+  },
+
+  {
     id: 'phase-b-integrations',
     title: 'Phase B integrations',
     description: 'DNS-01 profiles, secure Prometheus scraping, cached routing-list catalogs, and per-administrator dashboard preferences. Certificate and catalog mutations require an interactive superadmin with recent authentication; secrets are never returned after storage.',
