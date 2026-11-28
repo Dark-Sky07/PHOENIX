@@ -110,6 +110,17 @@ func initModels() error {
 		&xray.ClientTraffic{},
 		&model.HistoryOfSeeders{},
 		&model.Node{},
+		// Phase C fleet models are additive and intentionally independent from
+		// legacy nodes. Existing direct-node installations do not opt into the
+		// outbound agent control plane merely by upgrading.
+		&model.FleetTemplate{},
+		&model.FleetTemplateRevision{},
+		&model.FleetAgentEnrollment{},
+		&model.FleetAssignment{},
+		&model.FleetPool{},
+		&model.FleetPoolMember{},
+		&model.FleetAgentTunnelStatus{},
+		&model.ManagedTunnel{},
 		&model.ApiToken{},
 		&model.InitialSetup{},
 		&model.LoginProtection{},
