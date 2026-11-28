@@ -97,50 +97,6 @@ func isConcurrentSchemaChangeErr(err error) bool {
 	return false
 }
 
-// A second panel process, migrate CLI or old service still shutting down can
-// race GORM's first CREATE TYPE/INDEX during AutoMigrate. PostgreSQL reports
-// that race as SQLSTATE 23505 on pg_type/pg_index. Serialize schema migration
-// across processes on a session advisory lock; the lock is distinct from the
-// traffic-allocation key used by the quota path.
-const schemaMigrationAdvisoryKey int64 = 0x50484f454e4959
-
-func withPostgresSchemaMigrationLock(pool *sql.DB, migrate func() error) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	conn, err := pool.Conn(ctx)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, "SELECT pg_advisory_lock($1)", schemaMigrationAdvisoryKey); err != nil {
-		return err
-	}
-	defer func() {
-		_, _ = conn.ExecContext(context.Background(), "SELECT pg_advisory_unlock($1)", schemaMigrationAdvisoryKey)
-	}()
-	return migrate()
-}
-
-// isConcurrentSchemaChangeErr identifies the PostgreSQL catalog race GORM can
-// hit when two processes migrate the same fresh schema. It does not hide real
-// duplicate data or constraint violations in tables.
-func isConcurrentSchemaChangeErr(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	if !strings.Contains(msg, "sqlstate 23505") &&
-		!strings.Contains(msg, "duplicate key value violates unique constraint") {
-		return false
-	}
-	for _, catalog := range []string{"pg_type_", "pg_index", "pg_class", "pg_constraint", "pg_namespace"} {
-		if strings.Contains(msg, catalog) {
-			return true
-		}
-	}
-	return false
-}
-
 func initModels() error {
 	if err := dropLegacyResellerInboundUniqueIndex(); err != nil {
 		return err
