@@ -157,6 +157,9 @@ function readFilterState(): PersistedFilterState {
         inboundIds: Array.isArray(fromRaw.inboundIds) ? fromRaw.inboundIds : [],
         nodeIds: Array.isArray(fromRaw.nodeIds) ? fromRaw.nodeIds : [],
         groups: Array.isArray(fromRaw.groups) ? fromRaw.groups : [],
+        resellerIds: Array.isArray(fromRaw.resellerIds)
+          ? fromRaw.resellerIds.filter((id): id is number => typeof id === 'number' && id > 0)
+          : [],
       },
       sort: typeof raw.sort === 'string' ? raw.sort : '',
     };
@@ -211,6 +214,7 @@ export default function ClientsPage() {
     refresh,
     hydrate,
     ownerOf,
+    resellerOptions = [],
   } = useClients();
 
   useWebSocket({
@@ -303,12 +307,19 @@ export default function ClientsPage() {
       hasTgId: filters.hasTgId || undefined,
       hasComment: filters.hasComment || undefined,
       group: filters.groups.join(',') || undefined,
+      reseller: !isReseller && filters.resellerIds.length ? filters.resellerIds.join(',') : undefined,
       sort: sortColumn || undefined,
       order: sortOrder || undefined,
     });
-  }, [setQuery, currentPage, tablePageSize, debouncedSearch, filters, effectiveInboundCsv, sortColumn, sortOrder]);
+  }, [setQuery, currentPage, tablePageSize, debouncedSearch, filters, effectiveInboundCsv, sortColumn, sortOrder, isReseller]);
 
-  const activeCount = activeFilterCount(filters);
+  // A stale admin-only selection may remain in shared local storage after a
+  // reseller signs in. Preserve it for the next admin session, but do not show
+  // a reseller filter/badge to a reseller session (the server ignores it too).
+  const activeCount = activeFilterCount({
+    ...filters,
+    resellerIds: isReseller ? [] : filters.resellerIds,
+  });
 
   useEffect(() => {
     setTablePageSize(pageSize > 0 ? pageSize : DISABLED_PAGE_SIZE);
@@ -331,6 +342,11 @@ export default function ClientsPage() {
     for (const g of filters.groups) values.add(g);
     return [...values].sort((a, b) => a.localeCompare(b));
   }, [allGroups, filters.groups]);
+
+  const resellerLabels = useMemo(
+    () => new Map(resellerOptions.map((reseller) => [reseller.id, reseller.label])),
+    [resellerOptions],
+  );
 
   const isOnline = useCallback((email: string) => !!email && onlineSet.has(email), [onlineSet]);
 
@@ -1142,6 +1158,16 @@ export default function ClientsPage() {
                               {t('pages.clients.group')}: {g}
                             </Tag>
                           ))}
+                          {!isReseller && filters.resellerIds.map((id) => (
+                            <Tag
+                              key={`r-${id}`}
+                              closable
+                              color="blue"
+                              onClose={() => setFilters({ ...filters, resellerIds: filters.resellerIds.filter((x) => x !== id) })}
+                            >
+                              {t('resellers.reseller')}: {resellerLabels.get(id) ?? `#${id}`}
+                            </Tag>
+                          ))}
                           {(filters.expiryFrom || filters.expiryTo) && (
                             <Tag closable color="purple" onClose={() => clearOneFilter('expiryFrom')}>
                               {t('pages.clients.expiryTime')}: {filters.expiryFrom ? IntlUtil.formatDate(filters.expiryFrom, datepicker) : '…'}
@@ -1459,6 +1485,7 @@ export default function ClientsPage() {
             protocols={protocolOptions}
             groups={groupOptions}
             nodes={nodes}
+            resellers={isReseller ? [] : resellerOptions}
           />
         </LazyMount>
       </Layout>

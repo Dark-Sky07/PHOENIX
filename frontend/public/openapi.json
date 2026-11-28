@@ -6265,6 +6265,15 @@
             }
           },
           {
+            "name": "reseller",
+            "in": "query",
+            "required": false,
+            "description": "Admin-only comma-separated reseller IDs. Matches only explicit reseller-client ownership mappings, never inbound assignment.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "sort",
             "in": "query",
             "required": true,

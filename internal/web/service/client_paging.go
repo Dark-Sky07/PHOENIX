@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Dark-Sky07/phoenix/internal/database"
+	"github.com/Dark-Sky07/phoenix/internal/database/model"
 	"github.com/Dark-Sky07/phoenix/internal/xray"
 )
 
@@ -57,6 +59,10 @@ type ClientPageParams struct {
 	HasTgID    string `form:"hasTgId"`
 	HasComment string `form:"hasComment"`
 	Group      string `form:"group"`
+	// Reseller is an admin-only CSV of reseller IDs. A match is based on the
+	// explicit ResellerClient ownership mapping, never merely on a shared
+	// inbound association.
+	Reseller string `form:"reseller"`
 
 	// ScopeEmails, when non-nil, restricts the result to an explicit set of
 	// client emails. It is set by the reseller-scoped controller path and is
@@ -116,6 +122,29 @@ func scopedClientGroups(rows []ClientWithAttachments) []string {
 	return groups
 }
 
+// resellerClientEmailSet resolves the explicit ownership boundary used for
+// the administrator's reseller filter. An inbound assignment is intentionally
+// not enough: an inbound can be shared and must never make all of its clients
+// appear to belong to a reseller.
+func resellerClientEmailSet(resellerIDs []int) (map[string]struct{}, error) {
+	allowed := make(map[string]struct{})
+	if len(resellerIDs) == 0 {
+		return allowed, nil
+	}
+	var emails []string
+	if err := database.GetDB().Model(&model.ResellerClient{}).
+		Where("reseller_id IN ?", resellerIDs).
+		Pluck("email", &emails).Error; err != nil {
+		return nil, err
+	}
+	for _, email := range emails {
+		if key := transferEmailKey(email); key != "" {
+			allowed[key] = struct{}{}
+		}
+	}
+	return allowed, nil
+}
+
 // ListPaged loads every client (with traffic + attachments) into memory,
 // applies the requested filter / search / protocol predicates, sorts, and
 // returns the requested page along with total and filtered counts. The DB
@@ -141,6 +170,25 @@ func (s *ClientService) ListPaged(inboundSvc *InboundService, settingSvc *Settin
 			}
 		}
 		all = scoped
+	}
+	// Only administrators may select another reseller. Reseller sessions are
+	// already constrained by ScopeEmails; honoring this parameter there could
+	// reveal ownership relationships through filtered counts.
+	if params.ScopeEmails == nil {
+		resellerIDs := parseCSVInts(params.Reseller)
+		if len(resellerIDs) > 0 {
+			allowed, err := resellerClientEmailSet(resellerIDs)
+			if err != nil {
+				return nil, err
+			}
+			owned := make([]ClientWithAttachments, 0, len(all))
+			for _, row := range all {
+				if _, ok := allowed[transferEmailKey(row.Email)]; ok {
+					owned = append(owned, row)
+				}
+			}
+			all = owned
+		}
 	}
 	visibleScopedOnline := make(map[string]struct{}, len(all))
 	if params.ScopeEmails != nil {
