@@ -24,8 +24,8 @@ func TestNodeSnapshotMigrationPreservesBaselineAndRejectsDowngrade(t *testing.T)
 	}
 	t.Cleanup(func() { _ = database.CloseDB() })
 	db := database.GetDB()
-	var user model.User
-	if err := db.Order("id asc").First(&user).Error; err != nil {
+	user := model.User{Username: "node-migration-admin", Password: "test-hash", Role: "superadmin"}
+	if err := db.Create(&user).Error; err != nil {
 		t.Fatal(err)
 	}
 	tokenID := model.ApiToken{Name: "master-peer", Token: "hash", Scope: "full", Enabled: true}

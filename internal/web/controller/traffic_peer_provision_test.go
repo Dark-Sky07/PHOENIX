@@ -26,10 +26,7 @@ func TestTrafficPeerProvisioningRequiresSuperadminSession(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = database.CloseDB() })
 	db := database.GetDB()
-	var admin model.User
-	if err := db.First(&admin).Error; err != nil {
-		t.Fatal(err)
-	}
+	admin := seedSecurityTestAdmin(t)
 	token, err := (&panel.ApiTokenService{}).Create("provision-test")
 	if err != nil {
 		t.Fatal(err)

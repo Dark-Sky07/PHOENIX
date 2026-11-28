@@ -12,6 +12,7 @@ import (
 	"github.com/Dark-Sky07/phoenix/internal/web/service/tgbot"
 	"github.com/Dark-Sky07/phoenix/internal/web/session"
 
+	"github.com/gin-contrib/sessions"
 	"github.com/gin-gonic/gin"
 )
 
@@ -46,6 +47,7 @@ func (a *IndexController) initRouter(g *gin.RouterGroup) {
 
 	g.POST("/login", middleware.CSRFMiddleware(), a.login)
 	g.POST("/logout", middleware.CSRFMiddleware(), a.logout)
+	g.POST("/reauth", middleware.CSRFMiddleware(), a.reauth)
 	g.POST("/getTwoFactorEnable", middleware.CSRFMiddleware(), a.getTwoFactorEnable)
 }
 
@@ -89,6 +91,7 @@ func (a *IndexController) login(c *gin.Context) {
 			Status:   tgbot.LoginFail,
 			Reason:   reason,
 		})
+		emitLoginWebhook(false, safeUser, remoteIP, reason)
 		pureJsonMsg(c, http.StatusOK, false, I18nWeb(c, "pages.login.toasts.wrongUsernameOrPassword"))
 		return
 	}
@@ -118,6 +121,7 @@ func (a *IndexController) login(c *gin.Context) {
 			Status:   tgbot.LoginFail,
 			Reason:   reason,
 		})
+		emitLoginWebhook(false, safeUser, remoteIP, reason)
 		pureJsonMsg(c, http.StatusOK, false, I18nWeb(c, "pages.login.toasts.wrongUsernameOrPassword"))
 		return
 	}
@@ -130,6 +134,7 @@ func (a *IndexController) login(c *gin.Context) {
 		Time:     timeStr,
 		Status:   tgbot.LoginSuccess,
 	})
+	emitLoginWebhook(true, safeUser, remoteIP, "")
 
 	if err := session.SetLoginUser(c, user); err != nil {
 		logger.Warning("Unable to save session:", err)
@@ -163,6 +168,7 @@ func (a *IndexController) loginReseller(c *gin.Context, form LoginForm, remoteIP
 			Status:   tgbot.LoginFail,
 			Reason:   reason,
 		})
+		emitLoginWebhook(false, safeUser, remoteIP, reason)
 		pureJsonMsg(c, http.StatusOK, false, err.Error())
 		return true
 	}
@@ -175,6 +181,7 @@ func (a *IndexController) loginReseller(c *gin.Context, form LoginForm, remoteIP
 		Time:     timeStr,
 		Status:   tgbot.LoginSuccess,
 	})
+	emitLoginWebhook(true, safeUser, remoteIP, "")
 
 	if err := session.SetLoginReseller(c, reseller); err != nil {
 		logger.Warning("Unable to save reseller session:", err)
@@ -184,11 +191,52 @@ func (a *IndexController) loginReseller(c *gin.Context, form LoginForm, remoteIP
 	return true
 }
 
+func emitLoginWebhook(success bool, username, ip, reason string) {
+	event := "security.login.failure"
+	if success {
+		event = "security.login.success"
+	}
+	// Deliberately no password, TOTP value, recovery code, cookie or request
+	// payload is ever forwarded to an event subscriber.
+	(service.WebhookService{}).Emit(event, map[string]any{"username": username, "ip": ip, "reason": reason})
+}
+
 func loginFailureReason(err error) string {
 	if err != nil && err.Error() == "invalid 2fa code" {
 		return "invalid 2FA code"
 	}
 	return "invalid credentials"
+}
+
+// reauth proves that the person holding an existing browser session still
+// knows the primary credential (and TOTP/recovery code when configured). High
+// impact endpoints can require this short-lived proof without accepting API
+// bearer tokens as an equivalent credential.
+func (a *IndexController) reauth(c *gin.Context) {
+	user := session.GetLoginUser(c)
+	if user == nil {
+		c.AbortWithStatus(http.StatusUnauthorized)
+		return
+	}
+	var form struct {
+		Password      string `json:"password" form:"password"`
+		TwoFactorCode string `json:"twoFactorCode" form:"twoFactorCode"`
+	}
+	if err := c.ShouldBind(&form); err != nil || form.Password == "" {
+		pureJsonMsg(c, http.StatusBadRequest, false, "password is required")
+		return
+	}
+	confirmed, err := a.userService.CheckUser(user.Username, form.Password, form.TwoFactorCode)
+	if err != nil || confirmed == nil || confirmed.Id != user.Id {
+		pureJsonMsg(c, http.StatusUnauthorized, false, "reauthentication failed")
+		return
+	}
+	session.SetRecentAuthentication(c)
+	if err := sessions.Default(c).Save(); err != nil {
+		pureJsonMsg(c, http.StatusInternalServerError, false, "unable to save authentication")
+		return
+	}
+	jsonMsg(c, "reauthentication successful", nil)
 }
 
 func (a *IndexController) logout(c *gin.Context) {

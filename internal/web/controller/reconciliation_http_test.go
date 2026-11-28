@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/Dark-Sky07/phoenix/internal/database"
-	"github.com/Dark-Sky07/phoenix/internal/database/model"
 	"github.com/Dark-Sky07/phoenix/internal/web/middleware"
 	"github.com/Dark-Sky07/phoenix/internal/web/session"
 	"github.com/gin-contrib/sessions"
@@ -32,10 +31,7 @@ func TestReconciliationRepairBrowserContract(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = database.CloseDB() })
 
-	var admin model.User
-	if err := database.GetDB().First(&admin).Error; err != nil {
-		t.Fatal(err)
-	}
+	admin := seedSecurityTestAdmin(t)
 
 	router := gin.New()
 	router.Use(sessions.Sessions("phoenix", cookie.NewStore([]byte("reconciliation-http-contract-test-secret"))))

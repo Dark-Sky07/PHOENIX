@@ -3,8 +3,10 @@ package session
 import (
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 
+	"github.com/Dark-Sky07/phoenix/internal/database"
 	"github.com/Dark-Sky07/phoenix/internal/database/model"
 
 	"github.com/gin-contrib/sessions"
@@ -43,5 +45,38 @@ func TestSessionUserIDSupportsLegacyUserPayload(t *testing.T) {
 	id, ok = sessionUserID(&model.User{Id: 12, Username: "admin", Password: "hash"})
 	if !ok || id != 12 {
 		t.Fatalf("legacy pointer session payload resolved to (%d, %v), want (12, true)", id, ok)
+	}
+}
+
+func TestTrackedSessionIsIndividuallyRevocable(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XUI_DB_FOLDER", dir)
+	if err := database.InitDB(filepath.Join(dir, "x-ui.db")); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.CloseDB() })
+	user := &model.User{Username: "tracked-admin", Password: "hash", Role: "superadmin"}
+	if err := database.GetDB().Create(user).Error; err != nil {
+		t.Fatal(err)
+	}
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+	rawID, err := createTrackedSession(ctx, user)
+	if err != nil || rawID == "" {
+		t.Fatalf("create tracked session = (%q, %v)", rawID, err)
+	}
+	if !trackedSessionValid(ctx, rawID, user) {
+		t.Fatal("new tracked session must validate")
+	}
+	rows, err := ListTrackedSessions(user.Id)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("ListTrackedSessions = (%d, %v)", len(rows), err)
+	}
+	if err := RevokeTrackedSession(user.Id, rows[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if trackedSessionValid(ctx, rawID, user) {
+		t.Fatal("revoked tracked session must no longer validate")
 	}
 }

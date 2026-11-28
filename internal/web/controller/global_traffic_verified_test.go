@@ -29,6 +29,7 @@ func TestVerifiedGlobalEndpointBindsBearerTokenAndRegisteredSender(t *testing.T)
 	}
 	t.Cleanup(func() { _ = database.CloseDB() })
 	db := database.GetDB()
+	seedSecurityTestAdmin(t)
 	tokens := &panel.ApiTokenService{}
 	one, err := tokens.Create("master-one")
 	if err != nil {

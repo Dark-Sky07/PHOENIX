@@ -53,10 +53,49 @@ func Dialect() string {
 	return db.Dialector.Name()
 }
 
-const (
-	defaultUsername = "admin"
-	defaultPassword = "admin"
-)
+// A second panel process, migrate CLI or old service still shutting down can
+// race GORM's first CREATE TYPE/INDEX during AutoMigrate. PostgreSQL reports
+// that race as SQLSTATE 23505 on pg_type/pg_index. Serialize schema migration
+// across processes on a session advisory lock; the lock is distinct from the
+// traffic-allocation key used by the quota path.
+const schemaMigrationAdvisoryKey int64 = 0x50484f454e4959
+
+func withPostgresSchemaMigrationLock(pool *sql.DB, migrate func() error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	conn, err := pool.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "SELECT pg_advisory_lock($1)", schemaMigrationAdvisoryKey); err != nil {
+		return err
+	}
+	defer func() {
+		_, _ = conn.ExecContext(context.Background(), "SELECT pg_advisory_unlock($1)", schemaMigrationAdvisoryKey)
+	}()
+	return migrate()
+}
+
+// isConcurrentSchemaChangeErr identifies the PostgreSQL catalog race GORM can
+// hit when two processes migrate the same fresh schema. It does not hide real
+// duplicate data or constraint violations in tables.
+func isConcurrentSchemaChangeErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if !strings.Contains(msg, "sqlstate 23505") &&
+		!strings.Contains(msg, "duplicate key value violates unique constraint") {
+		return false
+	}
+	for _, catalog := range []string{"pg_type_", "pg_index", "pg_class", "pg_constraint", "pg_namespace"} {
+		if strings.Contains(msg, catalog) {
+			return true
+		}
+	}
+	return false
+}
 
 // A second panel process, migrate CLI or old service still shutting down can
 // race GORM's first CREATE TYPE/INDEX during AutoMigrate. PostgreSQL reports
@@ -116,6 +155,12 @@ func initModels() error {
 		&model.HistoryOfSeeders{},
 		&model.Node{},
 		&model.ApiToken{},
+		&model.InitialSetup{},
+		&model.LoginProtection{},
+		&model.UserSession{},
+		&model.RecoveryCode{},
+		&model.WebhookSubscription{},
+		&model.WebhookDelivery{},
 		&model.ClientRecord{},
 		&model.ClientInbound{},
 		&model.ClientDevice{},
@@ -278,29 +323,11 @@ func isIgnorableDuplicateColumnErr(err error, mdl any) bool {
 	return false
 }
 
-// initUser creates a default admin user if the users table is empty.
-func initUser() error {
-	empty, err := isTableEmpty("users")
-	if err != nil {
-		log.Printf("Error checking if users table is empty: %v", err)
-		return err
-	}
-	if empty {
-		hashedPassword, err := crypto.HashPasswordAsBcrypt(defaultPassword)
-
-		if err != nil {
-			log.Printf("Error hashing default password: %v", err)
-			return err
-		}
-
-		user := &model.User{
-			Username: defaultUsername,
-			Password: hashedPassword,
-		}
-		return db.Create(user).Error
-	}
-	return nil
-}
+// initUser intentionally leaves a fresh panel without an account. The web
+// bootstrap service creates the first superadmin through a short-lived,
+// one-time setup link. Existing installations already have users and are not
+// modified by this behavior.
+func initUser() error { return nil }
 
 // runSeeders migrates user passwords to bcrypt and records seeder execution to prevent re-running.
 func runSeeders(isUsersEmpty bool) error {

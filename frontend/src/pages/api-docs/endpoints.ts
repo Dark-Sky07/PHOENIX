@@ -101,6 +101,17 @@ export const sections: readonly Section[] = [
   },
 
   {
+    id: 'bootstrap-security',
+    title: 'Bootstrap and session security',
+    description: 'Fresh panels have no shared credential. The local operator reads the short-lived setup token from the protected server file and enters it in the setup form. Setup tokens are never returned by an API or placed in a URL.',
+    endpoints: [
+      { method: 'GET', path: '/setup', summary: 'Render the first-administrator setup form only while no administrator exists.' },
+      { method: 'POST', path: '/setup', summary: 'Atomically consume the one-time local setup token and create the first superadmin. The form accepts token, username, password, and confirmPassword.' },
+      { method: 'POST', path: '/reauth', summary: 'Reconfirm the current browser session with password and, when enabled, TOTP or a single-use recovery code. Renews the short recent-authentication proof; bearer tokens are refused.' },
+    ],
+  },
+
+  {
     id: 'inbounds',
     title: 'Inbounds',
     description:
@@ -1183,7 +1194,7 @@ export const sections: readonly Section[] = [
       {
         method: 'POST',
         path: '/panel/api/setting/apiTokens/create',
-        summary: 'Mint a new API token. Name must be unique and 1-64 characters; the token string is server-generated and returned only in this response — it is stored hashed and cannot be retrieved later. Requires an interactive superadmin browser session; Bearer tokens are refused.',
+        summary: 'Mint a new API token. Name must be unique and 1-64 characters; the token string is server-generated and returned only in this response — it is stored hashed and cannot be retrieved later. Requires an interactive superadmin browser session plus a recent password confirmation; Bearer tokens are refused.',
         params: [
           { name: 'name', in: 'body', type: 'string', desc: 'Human-readable label, e.g. "central-panel-a".' },
         ],
@@ -1194,7 +1205,7 @@ export const sections: readonly Section[] = [
       {
         method: 'POST',
         path: '/panel/api/setting/apiTokens/delete/:id',
-        summary: 'Permanently delete a token. Any caller using it stops authenticating immediately. Requires an interactive superadmin browser session; Bearer tokens are refused.',
+        summary: 'Permanently delete a token. Any caller using it stops authenticating immediately. Requires an interactive superadmin browser session plus a recent password confirmation; Bearer tokens are refused.',
         params: [
           { name: 'id', in: 'path', type: 'number', desc: 'Token row ID.' },
         ],
@@ -1203,7 +1214,7 @@ export const sections: readonly Section[] = [
       {
         method: 'POST',
         path: '/panel/api/setting/apiTokens/setEnabled/:id',
-        summary: 'Toggle a token enabled/disabled without deleting it. Disabled tokens are rejected by checkAPIAuth on the next request. Requires an interactive superadmin browser session; Bearer tokens are refused.',
+        summary: 'Toggle a token enabled/disabled without deleting it. Disabled tokens are rejected by checkAPIAuth on the next request. Requires an interactive superadmin browser session plus a recent password confirmation; Bearer tokens are refused.',
         params: [
           { name: 'id', in: 'path', type: 'number', desc: 'Token row ID.' },
           { name: 'enabled', in: 'body', type: 'boolean', desc: 'New enabled state.' },
@@ -1981,18 +1992,18 @@ export const sections: readonly Section[] = [
       {
         method: 'POST',
         path: '/panel/api/setting/admins/create',
-        summary: 'Create a new panel admin account with an RBAC role and granular permissions (interactive superadmin browser session only; Bearer tokens are refused).',
+        summary: 'Create a new panel admin account with an RBAC role and granular permissions. Requires an interactive superadmin browser session plus a recent password confirmation; Bearer tokens are refused.',
       },
       {
         method: 'POST',
         path: '/panel/api/setting/admins/update/:id',
-        summary: 'Update a panel admin account RBAC role, permissions, or status (interactive superadmin browser session only; Bearer tokens are refused).',
+        summary: 'Update a panel admin account RBAC role, permissions, or status. Requires an interactive superadmin browser session plus a recent password confirmation; Bearer tokens are refused.',
         params: [{ name: 'id', in: 'path', type: 'integer' }],
       },
       {
         method: 'POST',
         path: '/panel/api/setting/admins/delete/:id',
-        summary: 'Delete a secondary panel admin account (interactive superadmin browser session only; Bearer tokens are refused).',
+        summary: 'Delete a secondary panel admin account. Requires an interactive superadmin browser session plus a recent password confirmation; Bearer tokens are refused.',
         params: [{ name: 'id', in: 'path', type: 'integer' }],
       },
     ],
@@ -2101,7 +2112,7 @@ export const sections: readonly Section[] = [
       {
         method: 'POST',
         path: '/panel/api/openvpn/revoke',
-        summary: 'Revoke one client on every managed OpenVPN daemon generation. Requires an interactive superadmin browser session; Bearer tokens are refused. A conflict response means the operation is incomplete and quota must not be released.',
+        summary: 'Revoke one client on every managed OpenVPN daemon generation. Requires an interactive superadmin browser session plus a recent password confirmation; Bearer tokens are refused. A conflict response means the operation is incomplete and quota must not be released.',
         params: [
           { name: 'email', in: 'body (json)', type: 'string', desc: 'Client certificate CN (email).' },
         ],
@@ -2109,6 +2120,23 @@ export const sections: readonly Section[] = [
         response: '{ "success": true, "msg": "authorization revoked and current sessions confirmed terminated; verify final usage before quota changes" }',
         errorResponse: '{ "success": false, "msg": "revocation incomplete; verify sessions and accounting before releasing quota" }',
       },
+    ],
+  },
+
+  {
+    id: 'security-operations',
+    title: 'Sessions, recovery codes, and webhooks',
+    description: 'All endpoints in this section require an interactive superadmin browser session and reject API bearer tokens. Mutating endpoints additionally require a password-confirmed recent authentication (valid for 10 minutes); call POST /reauth first when necessary.',
+    endpoints: [
+      { method: 'GET', path: '/panel/api/setting/sessions', summary: 'List the current administrator’s tracked browser sessions. Legacy pre-upgrade cookies remain valid until normal expiry but are not retroactively listed.' },
+      { method: 'POST', path: '/panel/api/setting/sessions/revoke/:id', summary: 'Revoke one tracked browser session immediately.', params: [{ name: 'id', in: 'path', type: 'number' }] },
+      { method: 'POST', path: '/panel/api/setting/recoveryCodes/regenerate', summary: 'Invalidate unused recovery codes and return ten new high-entropy codes once. Only hashes are stored.' },
+      { method: 'GET', path: '/panel/api/setting/webhooks', summary: 'List configured webhook destinations without exposing signing secrets.' },
+      { method: 'POST', path: '/panel/api/setting/webhooks/create', summary: 'Create an HTTPS-only, SSRF-checked webhook subscription. The HMAC signing secret is returned once and stored encrypted.', body: '{ "name": "security-events", "url": "https://events.example.com/phoenix", "events": ["security.login.success", "audit.mutation"] }' },
+      { method: 'POST', path: '/panel/api/setting/webhooks/delete/:id', summary: 'Delete a webhook subscription and its queued deliveries.', params: [{ name: 'id', in: 'path', type: 'number' }] },
+      { method: 'POST', path: '/panel/api/setting/webhooks/setEnabled/:id', summary: 'Enable or disable a webhook subscription without deleting its configuration.', params: [{ name: 'id', in: 'path', type: 'number' }, { name: 'enabled', in: 'body', type: 'boolean' }] },
+      { method: 'GET', path: '/panel/api/setting/webhooks/deliveries', summary: 'List durable webhook delivery status, attempts, HTTP response status, and redacted error information.' },
+      { method: 'POST', path: '/panel/api/setting/webhooks/deliveries/:id/replay', summary: 'Queue one durable delivery for a fresh retry.', params: [{ name: 'id', in: 'path', type: 'number' }] },
     ],
   },
 

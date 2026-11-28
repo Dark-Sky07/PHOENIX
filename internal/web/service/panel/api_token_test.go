@@ -148,3 +148,25 @@ func TestApiToken_RecordsLastUsed(t *testing.T) {
 		t.Fatal("lastUsedAt must be recorded on successful authentication")
 	}
 }
+
+func TestApiTokenGranularPermissionsAndLegacyCompatibility(t *testing.T) {
+	legacyFull := &model.ApiToken{Scope: ""}
+	if !TokenAllowsRequest(legacyFull, "POST", "/panel/api/clients/add") {
+		t.Fatal("legacy empty scope must retain full access")
+	}
+	legacyRead := &model.ApiToken{Scope: ApiTokenScopeRead}
+	if !TokenAllowsRequest(legacyRead, "GET", "/panel/api/clients") || TokenAllowsRequest(legacyRead, "POST", "/panel/api/clients/add") {
+		t.Fatal("legacy read scope must stay read-only")
+	}
+	granular := &model.ApiToken{Scope: ApiTokenScopeFull, Scopes: `["clients:read","clients:write"]`}
+	if !TokenAllowsRequest(granular, "GET", "/panel/api/clients") || !TokenAllowsRequest(granular, "POST", "/panel/api/clients/add") {
+		t.Fatal("explicit client permissions must allow their matching routes")
+	}
+	if TokenAllowsRequest(granular, "GET", "/panel/api/nodes") || TokenAllowsRequest(granular, "POST", "/panel/api/setting/apiTokens/create") {
+		t.Fatal("explicit permission list must not inherit full access")
+	}
+	malformed := &model.ApiToken{Scope: ApiTokenScopeFull, Scopes: `not-json`}
+	if TokenAllowsRequest(malformed, "GET", "/panel/api/clients") {
+		t.Fatal("malformed explicit permission data must fail closed")
+	}
+}

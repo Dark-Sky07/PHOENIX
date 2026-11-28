@@ -15,7 +15,7 @@ import {
   Tag,
   message,
 } from 'antd';
-import { ApiOutlined, SafetyOutlined, TeamOutlined, UserOutlined } from '@ant-design/icons';
+import { ApiOutlined, GlobalOutlined, KeyOutlined, LaptopOutlined, SafetyOutlined, TeamOutlined, UserOutlined } from '@ant-design/icons';
 import { ClipboardManager, HttpUtil, RandomUtil } from '@/utils';
 import type { AllSetting } from '@/models/setting';
 import { SettingListItem } from '@/components/ui';
@@ -35,10 +35,28 @@ interface ApiTokenRow {
   name: string;
   prefix?: string;
   scope?: string;
+  scopes?: string[];
   enabled: boolean;
   expiresAt?: number;
   lastUsedAt?: number;
   createdAt: number;
+}
+
+interface SessionRow {
+  id: number;
+  ip?: string;
+  userAgent?: string;
+  createdAt?: number;
+  lastSeenAt?: number;
+  expiresAt?: number;
+}
+
+interface WebhookRow {
+  id: number;
+  name: string;
+  url: string;
+  events: string[];
+  enabled: boolean;
 }
 
 interface AdminRow {
@@ -110,6 +128,20 @@ export default function SecurityTab({ allSetting, updateSetting }: SecurityTabPr
   const [createExpireDays, setCreateExpireDays] = useState<number>(0);
   const [creating, setCreating] = useState(false);
   const [createdToken, setCreatedToken] = useState<{ name: string; token: string } | null>(null);
+  const [createPermissions, setCreatePermissions] = useState<string[]>([]);
+  const [sessions, setSessions] = useState<SessionRow[]>([]);
+  const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [recoveryCodes, setRecoveryCodes] = useState<string[] | null>(null);
+  const [webhooks, setWebhooks] = useState<WebhookRow[]>([]);
+  const [webhooksLoading, setWebhooksLoading] = useState(false);
+  const [webhookName, setWebhookName] = useState('');
+  const [webhookURL, setWebhookURL] = useState('');
+  const [webhookEvents, setWebhookEvents] = useState<string[]>(['security.login.success', 'security.login.failure', 'audit.mutation']);
+  const [createdWebhookSecret, setCreatedWebhookSecret] = useState<{ name: string; secret: string } | null>(null);
+  const [reauthOpen, setReauthOpen] = useState(false);
+  const [reauthPassword, setReauthPassword] = useState('');
+  const [reauthCode, setReauthCode] = useState('');
+  const [reauthing, setReauthing] = useState(false);
 
   const [admins, setAdmins] = useState<AdminRow[]>([]);
   const [adminsLoading, setAdminsLoading] = useState(false);
@@ -140,6 +172,27 @@ export default function SecurityTab({ allSetting, updateSetting }: SecurityTabPr
   const onTfaConfirm = useCallback((success: boolean, code?: string) => {
     tfa.onConfirm(success, code);
   }, [tfa]);
+
+  async function confirmRecentAuthentication() {
+    if (!reauthPassword) {
+      messageApi.error('Password is required');
+      return;
+    }
+    setReauthing(true);
+    try {
+      const msg = await HttpUtil.post('/reauth', {
+        password: reauthPassword,
+        twoFactorCode: reauthCode,
+      }) as ApiMsg;
+      if (msg?.success) {
+        setReauthPassword('');
+        setReauthCode('');
+        setReauthOpen(false);
+      }
+    } finally {
+      setReauthing(false);
+    }
+  }
 
   function updateUserField<K extends keyof typeof user>(key: K, value: string) {
     setUser((prev) => ({ ...prev, [key]: value }));
@@ -187,6 +240,65 @@ export default function SecurityTab({ allSetting, updateSetting }: SecurityTabPr
      
     loadApiTokens();
   }, [loadApiTokens]);
+
+  const loadSessions = useCallback(async () => {
+    setSessionsLoading(true);
+    try {
+      const msg = await HttpUtil.get('/panel/api/setting/sessions') as ApiMsg<SessionRow[]>;
+      if (msg?.success) setSessions(Array.isArray(msg.obj) ? msg.obj : []);
+    } finally {
+      setSessionsLoading(false);
+    }
+  }, []);
+
+  const loadWebhooks = useCallback(async () => {
+    setWebhooksLoading(true);
+    try {
+      const msg = await HttpUtil.get('/panel/api/setting/webhooks') as ApiMsg<WebhookRow[]>;
+      if (msg?.success) setWebhooks(Array.isArray(msg.obj) ? msg.obj : []);
+    } finally {
+      setWebhooksLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadSessions();
+    void loadWebhooks();
+  }, [loadSessions, loadWebhooks]);
+
+  async function revokeSession(row: SessionRow) {
+    const msg = await HttpUtil.post(`/panel/api/setting/sessions/revoke/${row.id}`) as ApiMsg;
+    if (msg?.success) await loadSessions();
+  }
+
+  async function generateRecoveryCodes() {
+    const msg = await HttpUtil.post('/panel/api/setting/recoveryCodes/regenerate') as ApiMsg<{ codes?: string[] }>;
+    if (msg?.success && Array.isArray(msg.obj?.codes)) setRecoveryCodes(msg.obj.codes);
+  }
+
+  async function createWebhook() {
+    if (!webhookName.trim() || !webhookURL.trim()) {
+      messageApi.error('Webhook name and HTTPS URL are required');
+      return;
+    }
+    const msg = await HttpUtil.post('/panel/api/setting/webhooks/create', { name: webhookName.trim(), url: webhookURL.trim(), events: webhookEvents }) as ApiMsg<WebhookRow & { secret?: string }>;
+    if (msg?.success) {
+      setWebhookName('');
+      setWebhookURL('');
+      await loadWebhooks();
+      if (msg.obj?.secret) setCreatedWebhookSecret({ name: msg.obj.name, secret: msg.obj.secret });
+    }
+  }
+
+  async function setWebhookEnabled(row: WebhookRow, enabled: boolean) {
+    const msg = await HttpUtil.post(`/panel/api/setting/webhooks/setEnabled/${row.id}`, { enabled }) as ApiMsg;
+    if (msg?.success) setWebhooks((prev) => prev.map((value) => value.id === row.id ? { ...value, enabled } : value));
+  }
+
+  async function deleteWebhook(row: WebhookRow) {
+    const msg = await HttpUtil.post(`/panel/api/setting/webhooks/delete/${row.id}`) as ApiMsg;
+    if (msg?.success) await loadWebhooks();
+  }
 
   const loadAdmins = useCallback(async () => {
     setAdminsLoading(true);
@@ -298,6 +410,7 @@ export default function SecurityTab({ allSetting, updateSetting }: SecurityTabPr
   function openCreateModal() {
     setCreateName('');
     setCreateScope('full');
+    setCreatePermissions([]);
     setCreateExpireDays(0);
     setCreateOpen(true);
   }
@@ -313,6 +426,7 @@ export default function SecurityTab({ allSetting, updateSetting }: SecurityTabPr
       const msg = await HttpUtil.post('/panel/api/setting/apiTokens/create', {
         name,
         scope: createScope,
+        scopes: createPermissions,
         expireDays: createExpireDays || 0,
       }) as ApiMsg<{ token?: string }>;
       if (msg?.success) {
@@ -472,6 +586,7 @@ export default function SecurityTab({ allSetting, updateSetting }: SecurityTabPr
                                 ? (t('pages.settings.security.apiTokenScopeRead') || 'Read-only')
                                 : (t('pages.settings.security.apiTokenScopeFull') || 'Full access')}
                             </Tag>
+                            {(row.scopes || []).map((permission) => <Tag key={permission} color="purple">{permission}</Tag>)}
                             {expired ? (
                               <Tag color="red">{t('pages.settings.security.apiTokenExpired') || 'Expired'}</Tag>
                             ) : null}
@@ -557,6 +672,60 @@ export default function SecurityTab({ allSetting, updateSetting }: SecurityTabPr
                     </div>
                   );
                 })}
+              </Spin>
+            </div>
+          ),
+        },
+        {
+          key: '5',
+          label: catTabLabel(<LaptopOutlined />, 'Sessions & recovery', isMobile),
+          children: (
+            <div className="api-token-section">
+              <div className="api-token-header">
+                <p className="api-token-hint">Review browser sessions created after this security upgrade and revoke a device immediately. Recovery codes are displayed once, stored only as hashes, and each code can be used once for 2FA recovery.</p>
+                <Space size="small" wrap>
+                  <Button size="small" onClick={() => setReauthOpen(true)}><SafetyOutlined /> Confirm sensitive actions</Button>
+                  <Button size="small" onClick={generateRecoveryCodes}><KeyOutlined /> Generate recovery codes</Button>
+                </Space>
+              </div>
+              <Spin spinning={sessionsLoading}>
+                {!sessions.length && !sessionsLoading ? <Empty description="No tracked sessions yet" /> : null}
+                {sessions.map((row) => (
+                  <div key={row.id} className="api-token-row">
+                    <div className="api-token-row-head">
+                      <div className="api-token-name-wrap">
+                        <span className="api-token-name">{row.ip || 'Unknown IP'}</span>
+                        <span className="api-token-created">{row.userAgent || 'Unknown browser'} · Last seen: {formatTokenDate(row.lastSeenAt)}</span>
+                      </div>
+                      <Button size="small" danger type="text" onClick={() => revokeSession(row)}>Revoke</Button>
+                    </div>
+                  </div>
+                ))}
+              </Spin>
+            </div>
+          ),
+        },
+        {
+          key: '6',
+          label: catTabLabel(<GlobalOutlined />, 'Webhooks', isMobile),
+          children: (
+            <div className="api-token-section">
+              <p className="api-token-hint">HTTPS-only event destinations. Requests are HMAC-SHA256 signed, queued durably, retried with backoff, and internal/private destinations are rejected.</p>
+              <Space direction="vertical" style={{ width: '100%' }}>
+                <Input value={webhookName} maxLength={64} placeholder="Webhook name" onChange={(event) => setWebhookName(event.target.value)} />
+                <Input value={webhookURL} placeholder="https://events.example.com/phoenix" onChange={(event) => setWebhookURL(event.target.value)} />
+                <Select mode="multiple" value={webhookEvents} onChange={setWebhookEvents} options={['security.login.success', 'security.login.failure', 'audit.mutation'].map((value) => ({ value, label: value }))} />
+                <Button type="primary" onClick={createWebhook}>Create signed webhook</Button>
+              </Space>
+              <Spin spinning={webhooksLoading}>
+                {webhooks.map((row) => (
+                  <div key={row.id} className="api-token-row">
+                    <div className="api-token-row-head">
+                      <div className="api-token-name-wrap"><span className="api-token-name">{row.name}</span><span className="api-token-created">{row.url} · {row.events.join(', ')}</span></div>
+                      <div className="api-token-actions"><Switch size="small" checked={row.enabled} onChange={(value) => setWebhookEnabled(row, value)} /><Button size="small" danger type="text" onClick={() => deleteWebhook(row)}>Delete</Button></div>
+                    </div>
+                  </div>
+                ))}
               </Spin>
             </div>
           ),
@@ -674,6 +843,22 @@ export default function SecurityTab({ allSetting, updateSetting }: SecurityTabPr
             />
           </Form.Item>
           <Form.Item
+            label="Granular permissions (optional)"
+            extra="When selected, only these API capabilities are granted; the legacy full/read choice remains available when this is empty."
+          >
+            <Select
+              mode="multiple"
+              value={createPermissions}
+              onChange={(value) => setCreatePermissions(value)}
+              options={[
+                'clients:read', 'clients:write', 'inbounds:read', 'inbounds:write',
+                'nodes:read', 'nodes:write', 'resellers:read', 'resellers:write',
+                'server:read', 'server:write', 'xray:read', 'xray:write',
+                'settings:read', 'settings:write', 'audit:read',
+              ].map((value) => ({ value, label: value }))}
+            />
+          </Form.Item>
+          <Form.Item
             label={t('pages.settings.security.apiTokenExpireDays') || 'Expires in (days)'}
             extra={t('pages.settings.security.apiTokenExpireDaysDesc') || '0 means never expires.'}
           >
@@ -706,6 +891,40 @@ export default function SecurityTab({ allSetting, updateSetting }: SecurityTabPr
             {t('copy')}
           </Button>
         </div>
+      </Modal>
+
+      <Modal open={!!recoveryCodes} title="Save recovery codes" okText="I saved them" onOk={() => setRecoveryCodes(null)} onCancel={() => setRecoveryCodes(null)} cancelButtonProps={{ style: { display: 'none' } }}>
+        <p>Each code is shown only once. Store them offline; entering one in the 2FA field consumes it.</p>
+        <code className="api-token-value">{recoveryCodes?.join('\n')}</code>
+      </Modal>
+      <Modal open={!!createdWebhookSecret} title="Save webhook signing secret" okText="I saved it" onOk={() => setCreatedWebhookSecret(null)} onCancel={() => setCreatedWebhookSecret(null)} cancelButtonProps={{ style: { display: 'none' } }}>
+        <p>This is the only time the secret for {createdWebhookSecret?.name} is shown. Verify each delivery with HMAC-SHA256.</p>
+        <div className="api-token-value-wrap"><code className="api-token-value">{createdWebhookSecret?.secret}</code><Button size="small" type="primary" onClick={() => createdWebhookSecret && copyToken(createdWebhookSecret.secret)}>Copy</Button></div>
+      </Modal>
+
+      <Modal
+        open={reauthOpen}
+        title="Confirm sensitive actions"
+        okText="Confirm"
+        confirmLoading={reauthing}
+        onOk={confirmRecentAuthentication}
+        onCancel={() => {
+          setReauthOpen(false);
+          setReauthPassword('');
+          setReauthCode('');
+        }}
+      >
+        <p>Confirm your password before changing administrators, API tokens, recovery codes, sessions, or webhook settings. This confirmation expires after 10 minutes.</p>
+        <Form layout="vertical">
+          <Form.Item label="Password" required>
+            <Input.Password value={reauthPassword} autoComplete="current-password" onChange={(event) => setReauthPassword(event.target.value)} onPressEnter={confirmRecentAuthentication} />
+          </Form.Item>
+          {allSetting.twoFactorEnable ? (
+            <Form.Item label="Two-factor or recovery code" required>
+              <Input value={reauthCode} inputMode="numeric" autoComplete="one-time-code" onChange={(event) => setReauthCode(event.target.value)} onPressEnter={confirmRecentAuthentication} />
+            </Form.Item>
+          ) : null}
+        </Form>
       </Modal>
 
       <TwoFactorModal

@@ -221,12 +221,12 @@ func showSetting(show bool) {
 
 		userService := panel.UserService{}
 		userModel, err := userService.GetFirstUser()
-		if err != nil {
+		hasUser := err == nil && userModel != nil && userModel.Username != "" && userModel.Password != ""
+		if err != nil && !database.IsNotFound(err) {
 			fmt.Println("get current user info failed, error info:", err)
 		}
-
-		if userModel.Username == "" || userModel.Password == "" {
-			fmt.Println("current username or password is empty")
+		if !hasUser {
+			fmt.Println("current panel has no administrator yet")
 		}
 
 		fmt.Println("current panel settings as follows:")
@@ -236,10 +236,9 @@ func showSetting(show bool) {
 			fmt.Println("Panel is secure with SSL")
 		}
 
-		hasDefaultCredential := func() bool {
-			return userModel.Username == "admin" && crypto.CheckPasswordHash(userModel.Password, "admin")
-		}()
+		hasDefaultCredential := hasUser && userModel.Username == "admin" && crypto.CheckPasswordHash(userModel.Password, "admin")
 
+		fmt.Println("hasUser:", hasUser)
 		fmt.Println("hasDefaultCredential:", hasDefaultCredential)
 		fmt.Println("port:", port)
 		fmt.Println("webBasePath:", webBasePath)

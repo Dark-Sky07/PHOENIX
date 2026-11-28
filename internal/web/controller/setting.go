@@ -64,6 +64,15 @@ func (a *SettingController) initRouter(g *gin.RouterGroup) {
 	g.POST("/apiTokens/create", a.createApiToken)
 	g.POST("/apiTokens/delete/:id", a.deleteApiToken)
 	g.POST("/apiTokens/setEnabled/:id", a.setApiTokenEnabled)
+	g.GET("/sessions", a.listSessions)
+	g.POST("/sessions/revoke/:id", a.revokeSession)
+	g.POST("/recoveryCodes/regenerate", a.regenerateRecoveryCodes)
+	g.GET("/webhooks", a.listWebhooks)
+	g.POST("/webhooks/create", a.createWebhook)
+	g.POST("/webhooks/delete/:id", a.deleteWebhook)
+	g.POST("/webhooks/setEnabled/:id", a.setWebhookEnabled)
+	g.GET("/webhooks/deliveries", a.listWebhookDeliveries)
+	g.POST("/webhooks/deliveries/:id/replay", a.replayWebhookDelivery)
 	g.GET("/cert/status", a.getCertStatus)
 	g.POST("/cert/issue", a.issueCert)
 	g.POST("/discord/test", a.testDiscord)
@@ -257,10 +266,115 @@ func (a *SettingController) getDefaultXrayConfig(c *gin.Context) {
 	jsonObj(c, defaultJsonConfig, nil)
 }
 
+func (a *SettingController) listSessions(c *gin.Context) {
+	if !requireInteractiveSuperAdmin(c) {
+		return
+	}
+	user := session.GetLoginUser(c)
+	rows, err := session.ListTrackedSessions(user.Id)
+	jsonObj(c, rows, err)
+}
+
+func (a *SettingController) revokeSession(c *gin.Context) {
+	if !requireRecentInteractiveSuperAdmin(c) {
+		return
+	}
+	id, err := strconv.Atoi(c.Param("id"))
+	if err == nil {
+		err = session.RevokeTrackedSession(session.GetLoginUser(c).Id, id)
+	}
+	jsonMsg(c, "session revoked", err)
+}
+
+// regenerateRecoveryCodes returns plaintext codes once and never persists or
+// logs them. A code can be used in the normal 2FA field if the authenticator is
+// unavailable; it is consumed atomically.
+func (a *SettingController) regenerateRecoveryCodes(c *gin.Context) {
+	if !requireRecentInteractiveSuperAdmin(c) {
+		return
+	}
+	codes, err := a.userService.GenerateRecoveryCodes(session.GetLoginUser(c).Id)
+	jsonObj(c, gin.H{"codes": codes}, err)
+}
+
+type webhookCreateForm struct {
+	Name   string   `json:"name" form:"name"`
+	URL    string   `json:"url" form:"url"`
+	Events []string `json:"events" form:"events"`
+}
+
+func (a *SettingController) listWebhooks(c *gin.Context) {
+	if !requireInteractiveSuperAdmin(c) {
+		return
+	}
+	rows, err := (service.WebhookService{}).List()
+	jsonObj(c, rows, err)
+}
+
+func (a *SettingController) createWebhook(c *gin.Context) {
+	if !requireRecentInteractiveSuperAdmin(c) {
+		return
+	}
+	var form webhookCreateForm
+	if err := c.ShouldBind(&form); err != nil {
+		jsonMsg(c, "invalid webhook form", err)
+		return
+	}
+	row, err := (service.WebhookService{}).Create(form.Name, form.URL, form.Events)
+	jsonObj(c, row, err)
+}
+
+func (a *SettingController) deleteWebhook(c *gin.Context) {
+	if !requireRecentInteractiveSuperAdmin(c) {
+		return
+	}
+	id, err := strconv.Atoi(c.Param("id"))
+	if err == nil {
+		err = (service.WebhookService{}).Delete(id)
+	}
+	jsonMsg(c, "webhook deleted", err)
+}
+
+func (a *SettingController) setWebhookEnabled(c *gin.Context) {
+	if !requireRecentInteractiveSuperAdmin(c) {
+		return
+	}
+	id, err := strconv.Atoi(c.Param("id"))
+	var form apiTokenEnabledForm
+	if err == nil {
+		err = c.ShouldBind(&form)
+	}
+	if err == nil {
+		err = (service.WebhookService{}).SetEnabled(id, form.Enabled)
+	}
+	jsonMsg(c, "webhook updated", err)
+}
+
+func (a *SettingController) listWebhookDeliveries(c *gin.Context) {
+	if !requireInteractiveSuperAdmin(c) {
+		return
+	}
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "200"))
+	rows, err := (service.WebhookService{}).ListDeliveries(limit)
+	jsonObj(c, rows, err)
+}
+
+func (a *SettingController) replayWebhookDelivery(c *gin.Context) {
+	if !requireRecentInteractiveSuperAdmin(c) {
+		return
+	}
+	id, err := strconv.Atoi(c.Param("id"))
+	if err == nil {
+		err = (service.WebhookService{}).Replay(id)
+	}
+	jsonMsg(c, "webhook delivery queued", err)
+}
+
 type apiTokenCreateForm struct {
-	Name       string `json:"name" form:"name"`
-	Scope      string `json:"scope" form:"scope"`
-	ExpireDays int    `json:"expireDays" form:"expireDays" validate:"gte=0"`
+	Name       string   `json:"name" form:"name"`
+	Scope      string   `json:"scope" form:"scope"`
+	Scopes     []string `json:"scopes" form:"scopes"`
+	ExpireDays int      `json:"expireDays" form:"expireDays" validate:"gte=0"`
 }
 
 type apiTokenEnabledForm struct {
@@ -280,7 +394,7 @@ func (a *SettingController) listApiTokens(c *gin.Context) {
 }
 
 func (a *SettingController) createApiToken(c *gin.Context) {
-	if !a.ensureSuperAdmin(c) {
+	if !a.ensureRecentSuperAdmin(c) {
 		return
 	}
 	form := &apiTokenCreateForm{}
@@ -288,7 +402,13 @@ func (a *SettingController) createApiToken(c *gin.Context) {
 		jsonMsg(c, I18nWeb(c, "pages.settings.toasts.modifySettings"), err)
 		return
 	}
-	row, err := a.apiTokenService.CreateWithOptions(form.Name, form.Scope, form.ExpireDays)
+	var row *panel.ApiTokenView
+	var err error
+	if len(form.Scopes) > 0 {
+		row, err = a.apiTokenService.CreateWithPermissions(form.Name, form.Scopes, form.ExpireDays)
+	} else {
+		row, err = a.apiTokenService.CreateWithOptions(form.Name, form.Scope, form.ExpireDays)
+	}
 	if err != nil {
 		jsonMsg(c, I18nWeb(c, "pages.settings.toasts.modifySettings"), err)
 		return
@@ -297,7 +417,7 @@ func (a *SettingController) createApiToken(c *gin.Context) {
 }
 
 func (a *SettingController) deleteApiToken(c *gin.Context) {
-	if !a.ensureSuperAdmin(c) {
+	if !a.ensureRecentSuperAdmin(c) {
 		return
 	}
 	id, err := strconv.Atoi(c.Param("id"))
@@ -309,7 +429,7 @@ func (a *SettingController) deleteApiToken(c *gin.Context) {
 }
 
 func (a *SettingController) setApiTokenEnabled(c *gin.Context) {
-	if !a.ensureSuperAdmin(c) {
+	if !a.ensureRecentSuperAdmin(c) {
 		return
 	}
 	id, err := strconv.Atoi(c.Param("id"))
@@ -412,6 +532,10 @@ func (a *SettingController) ensureSuperAdmin(c *gin.Context) bool {
 	return requireInteractiveSuperAdmin(c)
 }
 
+func (a *SettingController) ensureRecentSuperAdmin(c *gin.Context) bool {
+	return requireRecentInteractiveSuperAdmin(c)
+}
+
 func (a *SettingController) listAdmins(c *gin.Context) {
 	if !a.ensureSuperAdmin(c) {
 		return
@@ -425,7 +549,7 @@ func (a *SettingController) listAdmins(c *gin.Context) {
 }
 
 func (a *SettingController) createAdmin(c *gin.Context) {
-	if !a.ensureSuperAdmin(c) {
+	if !a.ensureRecentSuperAdmin(c) {
 		return
 	}
 	var form adminForm
@@ -442,7 +566,7 @@ func (a *SettingController) createAdmin(c *gin.Context) {
 }
 
 func (a *SettingController) updateAdmin(c *gin.Context) {
-	if !a.ensureSuperAdmin(c) {
+	if !a.ensureRecentSuperAdmin(c) {
 		return
 	}
 	id, err := strconv.Atoi(c.Param("id"))
@@ -464,7 +588,7 @@ func (a *SettingController) updateAdmin(c *gin.Context) {
 }
 
 func (a *SettingController) deleteAdmin(c *gin.Context) {
-	if !a.ensureSuperAdmin(c) {
+	if !a.ensureRecentSuperAdmin(c) {
 		return
 	}
 	id, err := strconv.Atoi(c.Param("id"))
