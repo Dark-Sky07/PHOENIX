@@ -15,9 +15,20 @@ migration contract.
    `node.inboundSyncMode: "all"` policy; use `selected` only with a reviewed
    unique tag list. A template revision is immutable.
 4. Create an enrollment. The returned `bootstrapToken` is displayed exactly
-   once and expires in 15 minutes. Store it in a password manager or pass it
-   directly to the node; do not put it in a shell history or a URL.
-5. On the fleet node, run the agent over HTTPS:
+   once and expires in 15 minutes. To install the agent from the Fleet control
+   plane, call `POST /panel/api/fleet/enrollments/:id/installer` with the
+   exact HTTPS `panelUrl` (and an optional `certSha256` pin). This invalidates
+   the earlier unused token and returns a fresh, short-lived shell script.
+5. Review the generated script and run it **locally as root on the fleet
+   node**. It downloads only the latest official PHOENIX release, verifies the
+   matching published SHA-256 file before extraction, enrolls once, and then
+   installs `phoenix-fleet-agent.service` without leaving the bootstrap token
+   in the unit. The panel does not connect to the node, retain SSH keys, or
+   execute the script. For a self-signed central panel, keep TLS verification
+   on and include its base64 certificate SHA-256 as `certSha256`. The installer
+   always requires HTTPS and has no custom repository, binary, or HTTP option.
+
+   If PHOENIX is already installed and you prefer the manual path, run:
 
    ```sh
    phoenix agent \
@@ -27,19 +38,29 @@ migration contract.
      --cloudflared-path /usr/local/bin/cloudflared
    ```
 
-   The agent has no listener. It makes outbound check-ins, verifies normal TLS
-   by default, and writes its credentials plus staged desired state atomically
-   with mode `0600`. For a self-signed central panel, keep TLS verification on
-   and add `--cert-sha256` with the central panel certificate's base64 SHA-256
-   pin. `--allow-http` is only for a trusted development network. Omit
+   The agent has no listener. It makes outbound check-ins and writes its
+   credentials plus staged desired state atomically with mode `0600`. Omit
    `--cloudflared-path` if this node does not receive Cloudflare tunnels; the
    agent will report that provider as `unsupported` rather than executing an
-   arbitrary program.
+   arbitrary program. The generated installer also sets a fixed local
+   `--update-arch` enum. A manually provisioned ARM agent must use the exact
+   installer-selected `armv5`, `armv6`, or `armv7` value to opt into official
+   updates; the panel never supplies this value.
 6. Confirm the enrollment becomes `online`. Create a one-agent pool (for
    example `fra-canary`) and optionally bind it to the template.
 7. Deploy a specific revision to that pool. Inspect the enrollment
    `desiredRevision`, `appliedRevision`, `status`, and `lastError` before
    targeting the next pool. Creating a newer revision never deploys it.
+8. To update a Fleet node, select one canary enrollment and call
+   `POST /panel/api/fleet/enrollments/:id/update` with an empty body. The
+   panel records a numeric official release tag plus the matching
+   architecture-specific archive SHA-256 at queue time. The acknowledgement
+   deadline is 30 minutes. Wait for its `update` status to become `installed`
+   or `failed` before selecting the next explicit
+   cohort. A failure leaves the existing binary running; resolve the bounded
+   error and issue a new explicit update request. There is no release URL,
+   version, binary, argument, environment, upload, or rollback-artifact
+   parameter.
 
 The agent never runs a command received from the panel. It has a built-in
 supervised `cloudflared` adapter for `cloudflared` tunnel contracts, but the
@@ -53,9 +74,10 @@ their dedicated adapter is installed.
 
 ## Run the agent under systemd
 
-Enroll once interactively with the bootstrap token, then run a long-lived unit
-**without** that token. The state file contains the rotating credential; a
-bootstrap token is one-use and must not be copied into a unit file.
+Enroll once with `phoenix agent --once` and the bootstrap token, then run a
+long-lived unit **without** that token. The state file contains the rotating
+credential; a bootstrap token is one-use and must not be copied into a unit
+file.
 
 ```ini
 # /etc/systemd/system/phoenix-fleet-agent.service
@@ -75,17 +97,20 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
-ReadWritePaths=/etc/x-ui
+# Atomic rename needs the parent directory; the agent hardcodes x-ui as target.
+ReadWritePaths=/etc/x-ui /usr/local/bin
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-Replace `/usr/local/bin/x-ui` with the installed PHOENIX executable. Before
-starting the unit, verify that `cloudflared` is an operator-installed regular
-executable at the exact absolute path and make the state/tunnel directory
-owner-only (`0700`). Run `systemctl daemon-reload` followed by
-`systemctl enable --now phoenix-fleet-agent`.
+Keep the installer-owned `/usr/local/bin/x-ui` path for Fleet
+official-release updates; an agent started from another executable remains
+safe but does not advertise update capability. Before starting the unit,
+verify that `cloudflared` is an operator-installed regular executable at the
+exact absolute path and make the state/tunnel directory owner-only (`0700`).
+Run `systemctl daemon-reload` followed by `systemctl enable --now
+phoenix-fleet-agent`.
 
 A reachable disabled enrollment receives a terminal response: the agent stops
 all managed connectors and removes their generated files, but preserves its

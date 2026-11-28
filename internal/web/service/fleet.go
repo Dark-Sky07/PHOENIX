@@ -12,6 +12,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/url"
+	"path"
 	"regexp"
 	"sort"
 	"strings"
@@ -29,11 +32,19 @@ const (
 	fleetBootstrapLifetime     = 15 * time.Minute
 	fleetCredentialLifetime    = 90 * 24 * time.Hour
 	fleetCredentialRotateAhead = 7 * 24 * time.Hour
+	fleetUpdateAckDeadline     = 30 * time.Minute
 	managedTunnelSecretPurpose = "managed-tunnel-provider-v1"
 	maxAgentDesiredStateBytes  = 96 * 1024
+	maxOfficialReleaseResponse = 128 * 1024
+	maxOfficialChecksumSidecar = 4 * 1024
 )
 
-var fleetIdentifierRE = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
+var (
+	fleetIdentifierRE           = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
+	fleetInstallerPanelURLRE    = regexp.MustCompile(`^https://[A-Za-z0-9._:/\[\]-]+$`)
+	fleetOfficialReleaseTagRE   = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+-phoenix$`)
+	fleetOfficialUpdateResolver = resolveFleetOfficialUpdate
+)
 
 // FleetTemplateDocument is intentionally a small declarative contract. There
 // is no command, URL, filesystem path, or arbitrary execution surface here.
@@ -100,8 +111,21 @@ type FleetEnrollmentView struct {
 	LastError           string                       `json:"lastError,omitempty"`
 	Assignment          *FleetAssignmentView         `json:"assignment,omitempty"`
 	TunnelStatuses      []FleetAgentTunnelStatusView `json:"tunnelStatuses,omitempty"`
+	Update              *FleetAgentUpdateView        `json:"update,omitempty"`
 	CreatedAt           int64                        `json:"createdAt"`
 	UpdatedAt           int64                        `json:"updatedAt"`
+}
+
+type FleetAgentUpdateView struct {
+	RequestedAt   int64  `json:"requestedAt"`
+	DeadlineAt    int64  `json:"deadlineAt"`
+	Status        string `json:"status"`
+	ReleaseTag    string `json:"releaseTag,omitempty"`
+	Architecture  string `json:"architecture,omitempty"`
+	ArchiveSHA256 string `json:"archiveSha256,omitempty"`
+	Error         string `json:"error,omitempty"`
+	AttemptedAt   int64  `json:"attemptedAt,omitempty"`
+	AppliedAt     int64  `json:"appliedAt,omitempty"`
 }
 
 type FleetAssignmentView struct {
@@ -128,6 +152,23 @@ type FleetAgentTunnelStatusView struct {
 type FleetEnrollmentCreateResult struct {
 	Enrollment     FleetEnrollmentView `json:"enrollment"`
 	BootstrapToken string              `json:"bootstrapToken"`
+}
+
+// FleetInstallerInput describes only the central-panel endpoint that the
+// operator wants placed in a one-time local bootstrap script. It is not an
+// execution request: the administrator explicitly copies the resulting script
+// to a node and runs it locally as root.
+type FleetInstallerInput struct {
+	PanelURL   string `json:"panelUrl"`
+	CertSHA256 string `json:"certSha256,omitempty"`
+}
+
+// FleetInstallerResult contains a newly issued bootstrap token only within the
+// generated shell script. Neither it nor the script is stored by the panel.
+type FleetInstallerResult struct {
+	Enrollment         FleetEnrollmentView `json:"enrollment"`
+	BootstrapExpiresAt int64               `json:"bootstrapExpiresAt"`
+	Script             string              `json:"script"`
 }
 
 type FleetCredentialRotateResult struct {
@@ -202,6 +243,29 @@ type AgentCheckInRequest struct {
 	AppliedRevision int                 `json:"appliedRevision"`
 	ApplyError      string              `json:"applyError,omitempty"`
 	Tunnels         []AgentTunnelReport `json:"tunnels,omitempty"`
+	Update          *AgentUpdateReport  `json:"update,omitempty"`
+}
+
+// AgentUpdateReport acknowledges only a panel-issued official-release update
+// request. There is deliberately no URL, binary, argument, or script field.
+type AgentUpdateReport struct {
+	RequestedAt int64  `json:"requestedAt"`
+	Status      string `json:"status"`
+	Error       string `json:"error,omitempty"`
+}
+
+type AgentUpdateInstruction struct {
+	RequestedAt   int64  `json:"requestedAt"`
+	Source        string `json:"source"`
+	ReleaseTag    string `json:"releaseTag"`
+	Architecture  string `json:"architecture"`
+	ArchiveSHA256 string `json:"archiveSha256"`
+}
+
+type fleetOfficialUpdate struct {
+	ReleaseTag    string
+	Architecture  string
+	ArchiveSHA256 string
 }
 
 // AgentTunnelReport is bounded operational status, not connector output. It
@@ -241,10 +305,11 @@ type AgentEnrollResponse struct {
 }
 
 type AgentCheckInResponse struct {
-	Credential          string             `json:"credential,omitempty"`
-	CredentialExpiresAt int64              `json:"credentialExpiresAt"`
-	DesiredState        *AgentDesiredState `json:"desiredState,omitempty"`
-	Disabled            bool               `json:"disabled,omitempty"`
+	Credential          string                  `json:"credential,omitempty"`
+	CredentialExpiresAt int64                   `json:"credentialExpiresAt"`
+	DesiredState        *AgentDesiredState      `json:"desiredState,omitempty"`
+	Update              *AgentUpdateInstruction `json:"update,omitempty"`
+	Disabled            bool                    `json:"disabled,omitempty"`
 }
 
 type FleetService struct{}
@@ -484,6 +549,124 @@ func (FleetService) CreateEnrollment(in FleetEnrollmentInput) (*FleetEnrollmentC
 	return &FleetEnrollmentCreateResult{Enrollment: fleetEnrollmentView(&row), BootstrapToken: bootstrap}, nil
 }
 
+// CreateEnrollmentInstaller issues a replacement one-time bootstrap token for
+// a pending enrollment and renders a script for an administrator to run on the
+// target node. The panel never contacts that node, stores SSH credentials, or
+// executes this script. Reissuing invalidates any earlier unconsumed bootstrap
+// token for the same enrollment.
+func (FleetService) CreateEnrollmentInstaller(id int, in FleetInstallerInput) (*FleetInstallerResult, error) {
+	if id <= 0 {
+		return nil, common.NewError("invalid fleet enrollment id")
+	}
+	panelURL, err := normalizeFleetInstallerPanelURL(in.PanelURL)
+	if err != nil {
+		return nil, err
+	}
+	certPin, err := normalizeFleetInstallerCertPin(in.CertSHA256)
+	if err != nil {
+		return nil, err
+	}
+	bootstrap, err := fleetRandomToken()
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	expiresAt := now.Add(fleetBootstrapLifetime).UnixMilli()
+	var row model.FleetAgentEnrollment
+	if err := database.GetDB().Transaction(func(tx *gorm.DB) error {
+		if err := tx.First(&row, id).Error; err != nil {
+			return err
+		}
+		if !row.Enabled {
+			return common.NewError("disabled fleet enrollment cannot receive an installer")
+		}
+		if row.AgentID != nil || row.BootstrapUsedAt != 0 {
+			return common.NewError("agent has already enrolled; rotate its credential instead")
+		}
+		result := tx.Model(&row).Where("id = ? AND bootstrap_used_at = ? AND enabled = ?", row.ID, 0, true).Updates(map[string]any{
+			"bootstrap_token_hash": fleetTokenHash(bootstrap),
+			"bootstrap_expires_at": expiresAt,
+		})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return common.NewError("fleet enrollment changed while issuing installer; try again")
+		}
+		return tx.First(&row, id).Error
+	}); err != nil {
+		return nil, err
+	}
+	return &FleetInstallerResult{
+		Enrollment:         fleetEnrollmentView(&row),
+		BootstrapExpiresAt: expiresAt,
+		Script:             renderFleetEnrollmentInstaller(panelURL, certPin, bootstrap),
+	}, nil
+}
+
+// RequestEnrollmentUpdate schedules one enrolled agent to install the latest
+// official PHOENIX release. It is an enum-only request: neither an operator
+// nor a panel response can select a URL, binary, argument list, or script.
+func (FleetService) RequestEnrollmentUpdate(id int) (*FleetAgentUpdateView, error) {
+	if id <= 0 {
+		return nil, common.NewError("invalid fleet enrollment id")
+	}
+	var current model.FleetAgentEnrollment
+	if err := database.GetDB().First(&current, id).Error; err != nil {
+		return nil, err
+	}
+	architecture, ok := agentOfficialUpdateArchitecture(current.Capabilities)
+	if !current.Enabled || current.AgentID == nil || *current.AgentID == "" {
+		return nil, common.NewError("fleet agent must be enrolled and enabled before it can be updated")
+	}
+	if !ok {
+		return nil, common.NewError("fleet agent does not support verified official-release updates")
+	}
+	release, err := fleetOfficialUpdateResolver(context.Background(), architecture)
+	if err != nil {
+		return nil, fmt.Errorf("resolve official PHOENIX release: %w", err)
+	}
+	if release.Architecture != architecture || !fleetOfficialReleaseTagRE.MatchString(release.ReleaseTag) || len(release.ArchiveSHA256) != sha256.Size*2 {
+		return nil, common.NewError("official PHOENIX release metadata is invalid")
+	}
+	if digest, err := hex.DecodeString(release.ArchiveSHA256); err != nil || len(digest) != sha256.Size {
+		return nil, common.NewError("official PHOENIX release metadata is invalid")
+	}
+	now := time.Now()
+	deadline := now.Add(fleetUpdateAckDeadline)
+	var row model.FleetAgentEnrollment
+	if err := database.GetDB().Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&row, id).Error; err != nil {
+			return err
+		}
+		if !row.Enabled || row.AgentID == nil || *row.AgentID == "" {
+			return common.NewError("fleet agent must be enrolled and enabled before it can be updated")
+		}
+		if currentArchitecture, supported := agentOfficialUpdateArchitecture(row.Capabilities); !supported || currentArchitecture != architecture {
+			return common.NewError("fleet agent update capability changed; refresh and try again")
+		}
+		if row.UpdateStatus == "pending" || row.UpdateStatus == "accepted" {
+			if row.UpdateDeadlineAt == 0 || now.UnixMilli() < row.UpdateDeadlineAt {
+				return common.NewError("fleet agent already has an update in progress")
+			}
+		}
+		return tx.Model(&row).Updates(map[string]any{
+			"update_requested_at":   now.UnixMilli(),
+			"update_deadline_at":    deadline.UnixMilli(),
+			"update_status":         "pending",
+			"update_release_tag":    release.ReleaseTag,
+			"update_architecture":   release.Architecture,
+			"update_archive_sha256": release.ArchiveSHA256,
+			"update_error":          "",
+			"update_attempted_at":   0,
+			"update_applied_at":     0,
+		}).Error
+	}); err != nil {
+		return nil, err
+	}
+	return &FleetAgentUpdateView{RequestedAt: now.UnixMilli(), DeadlineAt: deadline.UnixMilli(), Status: "pending", ReleaseTag: release.ReleaseTag, Architecture: release.Architecture, ArchiveSHA256: release.ArchiveSHA256}, nil
+}
+
 func (FleetService) RotateEnrollmentCredential(id int) (*FleetCredentialRotateResult, error) {
 	if id <= 0 {
 		return nil, common.NewError("invalid fleet enrollment id")
@@ -528,7 +711,12 @@ func (FleetService) SetEnrollmentEnabled(id int, enabled bool) (*FleetEnrollment
 	} else if status == "disabled" {
 		status = "pending"
 	}
-	if err := database.GetDB().Model(&row).Updates(map[string]any{"enabled": enabled, "status": status}).Error; err != nil {
+	updates := map[string]any{"enabled": enabled, "status": status}
+	if !enabled && (row.UpdateStatus == "pending" || row.UpdateStatus == "accepted") {
+		updates["update_status"] = "cancelled"
+		updates["update_error"] = "enrollment disabled before update completed"
+	}
+	if err := database.GetDB().Model(&row).Updates(updates).Error; err != nil {
 		return nil, err
 	}
 	if err := database.GetDB().First(&row, id).Error; err != nil {
@@ -740,10 +928,16 @@ func (FleetService) AgentCheckIn(ctx context.Context, credential string, in Agen
 	if in.AppliedRevision < 0 || len(in.ApplyError) > 512 || len(in.Tunnels) > 64 {
 		return nil, common.NewError("invalid agent acknowledgement")
 	}
+	if err := validateAgentUpdateReport(in.Update); err != nil {
+		return nil, err
+	}
 	if err := validateAgentTunnelReports(enrollment.ID, in.AppliedRevision, in.Tunnels); err != nil {
 		return nil, err
 	}
 	now := time.Now()
+	if err := expireFleetUpdate(enrollment, now); err != nil {
+		return nil, err
+	}
 	version := trimBounded(in.Version, 128)
 	updates := map[string]any{"status": "online", "last_check_in_at": now.UnixMilli(), "capabilities": capabilities}
 	if version != "" {
@@ -758,6 +952,9 @@ func (FleetService) AgentCheckIn(ctx context.Context, credential string, in Agen
 	if err := updateAgentTunnelStatuses(enrollment.ID, in.AppliedRevision, in.Tunnels, now); err != nil {
 		return nil, err
 	}
+	if err := recordAgentUpdateReport(enrollment.ID, in.Update, now); err != nil {
+		return nil, err
+	}
 	if err := database.GetDB().First(enrollment, enrollment.ID).Error; err != nil {
 		return nil, err
 	}
@@ -767,6 +964,9 @@ func (FleetService) AgentCheckIn(ctx context.Context, credential string, in Agen
 		return nil, err
 	}
 	response := &AgentCheckInResponse{CredentialExpiresAt: enrollment.CredentialExpiresAt, DesiredState: desired}
+	if architecture, supported := agentOfficialUpdateArchitecture(capabilities); supported && (enrollment.UpdateStatus == "pending" || enrollment.UpdateStatus == "accepted") && enrollment.UpdateRequestedAt > 0 && enrollment.UpdateDeadlineAt > now.UnixMilli() && enrollment.UpdateArchitecture == architecture {
+		response.Update = &AgentUpdateInstruction{RequestedAt: enrollment.UpdateRequestedAt, Source: "official-release-v1", ReleaseTag: enrollment.UpdateReleaseTag, Architecture: enrollment.UpdateArchitecture, ArchiveSHA256: enrollment.UpdateArchiveSHA256}
+	}
 	if time.UnixMilli(enrollment.CredentialExpiresAt).Before(now.Add(fleetCredentialRotateAhead)) {
 		next, rotateErr := rotateFleetAgentCredential(enrollment)
 		if rotateErr != nil {
@@ -1359,11 +1559,139 @@ func fleetEnrollmentView(row *model.FleetAgentEnrollment) FleetEnrollmentView {
 	if row.AgentID != nil {
 		agentID = *row.AgentID
 	}
-	return FleetEnrollmentView{ID: row.ID, Name: row.Name, NodeID: row.NodeID, AgentID: agentID, BootstrapExpiresAt: row.BootstrapExpiresAt, BootstrapUsedAt: row.BootstrapUsedAt, CredentialExpiresAt: row.CredentialExpiresAt, CredentialRotatedAt: row.CredentialRotatedAt, HasCredential: row.CredentialHash != "", Enabled: row.Enabled, Capabilities: capabilities, Version: row.Version, Status: row.Status, LastCheckInAt: row.LastCheckInAt, LastError: row.LastError, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}
+	var update *FleetAgentUpdateView
+	if row.UpdateRequestedAt != 0 {
+		update = &FleetAgentUpdateView{RequestedAt: row.UpdateRequestedAt, DeadlineAt: row.UpdateDeadlineAt, Status: row.UpdateStatus, ReleaseTag: row.UpdateReleaseTag, Architecture: row.UpdateArchitecture, ArchiveSHA256: row.UpdateArchiveSHA256, Error: row.UpdateError, AttemptedAt: row.UpdateAttemptedAt, AppliedAt: row.UpdateAppliedAt}
+	}
+	return FleetEnrollmentView{ID: row.ID, Name: row.Name, NodeID: row.NodeID, AgentID: agentID, BootstrapExpiresAt: row.BootstrapExpiresAt, BootstrapUsedAt: row.BootstrapUsedAt, CredentialExpiresAt: row.CredentialExpiresAt, CredentialRotatedAt: row.CredentialRotatedAt, HasCredential: row.CredentialHash != "", Enabled: row.Enabled, Capabilities: capabilities, Version: row.Version, Status: row.Status, LastCheckInAt: row.LastCheckInAt, LastError: row.LastError, Update: update, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}
 }
 
 func managedTunnelView(row *model.ManagedTunnel) ManagedTunnelView {
 	return ManagedTunnelView{ID: row.ID, Name: row.Name, Provider: row.Provider, PublicHostname: row.PublicHostname, TargetHost: row.TargetHost, TargetPort: row.TargetPort, Protocol: row.Protocol, HasProviderConfig: row.ProviderConfigEncrypted != "", Enabled: row.Enabled, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}
+}
+
+func normalizeFleetInstallerPanelURL(raw string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", common.NewError("installer panelUrl must be an HTTPS URL without credentials, query, or fragment")
+	}
+	parsed.Path = strings.TrimSuffix(path.Clean("/"+parsed.Path), "/")
+	if parsed.Path == "." {
+		parsed.Path = ""
+	}
+	normalized := strings.TrimSuffix(parsed.String(), "/")
+	if !fleetInstallerPanelURLRE.MatchString(normalized) {
+		return "", common.NewError("installer panelUrl contains unsupported characters")
+	}
+	return normalized, nil
+}
+
+func normalizeFleetInstallerCertPin(raw string) (string, error) {
+	pin := strings.TrimSpace(strings.ReplaceAll(raw, ":", ""))
+	if pin == "" {
+		return "", nil
+	}
+	for _, encoding := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
+		decoded, err := encoding.DecodeString(pin)
+		if err == nil && len(decoded) == sha256.Size {
+			return pin, nil
+		}
+	}
+	return "", common.NewError("installer certSha256 must be a base64 SHA-256 certificate pin")
+}
+
+func shellSingleQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\\"'\\\"'") + "'"
+}
+
+// renderFleetEnrollmentInstaller intentionally renders a complete script
+// instead of exposing a node-facing panel endpoint. This keeps the panel out
+// of the transport path: an operator reviews and runs it locally, the
+// bootstrap token stays in a one-time POST body, and the installer downloads
+// only a checksum-verified official PHOENIX release.
+func renderFleetEnrollmentInstaller(panelURL, certPin, bootstrap string) string {
+	certArg := ""
+	unitCertArg := ""
+	if certPin != "" {
+		certArg = " --cert-sha256 " + shellSingleQuote(certPin)
+		unitCertArg = " --cert-sha256 " + certPin
+	}
+	return fmt.Sprintf(`#!/bin/sh
+# Generated by PHOENIX for a single Fleet enrollment. Review before running.
+# This script expires in 15 minutes and can only enroll once.
+set -eu
+umask 077
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Run this Fleet installer as root." >&2
+  exit 1
+fi
+for command in curl tar sha256sum install systemctl uname mktemp grep sed awk; do
+  command -v "$command" >/dev/null 2>&1 || { echo "Missing required command: $command" >&2; exit 1; }
+done
+case "$(uname -m)" in
+  x86_64|amd64) arch=amd64 ;;
+  aarch64|arm64) arch=arm64 ;;
+  armv7*|armv7|arm) arch=armv7 ;;
+  armv6*|armv6) arch=armv6 ;;
+  armv5*|armv5) arch=armv5 ;;
+  i?86|x86) arch=386 ;;
+  s390x) arch=s390x ;;
+  *) echo "Unsupported CPU architecture: $(uname -m)" >&2; exit 1 ;;
+esac
+
+repo=Dark-Sky07/PHOENIX
+release_json="$(curl --fail --silent --show-error --location --retry 3 https://api.github.com/repos/$repo/releases/latest)"
+tag="$(printf '%%s\n' "$release_json" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+printf '%%s\n' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+-phoenix$' || { echo "Official PHOENIX release tag was invalid." >&2; exit 1; }
+archive="x-ui-linux-$arch.tar.gz"
+tmp="$(mktemp -d /tmp/phoenix-fleet-install.XXXXXX)"
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+curl --fail --silent --show-error --location --retry 3 -o "$tmp/$archive" "https://github.com/$repo/releases/download/$tag/$archive"
+curl --fail --silent --show-error --location --retry 3 -o "$tmp/$archive.sha256" "https://github.com/$repo/releases/download/$tag/$archive.sha256"
+(
+  cd "$tmp"
+  expected="$(awk -v name="$archive" '$2 == name { print; found=1 } END { exit !found }' "$archive.sha256")" || exit 1
+  printf '%%s\n' "$expected" | sha256sum --check --status
+) || { echo "Official PHOENIX archive checksum verification failed." >&2; exit 1; }
+mkdir -p "$tmp/unpack"
+# Extract only the expected binary member; do not unpack ancillary archive paths.
+tar -xzf "$tmp/$archive" -C "$tmp/unpack" x-ui/x-ui
+test -f "$tmp/unpack/x-ui/x-ui" || { echo "Official PHOENIX archive has an unexpected layout." >&2; exit 1; }
+install -d -m 0700 /etc/x-ui /etc/x-ui/managed-tunnels
+install -m 0755 "$tmp/unpack/x-ui/x-ui" /usr/local/bin/x-ui
+
+# Enroll once before writing a long-lived service. The token is never put in
+# the unit file or the persistent state, and expires after this one enrollment.
+/usr/local/bin/x-ui agent --once --panel %s --bootstrap-token %s --state /etc/x-ui/phoenix-agent.json --tunnel-dir /etc/x-ui/managed-tunnels --update-arch "$arch"%s
+
+# $arch was selected by the fixed uname case above, not supplied by the panel.
+cat >/etc/systemd/system/phoenix-fleet-agent.service <<UNIT
+[Unit]
+Description=PHOENIX Fleet Node Agent
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/x-ui agent --panel %s --state /etc/x-ui/phoenix-agent.json --tunnel-dir /etc/x-ui/managed-tunnels --update-arch $arch%s
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+# /usr/local/bin is needed only for the updater's atomic rename; the agent
+# hardcodes /usr/local/bin/x-ui and accepts no panel-selected target.
+ReadWritePaths=/etc/x-ui /usr/local/bin
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now phoenix-fleet-agent
+printf 'Fleet Agent enrolled from official PHOENIX release %%s and started.\n' "$tag"
+`, shellSingleQuote(panelURL), shellSingleQuote(bootstrap), certArg, panelURL, unitCertArg)
 }
 
 func normalizeAgentCapabilities(raw json.RawMessage) (string, error) {
@@ -1387,6 +1715,191 @@ func normalizeAgentCapabilities(raw json.RawMessage) (string, error) {
 		return "", err
 	}
 	return string(canonical), nil
+}
+
+// resolveFleetOfficialUpdate creates a pinned, per-architecture update plan.
+// It reads only the official latest-release metadata and fixed GitHub release
+// asset paths; an operator cannot supply a release URL or digest.
+func resolveFleetOfficialUpdate(ctx context.Context, architecture string) (fleetOfficialUpdate, error) {
+	if !validFleetOfficialArchitecture(architecture) {
+		return fleetOfficialUpdate{}, common.NewError("unsupported fleet agent architecture")
+	}
+	client := &http.Client{Timeout: 20 * time.Second}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/repos/Dark-Sky07/PHOENIX/releases/latest", nil)
+	if err != nil {
+		return fleetOfficialUpdate{}, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fleetOfficialUpdate{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fleetOfficialUpdate{}, fmt.Errorf("official release lookup returned %s", resp.Status)
+	}
+	var release struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxOfficialReleaseResponse)).Decode(&release); err != nil {
+		return fleetOfficialUpdate{}, err
+	}
+	if !fleetOfficialReleaseTagRE.MatchString(release.TagName) {
+		return fleetOfficialUpdate{}, common.NewError("official release tag is invalid")
+	}
+	archive := "x-ui-linux-" + architecture + ".tar.gz"
+	sidecarURL := "https://github.com/Dark-Sky07/PHOENIX/releases/download/" + release.TagName + "/" + archive + ".sha256"
+	sidecarRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, sidecarURL, nil)
+	if err != nil {
+		return fleetOfficialUpdate{}, err
+	}
+	sidecarResponse, err := client.Do(sidecarRequest)
+	if err != nil {
+		return fleetOfficialUpdate{}, err
+	}
+	defer sidecarResponse.Body.Close()
+	if sidecarResponse.StatusCode != http.StatusOK {
+		return fleetOfficialUpdate{}, fmt.Errorf("official release checksum returned %s", sidecarResponse.Status)
+	}
+	sidecar, err := io.ReadAll(io.LimitReader(sidecarResponse.Body, maxOfficialChecksumSidecar+1))
+	if err != nil {
+		return fleetOfficialUpdate{}, err
+	}
+	if len(sidecar) > maxOfficialChecksumSidecar {
+		return fleetOfficialUpdate{}, common.NewError("official release checksum is too large")
+	}
+	digest, err := fleetArchiveChecksum(sidecar, archive)
+	if err != nil {
+		return fleetOfficialUpdate{}, err
+	}
+	return fleetOfficialUpdate{ReleaseTag: release.TagName, Architecture: architecture, ArchiveSHA256: digest}, nil
+}
+
+func fleetArchiveChecksum(sidecar []byte, archive string) (string, error) {
+	for _, line := range strings.Split(string(sidecar), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || strings.TrimPrefix(fields[1], "*") != archive || len(fields[0]) != sha256.Size*2 {
+			continue
+		}
+		decoded, err := hex.DecodeString(fields[0])
+		if err == nil && len(decoded) == sha256.Size {
+			return strings.ToLower(fields[0]), nil
+		}
+	}
+	return "", common.NewError("official release checksum sidecar is invalid")
+}
+
+func validFleetOfficialArchitecture(architecture string) bool {
+	switch architecture {
+	case "amd64", "arm64", "armv7", "armv6", "armv5", "386", "s390x":
+		return true
+	default:
+		return false
+	}
+}
+
+func validateAgentUpdateReport(report *AgentUpdateReport) error {
+	if report == nil {
+		return nil
+	}
+	if report.RequestedAt <= 0 || len(report.Error) > 512 {
+		return common.NewError("invalid agent update report")
+	}
+	switch report.Status {
+	case "accepted", "installed":
+		if report.Error != "" {
+			return common.NewError("invalid agent update report")
+		}
+	case "failed":
+		if strings.TrimSpace(report.Error) == "" {
+			return common.NewError("invalid agent update report")
+		}
+	default:
+		return common.NewError("invalid agent update report")
+	}
+	return nil
+}
+
+func expireFleetUpdate(enrollment *model.FleetAgentEnrollment, now time.Time) error {
+	if enrollment == nil || (enrollment.UpdateStatus != "pending" && enrollment.UpdateStatus != "accepted") || enrollment.UpdateDeadlineAt <= 0 || now.UnixMilli() < enrollment.UpdateDeadlineAt {
+		return nil
+	}
+	return database.GetDB().Model(enrollment).Updates(map[string]any{
+		"update_status": "failed",
+		"update_error":  "official update acknowledgement timed out",
+	}).Error
+}
+
+func recordAgentUpdateReport(enrollmentID int, report *AgentUpdateReport, now time.Time) error {
+	if report == nil {
+		return nil
+	}
+	var row model.FleetAgentEnrollment
+	if err := database.GetDB().First(&row, enrollmentID).Error; err != nil {
+		return err
+	}
+	// Agents retain the last bounded acknowledgement across restart. A newer
+	// explicit rollout can supersede it, so stale reports are diagnostic only
+	// and must not prevent the agent from receiving the current instruction.
+	if row.UpdateRequestedAt != report.RequestedAt || row.UpdateRequestedAt == 0 {
+		return nil
+	}
+	if err := expireFleetUpdate(&row, now); err != nil {
+		return err
+	}
+	if row.UpdateStatus == "pending" || row.UpdateStatus == "accepted" {
+		if row.UpdateDeadlineAt > 0 && now.UnixMilli() >= row.UpdateDeadlineAt {
+			return nil
+		}
+	}
+	updates := map[string]any{}
+	switch report.Status {
+	case "accepted":
+		if row.UpdateStatus != "pending" && row.UpdateStatus != "accepted" {
+			return common.NewError("agent update request is no longer active")
+		}
+		updates["update_status"] = "accepted"
+		updates["update_error"] = ""
+		updates["update_attempted_at"] = now.UnixMilli()
+	case "installed":
+		if row.UpdateStatus != "pending" && row.UpdateStatus != "accepted" && row.UpdateStatus != "installed" {
+			return common.NewError("agent update request is no longer active")
+		}
+		updates["update_status"] = "installed"
+		updates["update_error"] = ""
+		if row.UpdateAttemptedAt == 0 {
+			updates["update_attempted_at"] = now.UnixMilli()
+		}
+		updates["update_applied_at"] = now.UnixMilli()
+	case "failed":
+		if row.UpdateStatus != "pending" && row.UpdateStatus != "accepted" && row.UpdateStatus != "failed" {
+			return common.NewError("agent update request is no longer active")
+		}
+		updates["update_status"] = "failed"
+		updates["update_error"] = trimBounded(report.Error, 512)
+		updates["update_attempted_at"] = now.UnixMilli()
+	}
+	return database.GetDB().Model(&row).Updates(updates).Error
+}
+
+func agentSupportsOfficialUpdate(capabilities string) bool {
+	_, supported := agentOfficialUpdateArchitecture(capabilities)
+	return supported
+}
+
+func agentOfficialUpdateArchitecture(capabilities string) (string, bool) {
+	var value struct {
+		Updates    string `json:"updates"`
+		UpdateArch string `json:"updateArch"`
+	}
+	if json.Unmarshal([]byte(capabilities), &value) != nil || value.Updates != "official-v1" {
+		return "", false
+	}
+	switch value.UpdateArch {
+	case "amd64", "arm64", "armv7", "armv6", "armv5", "386", "s390x":
+		return value.UpdateArch, true
+	default:
+		return "", false
+	}
 }
 
 func normalizeFleetName(raw, kind string) (string, error) {

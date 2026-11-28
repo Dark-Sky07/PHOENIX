@@ -66,12 +66,86 @@ func TestDesiredStateMatchesIncludesTunnelContract(t *testing.T) {
 	}
 }
 
+func TestAgentOnceStopsAfterEnrollment(t *testing.T) {
+	var enrollments int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/panel/agent/v1/enroll" {
+			t.Errorf("unexpected request in once mode: %s", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		enrollments++
+		_ = json.NewEncoder(w).Encode(service.AgentEnrollResponse{Credential: strings.Repeat("a", 43)})
+	}))
+	defer server.Close()
+	statePath := filepath.Join(t.TempDir(), "agent.json")
+	agent, err := New(Config{PanelURL: server.URL, BootstrapToken: strings.Repeat("b", 43), StatePath: statePath, TunnelDir: t.TempDir(), AllowHTTP: true, PollInterval: 5 * time.Second, Once: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if enrollments != 1 || agent.state.Credential == "" {
+		t.Fatalf("once agent did not enroll exactly once: enrollments=%d state=%+v", enrollments, agent.state)
+	}
+}
+
+func TestOfficialUpdateInstructionIsStrictlyPinned(t *testing.T) {
+	valid := &service.AgentUpdateInstruction{
+		RequestedAt: 1, Source: "official-release-v1", ReleaseTag: "v5.9.53-phoenix", Architecture: "amd64", ArchiveSHA256: strings.Repeat("a", 64),
+	}
+	if !validOfficialUpdateInstruction(valid, "amd64") {
+		t.Fatal("valid pinned official update instruction was rejected")
+	}
+	for _, mutate := range []func(*service.AgentUpdateInstruction){
+		func(value *service.AgentUpdateInstruction) { value.Source = "https://example.invalid/custom" },
+		func(value *service.AgentUpdateInstruction) { value.ReleaseTag = "latest" },
+		func(value *service.AgentUpdateInstruction) { value.Architecture = "arm64" },
+		func(value *service.AgentUpdateInstruction) { value.ArchiveSHA256 = "not-a-sha256" },
+	} {
+		copy := *valid
+		mutate(&copy)
+		if validOfficialUpdateInstruction(&copy, "amd64") {
+			t.Fatalf("unsafe update instruction was accepted: %+v", copy)
+		}
+	}
+}
+
+func TestOfficialUpdateConfigHasNoBinaryOverride(t *testing.T) {
+	if err := validateOfficialUpdateConfig("/usr/local/bin/x-ui"); err != nil {
+		t.Fatalf("official binary path rejected: %v", err)
+	}
+	for _, binaryPath := range []string{"relative/x-ui", "/tmp/x-ui", "/usr/local/bin/x-ui/../other"} {
+		if err := validateOfficialUpdateConfig(binaryPath); err == nil {
+			t.Fatalf("unsafe binary path accepted: %q", binaryPath)
+		}
+	}
+}
+
+func TestLocalUpdateArchitectureIsEnumOnly(t *testing.T) {
+	config := Config{PanelURL: "http://127.0.0.1:2053", AllowHTTP: true, StatePath: filepath.Join(t.TempDir(), "agent.json"), TunnelDir: t.TempDir(), UpdateBinaryPath: "/usr/local/bin/x-ui", UpdateArchitecture: "armv5"}
+	agent, err := New(config)
+	if err != nil {
+		t.Fatalf("locally pinned official architecture rejected: %v", err)
+	}
+	defer agent.tunnels.Close()
+	if agent.updateArch != "armv5" || !strings.Contains(string(agent.capabilities()), `"updateArch":"armv5"`) {
+		t.Fatalf("local update architecture was not reported safely: %q %s", agent.updateArch, agent.capabilities())
+	}
+	config.UpdateArchitecture = "../../custom"
+	if _, err := New(config); err == nil {
+		t.Fatal("invalid local update architecture was accepted")
+	}
+}
+
 func TestAgentRehydratesActiveDesiredStateFromProtectedState(t *testing.T) {
 	desired := testDesiredState(3, nil)
 	statePath := filepath.Join(t.TempDir(), "agent.json")
 	persisted, err := json.Marshal(State{
 		AgentID: "pa_rehydrate_123456789", Credential: strings.Repeat("c", 43),
 		DesiredState: desired, DesiredActive: true, AppliedRevision: desired.Revision,
+		Update: &updateState{RequestedAt: 123, Status: "installed"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -102,7 +176,7 @@ func TestAgentRehydratesActiveDesiredStateFromProtectedState(t *testing.T) {
 	if err := agent.SyncOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if request.AppliedRevision != 3 || request.ApplyError != "" || !agent.state.DesiredActive || agent.state.AppliedRevision != 3 {
+	if request.AppliedRevision != 3 || request.ApplyError != "" || request.Update == nil || request.Update.RequestedAt != 123 || request.Update.Status != "installed" || !agent.state.DesiredActive || agent.state.AppliedRevision != 3 {
 		t.Fatalf("rehydrated check-in/state = (%+v, %+v)", request, agent.state)
 	}
 }

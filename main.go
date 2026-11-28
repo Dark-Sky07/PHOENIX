@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -533,11 +534,23 @@ func loadServiceEnvFile() {
 // runFleetAgent starts the outbound-only Phase C node agent. It deliberately
 // does not initialize this host's panel database or Xray: the agent's narrow
 // job is to reconcile authenticated fleet state through fixed local adapters.
-func runFleetAgent(panelURL, bootstrapToken, statePath, tunnelDir, cloudflaredPath, certSHA256 string, interval time.Duration, allowHTTP bool) error {
+func runFleetAgent(panelURL, bootstrapToken, statePath, tunnelDir, cloudflaredPath, certSHA256, updateArchitecture string, interval time.Duration, allowHTTP, once bool) error {
+	// The agent updater deliberately has no CLI path override. Only the
+	// installer-owned binary can opt in, so a panel response never chooses what
+	// local program is replaced.
+	updateBinary := ""
+	if os.Geteuid() == 0 {
+		if executable, err := os.Executable(); err == nil {
+			if resolved, err := filepath.EvalSymlinks(executable); err == nil && resolved == "/usr/local/bin/x-ui" {
+				updateBinary = resolved
+			}
+		}
+	}
 	agent, err := fleetagent.New(fleetagent.Config{
 		PanelURL: panelURL, BootstrapToken: bootstrapToken, StatePath: statePath,
 		TunnelDir: tunnelDir, CloudflaredPath: cloudflaredPath,
-		PollInterval: interval, CertSHA256: certSHA256, AllowHTTP: allowHTTP,
+		PollInterval: interval, CertSHA256: certSHA256, AllowHTTP: allowHTTP, Once: once,
+		UpdateBinaryPath: updateBinary, UpdateArchitecture: updateArchitecture,
 	})
 	if err != nil {
 		return err
@@ -569,16 +582,20 @@ func main() {
 	var agentTunnelDir string
 	var agentCloudflaredPath string
 	var agentCertSHA256 string
+	var agentUpdateArchitecture string
 	var agentPollInterval time.Duration
 	var agentAllowHTTP bool
+	var agentOnce bool
 	agentCmd.StringVar(&agentPanelURL, "panel", "", "Central panel base URL (HTTPS)")
 	agentCmd.StringVar(&agentBootstrapToken, "bootstrap-token", "", "One-time fleet enrollment token (not stored in the state file)")
 	agentCmd.StringVar(&agentStatePath, "state", "/etc/x-ui/phoenix-agent.json", "Owner-only agent state file")
 	agentCmd.StringVar(&agentTunnelDir, "tunnel-dir", "/etc/x-ui/managed-tunnels", "Owner-only managed tunnel configuration directory")
 	agentCmd.StringVar(&agentCloudflaredPath, "cloudflared-path", "", "Absolute path to the locally installed cloudflared executable")
 	agentCmd.StringVar(&agentCertSHA256, "cert-sha256", "", "Optional base64 SHA-256 pin for the central panel TLS certificate")
+	agentCmd.StringVar(&agentUpdateArchitecture, "update-arch", "", "Locally pinned official update architecture (installer-only; armv5, armv6, or armv7 when needed)")
 	agentCmd.DurationVar(&agentPollInterval, "interval", 15*time.Second, "Control-plane polling interval (5s-5m)")
 	agentCmd.BoolVar(&agentAllowHTTP, "allow-http", false, "Allow HTTP only for a trusted development network")
+	agentCmd.BoolVar(&agentOnce, "once", false, "Enroll or check in once, then exit (for a reviewed local bootstrap)")
 
 	migrateDbCmd := flag.NewFlagSet("migrate-db", flag.ExitOnError)
 	var migrateDsn string
@@ -663,8 +680,13 @@ func main() {
 			fmt.Println("agent requires --panel <https://central-panel[/base-path]>")
 			return
 		}
-		if err := runFleetAgent(agentPanelURL, agentBootstrapToken, agentStatePath, agentTunnelDir, agentCloudflaredPath, agentCertSHA256, agentPollInterval, agentAllowHTTP); err != nil {
+		if err := runFleetAgent(agentPanelURL, agentBootstrapToken, agentStatePath, agentTunnelDir, agentCloudflaredPath, agentCertSHA256, agentUpdateArchitecture, agentPollInterval, agentAllowHTTP, agentOnce); err != nil {
 			fmt.Println("fleet agent stopped:", err)
+			if errors.Is(err, fleetagent.ErrRestartRequired) {
+				// Restart=on-failure is intentionally part of the installer unit;
+				// this status hands control to it after an atomic official update.
+				os.Exit(75)
+			}
 			return
 		}
 	case "migrate":

@@ -209,6 +209,8 @@ func classifyAuditModule(relPath string) string {
 		return "resellers"
 	case strings.HasPrefix(relPath, "/panel/api/nodes"):
 		return "nodes"
+	case strings.HasPrefix(relPath, "/panel/api/fleet"):
+		return "fleet"
 	case strings.HasPrefix(relPath, "/panel/api/xray"):
 		return "xray"
 	case strings.HasPrefix(relPath, "/panel/api/server"):
