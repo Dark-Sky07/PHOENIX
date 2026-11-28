@@ -41,8 +41,8 @@ type tunnelProcess struct {
 }
 
 type cloudflaredProviderConfig struct {
-	TunnelID    string          `json:"tunnelId"`
-	Credentials json.RawMessage `json:"credentials"`
+	TunnelID    string
+	Credentials json.RawMessage
 }
 
 const connectorStopGracePeriod = 10 * time.Second
@@ -226,15 +226,27 @@ func parseCloudflaredProviderConfig(raw json.RawMessage) (cloudflaredProviderCon
 		return cloudflaredProviderConfig{}, errors.New("cloudflared providerConfig is required")
 	}
 	decoder := json.NewDecoder(strings.NewReader(string(raw)))
-	decoder.DisallowUnknownFields()
-	var config cloudflaredProviderConfig
-	if err := decoder.Decode(&config); err != nil {
+	var fields map[string]json.RawMessage
+	if err := decoder.Decode(&fields); err != nil {
 		return cloudflaredProviderConfig{}, errors.New("invalid cloudflared providerConfig")
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return cloudflaredProviderConfig{}, errors.New("invalid cloudflared providerConfig")
 	}
+	if len(fields) != 2 {
+		return cloudflaredProviderConfig{}, errors.New("invalid cloudflared providerConfig")
+	}
+	tunnelID, hasTunnelID := fields["tunnelId"]
+	credentials, hasCredentials := fields["credentials"]
+	if !hasTunnelID || !hasCredentials {
+		return cloudflaredProviderConfig{}, errors.New("invalid cloudflared providerConfig")
+	}
+	var config cloudflaredProviderConfig
+	if err := json.Unmarshal(tunnelID, &config.TunnelID); err != nil {
+		return cloudflaredProviderConfig{}, errors.New("invalid cloudflared providerConfig")
+	}
+	config.Credentials = credentials
 	if !tunnelUUIDRE.MatchString(config.TunnelID) || len(config.Credentials) == 0 || !json.Valid(config.Credentials) {
 		return cloudflaredProviderConfig{}, errors.New("cloudflared config requires tunnelId and credentials")
 	}

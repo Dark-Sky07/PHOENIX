@@ -113,7 +113,7 @@ type FleetAgentTunnelStatus struct {
 	TunnelID     int    `json:"tunnelId" gorm:"not null;uniqueIndex:idx_fleet_agent_tunnel_status,priority:2;index"`
 	Provider     string `json:"provider" gorm:"size:32;not null"`
 	Status       string `json:"status" gorm:"size:24;not null;default:unknown;index"`
-	PID          int    `json:"pid"`
+	PID          int    `json:"pid" gorm:"column:pid"`
 	LastError    string `json:"lastError" gorm:"size:512"`
 	ObservedAt   int64  `json:"observedAt"`
 	UpdatedAt    int64  `json:"updatedAt" gorm:"autoUpdateTime:milli"`
