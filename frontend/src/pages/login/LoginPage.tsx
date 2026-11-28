@@ -49,6 +49,7 @@ export default function LoginPage() {
   const [fetched, setFetched] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [twoFactorEnable, setTwoFactorEnable] = useState(false);
+  const [oidcEnabled, setOidcEnabled] = useState(false);
   const [headlineIndex, setHeadlineIndex] = useState(0);
   const [lang, setLang] = useState<string>(() => LanguageManager.getLanguage());
 
@@ -67,9 +68,13 @@ export default function LoginPage() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const msg = await HttpUtil.post('/getTwoFactorEnable');
+      const [msg, oidc] = await Promise.all([
+        HttpUtil.post('/getTwoFactorEnable'),
+        HttpUtil.get('/sso/oidc/status', undefined, { silent: true }),
+      ]);
       if (cancelled) return;
       if (msg.success) setTwoFactorEnable(!!msg.obj);
+      if (oidc?.success) setOidcEnabled(!!oidc.obj);
       setFetched(true);
     })();
     return () => { cancelled = true; };
@@ -280,6 +285,15 @@ export default function LoginPage() {
                       </Button>
                     </Form.Item>
                   </Form>
+                  {oidcEnabled ? (
+                    <Button
+                      block
+                      size="large"
+                      onClick={() => { window.location.assign(`${basePath}sso/oidc/login`); }}
+                    >
+                      Sign in with single sign-on
+                    </Button>
+                  ) : null}
                 </div>
               </div>
             )}

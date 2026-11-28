@@ -27,6 +27,7 @@ type XraySettingController struct {
 	NordService                 integration.NordService
 	OutboundSubscriptionService service.OutboundSubscriptionService
 	OutboundWatchdogService     service.OutboundWatchdogService
+	RuleSetCatalogService       service.RuleSetCatalogService
 }
 
 // NewXraySettingController creates a new XraySettingController and initializes its routes.
@@ -53,6 +54,16 @@ func (a *XraySettingController) initRouter(g *gin.RouterGroup) {
 	g.POST("/balancerStatus", a.balancerStatus)
 	g.POST("/balancerOverride", a.balancerOverride)
 	g.POST("/routeTest", a.routeTest)
+
+	// Managed remote routing lists. The cache is data-only and can be reviewed
+	// before an administrator adds its entries to an Xray routing rule.
+	g.GET("/rule-sets", a.listRuleSets)
+	g.GET("/rule-sets/:id", a.getRuleSet)
+	g.POST("/rule-sets", a.createRuleSet)
+	g.POST("/rule-sets/:id", a.updateRuleSet)
+	g.POST("/rule-sets/:id/refresh", a.refreshRuleSet)
+	g.DELETE("/rule-sets/:id", a.deleteRuleSet)
+	g.POST("/rule-sets/:id/del", a.deleteRuleSet)
 
 	// Outbound subscription (remote outbound lists)
 	g.GET("/outbound-subs", a.listOutboundSubs)
@@ -534,6 +545,79 @@ func (a *XraySettingController) parseOutboundSubURL(c *gin.Context) {
 		return
 	}
 	jsonObj(c, obs, nil)
+}
+
+// Rule-set catalog mutation follows the same recent-auth requirement as other
+// remote integration settings. Fetching arbitrary user-provided sources is
+// intentionally never available to a copied bearer token.
+func (a *XraySettingController) listRuleSets(c *gin.Context) {
+	rows, err := a.RuleSetCatalogService.List(c.Query("entries") == "true")
+	jsonObj(c, rows, err)
+}
+
+func (a *XraySettingController) getRuleSet(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		jsonMsg(c, "invalid rule-set id", err)
+		return
+	}
+	row, err := a.RuleSetCatalogService.Get(id, c.Query("entries") != "false")
+	jsonObj(c, row, err)
+}
+
+func (a *XraySettingController) createRuleSet(c *gin.Context) {
+	if !requireRecentInteractiveSuperAdmin(c) {
+		return
+	}
+	var in service.RuleSetCatalogInput
+	if err := c.ShouldBindJSON(&in); err != nil {
+		jsonMsg(c, "invalid rule-set catalog", err)
+		return
+	}
+	row, err := a.RuleSetCatalogService.Create(in)
+	jsonObj(c, row, err)
+}
+
+func (a *XraySettingController) updateRuleSet(c *gin.Context) {
+	if !requireRecentInteractiveSuperAdmin(c) {
+		return
+	}
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		jsonMsg(c, "invalid rule-set id", err)
+		return
+	}
+	var in service.RuleSetCatalogInput
+	if err := c.ShouldBindJSON(&in); err != nil {
+		jsonMsg(c, "invalid rule-set catalog", err)
+		return
+	}
+	row, err := a.RuleSetCatalogService.Update(id, in)
+	jsonObj(c, row, err)
+}
+
+func (a *XraySettingController) refreshRuleSet(c *gin.Context) {
+	if !requireRecentInteractiveSuperAdmin(c) {
+		return
+	}
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		jsonMsg(c, "invalid rule-set id", err)
+		return
+	}
+	row, err := a.RuleSetCatalogService.Refresh(id)
+	jsonObj(c, row, err)
+}
+
+func (a *XraySettingController) deleteRuleSet(c *gin.Context) {
+	if !requireRecentInteractiveSuperAdmin(c) {
+		return
+	}
+	id, err := strconv.Atoi(c.Param("id"))
+	if err == nil {
+		err = a.RuleSetCatalogService.Delete(id)
+	}
+	jsonMsg(c, "rule-set catalog deleted", err)
 }
 
 func parseIntSafe(s string) (int, error) {

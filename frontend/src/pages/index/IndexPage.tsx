@@ -5,12 +5,14 @@ import {
   Alert,
   Button,
   Card,
+  Checkbox,
   ConfigProvider,
   Layout,
   message,
   Modal,
   Result,
   Spin,
+  InputNumber,
   Tooltip,
 } from 'antd';
 import {
@@ -19,6 +21,8 @@ import {
   CloudServerOutlined,
   CloudDownloadOutlined,
   AreaChartOutlined,
+  ArrowDownOutlined,
+  ArrowUpOutlined,
   GlobalOutlined,
   EyeOutlined,
   EyeInvisibleOutlined,
@@ -31,6 +35,7 @@ import {
   HddOutlined,
   ReloadOutlined,
   RocketOutlined,
+  SettingOutlined,
   SwapOutlined,
 } from '@ant-design/icons';
 
@@ -101,14 +106,51 @@ function InfoTile({
   return <div className={cls}>{content}</div>;
 }
 
+interface DashboardPreference {
+  layout: string[];
+  hiddenWidgets: string[];
+  refreshSeconds: number;
+}
+
+const DASHBOARD_WIDGETS = [
+  { id: 'safety', label: 'Safety and accounting alerts' },
+  { id: 'resources', label: 'Resource tiles' },
+  { id: 'services', label: 'Service controls' },
+  { id: 'network', label: 'Network activity' },
+  { id: 'info', label: 'Panel information cards' },
+] as const;
+
+const DEFAULT_DASHBOARD_PREFERENCE: DashboardPreference = {
+  layout: DASHBOARD_WIDGETS.map((widget) => widget.id),
+  hiddenWidgets: [],
+  refreshSeconds: 2,
+};
+
 export default function IndexPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { isDark, isUltra, antdThemeConfig } = useTheme();
-  const { status, fetched, fetchError, refresh } = useStatusQuery();
+  const [dashboardPreference, setDashboardPreference] = useState<DashboardPreference>(DEFAULT_DASHBOARD_PREFERENCE);
+  const [dashboardCustomizeOpen, setDashboardCustomizeOpen] = useState(false);
+  const [dashboardSaving, setDashboardSaving] = useState(false);
+  const { status, fetched, fetchError, refresh } = useStatusQuery(dashboardPreference.refreshSeconds);
   const { isMobile } = useMediaQuery();
   const [messageApi, messageContextHolder] = message.useMessage();
   useEffect(() => { setMessageInstance(messageApi); }, [messageApi]);
+
+  useEffect(() => {
+    let cancelled = false;
+    HttpUtil.get('/panel/api/dashboard/preference', undefined, { silent: true }).then((msg) => {
+      if (cancelled || !msg?.success || !msg.obj) return;
+      const next = msg.obj as Partial<DashboardPreference>;
+      setDashboardPreference({
+        layout: Array.isArray(next.layout) ? next.layout : DEFAULT_DASHBOARD_PREFERENCE.layout,
+        hiddenWidgets: Array.isArray(next.hiddenWidgets) ? next.hiddenWidgets : [],
+        refreshSeconds: typeof next.refreshSeconds === 'number' ? next.refreshSeconds : 2,
+      });
+    });
+    return () => { cancelled = true; };
+  }, []);
 
   const [accessLogEnable, setAccessLogEnable] = useState(false);
   const {
@@ -152,6 +194,35 @@ export default function IndexPage() {
     },
     [],
   );
+
+  const widgetHidden = useCallback((widget: string) => dashboardPreference.hiddenWidgets.includes(widget), [dashboardPreference.hiddenWidgets]);
+  const widgetOrder = useCallback((widget: string) => {
+    const configured = dashboardPreference.layout.indexOf(widget);
+    return configured >= 0 ? configured : DEFAULT_DASHBOARD_PREFERENCE.layout.indexOf(widget);
+  }, [dashboardPreference.layout]);
+  const moveDashboardWidget = useCallback((widget: string, delta: -1 | 1) => {
+    setDashboardPreference((previous) => {
+      const layout = [...previous.layout];
+      const index = layout.indexOf(widget);
+      const nextIndex = index + delta;
+      if (index < 0 || nextIndex < 0 || nextIndex >= layout.length) return previous;
+      [layout[index], layout[nextIndex]] = [layout[nextIndex], layout[index]];
+      return { ...previous, layout };
+    });
+  }, []);
+
+  const saveDashboardPreference = useCallback(async () => {
+    setDashboardSaving(true);
+    try {
+      const msg = await HttpUtil.post('/panel/api/dashboard/preference', dashboardPreference) as { success?: boolean; obj?: DashboardPreference };
+      if (msg?.success && msg.obj) {
+        setDashboardPreference(msg.obj);
+        setDashboardCustomizeOpen(false);
+      }
+    } finally {
+      setDashboardSaving(false);
+    }
+  }, [dashboardPreference]);
 
   const stopXray = useCallback(async () => {
     await HttpUtil.post('/panel/api/server/stopXrayService');
@@ -356,14 +427,19 @@ export default function IndexPage() {
                       <Tooltip title={t('pages.index.backupTitle')}>
                         <Button icon={<CloudServerOutlined />} onClick={() => setBackupOpen(true)}>{isMobile ? null : t('pages.index.backupTitle')}</Button>
                       </Tooltip>
+                      <Tooltip title="Customize dashboard">
+                        <Button icon={<SettingOutlined />} onClick={() => setDashboardCustomizeOpen(true)}>{isMobile ? null : 'Customize'}</Button>
+                      </Tooltip>
                     </div>
                   </header>
 
-                  <AccountingSafetyPanel
-                    status={status.counterIncidents}
-                    nodeSafety={status.nodeSnapshotSafety}
-                    onOpenReconciliation={() => navigate('/resellers/reconciliation')}
-                  />
+                  {!widgetHidden('safety') && (
+                    <div className="dash-widget-safety" style={{ order: widgetOrder('safety') }}>
+                      <AccountingSafetyPanel
+                        status={status.counterIncidents}
+                        nodeSafety={status.nodeSnapshotSafety}
+                        onOpenReconciliation={() => navigate('/resellers/reconciliation')}
+                      />
 
                   <Alert
                     className="reseller-traffic-warning"
@@ -416,8 +492,10 @@ export default function IndexPage() {
                         : t('pages.index.nodeSnapshotSafetyUnavailable')}
                     />
                   )}
+                    </div>
+                  )}
 
-                  <section className="dash-resources phoenix-rise phoenix-rise-1" aria-label={t('pages.index.resources', 'Resources')}>
+                  {!widgetHidden('resources') && <section className="dash-resources phoenix-rise phoenix-rise-1" style={{ order: widgetOrder('resources') }} aria-label={t('pages.index.resources', 'Resources')}>
                     <ResourceTile
                       label={t('pages.index.cpu')}
                       icon={<ThunderboltOutlined />}
@@ -451,10 +529,10 @@ export default function IndexPage() {
                       caption={`/ ${SizeFormatter.sizeFormat(status.disk.total)}`}
                       size={isMobile ? 'compact' : 'default'}
                     />
-                  </section>
+                  </section>}
 
-                  <section className="dash-main phoenix-rise phoenix-rise-2">
-                    <ServicePanel
+                  {(!widgetHidden('services') || !widgetHidden('network')) && <section className="dash-main phoenix-rise phoenix-rise-2" style={{ order: Math.min(widgetOrder('services'), widgetOrder('network')) }}>
+                    {!widgetHidden('services') && <ServicePanel
                       status={status}
                       accessLogEnable={accessLogEnable}
                       onStopXray={stopXray}
@@ -466,16 +544,16 @@ export default function IndexPage() {
                       openvpn={openvpnHandlers}
                       l2tp={l2tpHandlers}
                       pppvpn={pppvpnHandlers}
-                    />
-                    <NetworkPanel
+                    />}
+                    {!widgetHidden('network') && <NetworkPanel
                       status={status}
                       upHistory={netHistory.up}
                       downHistory={netHistory.down}
                       onOpenHistory={() => setSysHistoryOpen(true)}
-                    />
-                  </section>
+                    />}
+                  </section>}
 
-                  <section className="dash-info phoenix-rise phoenix-rise-3">
+                  {!widgetHidden('info') && <section className="dash-info phoenix-rise phoenix-rise-3" style={{ order: widgetOrder('info') }}>
                     <Card className="info-card" title={<span className="phoenix-eyebrow">{t('pages.index.operationHours')}</span>}>
                       <div className="info-grid">
                         <InfoTile icon={<ThunderboltOutlined />} label="Xray" value={TimeFormatter.formatSecond(status.appStats.uptime)} />
@@ -532,7 +610,7 @@ export default function IndexPage() {
                         <InfoTile icon={<GithubOutlined />} label="GitHub" value="Dark-Sky07" onClick={openGithub} />
                       </div>
                     </Card>
-                  </section>
+                  </section>}
                 </div>
               )}
             </Spin>
@@ -588,6 +666,48 @@ export default function IndexPage() {
             onBusy={setBusy}
           />
         </LazyMount>
+
+        <Modal
+          open={dashboardCustomizeOpen}
+          title="Customize dashboard"
+          okText="Save layout"
+          confirmLoading={dashboardSaving}
+          onOk={saveDashboardPreference}
+          onCancel={() => setDashboardCustomizeOpen(false)}
+        >
+          <p>Choose the widgets visible on this administrator account and how often live status is refreshed. Safety alerts can be hidden from the layout, but they are never deleted.</p>
+          <Checkbox.Group
+            value={DASHBOARD_WIDGETS.map((widget) => widget.id).filter((widget) => !dashboardPreference.hiddenWidgets.includes(widget))}
+            onChange={(visible) => setDashboardPreference((previous) => ({
+              ...previous,
+              hiddenWidgets: DASHBOARD_WIDGETS.map((widget) => widget.id).filter((widget) => !visible.includes(widget)),
+            }))}
+            options={DASHBOARD_WIDGETS.map((widget) => ({ label: widget.label, value: widget.id }))}
+          />
+          <div style={{ marginTop: 20 }}>
+            <b>Widget order</b>
+            {dashboardPreference.layout.map((widget, index) => {
+              const detail = DASHBOARD_WIDGETS.find((candidate) => candidate.id === widget);
+              if (!detail) return null;
+              return <div key={widget} style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+                <span style={{ flex: 1 }}>{detail.label}</span>
+                <Button size="small" aria-label={`Move ${detail.label} up`} icon={<ArrowUpOutlined />} disabled={index === 0} onClick={() => moveDashboardWidget(widget, -1)} />
+                <Button size="small" aria-label={`Move ${detail.label} down`} icon={<ArrowDownOutlined />} disabled={index === dashboardPreference.layout.length - 1} onClick={() => moveDashboardWidget(widget, 1)} />
+              </div>;
+            })}
+            <small>Service controls and network activity remain together in the responsive main row.</small>
+          </div>
+          <div style={{ marginTop: 20 }}>
+            <span>Refresh live status every </span>
+            <InputNumber
+              min={2}
+              max={60}
+              value={dashboardPreference.refreshSeconds}
+              onChange={(value) => setDashboardPreference((previous) => ({ ...previous, refreshSeconds: typeof value === 'number' ? value : 2 }))}
+            />
+            <span> seconds</span>
+          </div>
+        </Modal>
 
         <LazyMount when={configTextOpen}>
           <Modal

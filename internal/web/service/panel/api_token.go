@@ -46,7 +46,7 @@ var knownTokenPermissions = map[string]struct{}{
 	"server:read": {}, "server:write": {},
 	"xray:read": {}, "xray:write": {},
 	"settings:read": {}, "settings:write": {},
-	"audit:read": {}, "sessions:manage": {},
+	"metrics:read": {}, "audit:read": {}, "sessions:manage": {},
 	"tokens:manage": {}, "webhooks:manage": {}, "admins:manage": {},
 }
 
@@ -318,6 +318,8 @@ func permissionForRequest(method, path string) string {
 		return "sessions:manage"
 	case strings.Contains(path, "/setting/webhooks"):
 		return "webhooks:manage"
+	case strings.Contains(path, "/metrics"):
+		return "metrics:read"
 	case strings.Contains(path, "/setting/auditlogs"):
 		return "audit:read"
 	case strings.Contains(path, "/clients"):

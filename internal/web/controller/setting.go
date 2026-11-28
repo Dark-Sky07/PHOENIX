@@ -32,15 +32,17 @@ type updateUserForm struct {
 
 // SettingController handles settings and user management operations.
 type SettingController struct {
-	settingService     service.SettingService
-	userService        panel.UserService
-	panelService       panel.PanelService
-	apiTokenService    panel.ApiTokenService
-	xrayService        service.XrayService
-	certService        service.CertService
-	discordService     service.DiscordService
-	cloudBackupService service.CloudBackupService
-	auditLogService    service.AuditLogService
+	settingService        service.SettingService
+	userService           panel.UserService
+	panelService          panel.PanelService
+	apiTokenService       panel.ApiTokenService
+	xrayService           service.XrayService
+	certService           service.CertService
+	discordService        service.DiscordService
+	cloudBackupService    service.CloudBackupService
+	auditLogService       service.AuditLogService
+	dnsCertificateService service.DNSCertificateService
+	oidcService           service.OIDCService
 }
 
 // NewSettingController creates a new SettingController and initializes its routes.
@@ -75,6 +77,14 @@ func (a *SettingController) initRouter(g *gin.RouterGroup) {
 	g.POST("/webhooks/deliveries/:id/replay", a.replayWebhookDelivery)
 	g.GET("/cert/status", a.getCertStatus)
 	g.POST("/cert/issue", a.issueCert)
+	g.GET("/cert/dns-profiles", a.listDNSCertificateProfiles)
+	g.POST("/cert/dns-profiles", a.createDNSCertificateProfile)
+	g.POST("/cert/dns-profiles/:id", a.updateDNSCertificateProfile)
+	g.POST("/cert/dns-profiles/:id/issue", a.issueDNSCertificateProfile)
+	g.POST("/cert/dns-profiles/:id/complete", a.completeDNSCertificateProfile)
+	g.POST("/cert/dns-profiles/:id/delete", a.deleteDNSCertificateProfile)
+	g.GET("/oidc", a.getOIDCConfig)
+	g.POST("/oidc", a.saveOIDCConfig)
 	g.POST("/discord/test", a.testDiscord)
 	g.POST("/cloudBackup/run", a.runCloudBackup)
 	g.GET("/auditLogs", a.listAuditLogs)
@@ -481,6 +491,107 @@ func (a *SettingController) issueCert(c *gin.Context) {
 		return
 	}
 	jsonObj(c, st, nil)
+}
+
+func (a *SettingController) listDNSCertificateProfiles(c *gin.Context) {
+	if !requireInteractiveSuperAdmin(c) {
+		return
+	}
+	rows, err := a.dnsCertificateService.List()
+	jsonObj(c, rows, err)
+}
+
+func (a *SettingController) createDNSCertificateProfile(c *gin.Context) {
+	if !requireRecentInteractiveSuperAdmin(c) {
+		return
+	}
+	var input service.DNSCertificateProfileInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		jsonMsg(c, "invalid DNS certificate profile", err)
+		return
+	}
+	row, err := a.dnsCertificateService.Create(input)
+	jsonObj(c, row, err)
+}
+
+func (a *SettingController) updateDNSCertificateProfile(c *gin.Context) {
+	if !requireRecentInteractiveSuperAdmin(c) {
+		return
+	}
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		jsonMsg(c, "invalid DNS certificate profile id", err)
+		return
+	}
+	var input service.DNSCertificateProfileInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		jsonMsg(c, "invalid DNS certificate profile", err)
+		return
+	}
+	row, err := a.dnsCertificateService.Update(id, input)
+	jsonObj(c, row, err)
+}
+
+func (a *SettingController) issueDNSCertificateProfile(c *gin.Context) {
+	if !requireRecentInteractiveSuperAdmin(c) {
+		return
+	}
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		jsonMsg(c, "invalid DNS certificate profile id", err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 8*time.Minute)
+	defer cancel()
+	result, err := a.dnsCertificateService.Issue(ctx, id)
+	jsonObj(c, result, err)
+}
+
+func (a *SettingController) completeDNSCertificateProfile(c *gin.Context) {
+	if !requireRecentInteractiveSuperAdmin(c) {
+		return
+	}
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		jsonMsg(c, "invalid DNS certificate profile id", err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 8*time.Minute)
+	defer cancel()
+	result, err := a.dnsCertificateService.CompleteManual(ctx, id)
+	jsonObj(c, result, err)
+}
+
+func (a *SettingController) deleteDNSCertificateProfile(c *gin.Context) {
+	if !requireRecentInteractiveSuperAdmin(c) {
+		return
+	}
+	id, err := strconv.Atoi(c.Param("id"))
+	if err == nil {
+		err = a.dnsCertificateService.Delete(id)
+	}
+	jsonMsg(c, "DNS certificate profile deleted", err)
+}
+
+func (a *SettingController) getOIDCConfig(c *gin.Context) {
+	if !requireInteractiveSuperAdmin(c) {
+		return
+	}
+	view, err := a.oidcService.GetConfig()
+	jsonObj(c, view, err)
+}
+
+func (a *SettingController) saveOIDCConfig(c *gin.Context) {
+	if !requireRecentInteractiveSuperAdmin(c) {
+		return
+	}
+	var input service.OIDCConfigInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		jsonMsg(c, "invalid OIDC configuration", err)
+		return
+	}
+	view, err := a.oidcService.SaveConfig(input)
+	jsonObj(c, view, err)
 }
 
 func (a *SettingController) testDiscord(c *gin.Context) {

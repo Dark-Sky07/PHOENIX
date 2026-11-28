@@ -2141,6 +2141,38 @@ export const sections: readonly Section[] = [
   },
 
   {
+    id: 'phase-b-integrations',
+    title: 'Phase B integrations',
+    description: 'DNS-01 profiles, secure Prometheus scraping, cached routing-list catalogs, and per-administrator dashboard preferences. Certificate and catalog mutations require an interactive superadmin with recent authentication; secrets are never returned after storage.',
+    endpoints: [
+      { method: 'GET', path: '/metrics', summary: 'Prometheus/OpenMetrics scrape endpoint. Send a Bearer token with legacy read/full access or granular metrics:read capability; responses expose only operational metrics.' },
+      { method: 'GET', path: '/panel/api/metrics', summary: 'Authenticated API alias for the Prometheus scrape endpoint; use basePath/metrics for normal Prometheus scrape configuration.' },
+      { method: 'GET', path: '/sso/oidc/login', summary: 'Begin standards-based OIDC Authorization Code + PKCE sign-in. Redirects the browser to the configured provider.' },
+      { method: 'GET', path: '/sso/oidc/callback', summary: 'OIDC redirect callback. Validates state, nonce, issuer, audience, expiry, and signed ID token before creating a panel session.' },
+      { method: 'GET', path: '/sso/oidc/status', summary: 'Return whether an administrator enabled generic OIDC sign-in, without exposing provider configuration.' },
+      { method: 'GET', path: '/panel/api/dashboard/preference', summary: 'Return the signed-in administrator’s dashboard layout, hidden widgets, and refresh interval.' },
+      { method: 'POST', path: '/panel/api/dashboard/preference', summary: 'Save the signed-in administrator’s dashboard layout and refresh interval. Bearer tokens are refused.', body: '{ "layout": ["resources", "services", "network", "info"], "hiddenWidgets": ["safety"], "refreshSeconds": 5 }' },
+      { method: 'GET', path: '/dashboard/preference', summary: 'Route-registration alias for the dashboard preference read endpoint; clients should use /panel/api/dashboard/preference.' },
+      { method: 'POST', path: '/dashboard/preference', summary: 'Route-registration alias for the dashboard preference write endpoint; clients should use /panel/api/dashboard/preference.' },
+      { method: 'GET', path: '/panel/api/setting/cert/dns-profiles', summary: 'List DNS-01 certificate profiles without revealing provider credentials.' },
+      { method: 'POST', path: '/panel/api/setting/cert/dns-profiles', summary: 'Create a manual or Cloudflare DNS-01 profile. Cloudflare credentials are encrypted at rest.', body: '{ "name": "wildcard", "domains": ["example.com", "*.example.com"], "provider": "cloudflare", "providerToken": "shown-once", "applyToPanel": true, "enabled": true }' },
+      { method: 'POST', path: '/panel/api/setting/cert/dns-profiles/:id', summary: 'Update a DNS-01 certificate profile. Leaving providerToken empty preserves a stored credential.', params: [{ name: 'id', in: 'path', type: 'number' }] },
+      { method: 'POST', path: '/panel/api/setting/cert/dns-profiles/:id/issue', summary: 'Issue or renew a DNS-01 certificate. Manual profiles return required _acme-challenge TXT values; Cloudflare profiles complete automatically.', params: [{ name: 'id', in: 'path', type: 'number' }] },
+      { method: 'POST', path: '/panel/api/setting/cert/dns-profiles/:id/complete', summary: 'After publishing returned manual DNS TXT records, verify propagation and complete the pending ACME order.', params: [{ name: 'id', in: 'path', type: 'number' }] },
+      { method: 'POST', path: '/panel/api/setting/cert/dns-profiles/:id/delete', summary: 'Delete a DNS-01 certificate profile; managed certificate files are left untouched for explicit operator review.', params: [{ name: 'id', in: 'path', type: 'number' }] },
+      { method: 'GET', path: '/panel/api/setting/oidc', summary: 'Return generic OIDC provider configuration without exposing the stored client secret.' },
+      { method: 'POST', path: '/panel/api/setting/oidc', summary: 'Configure or disable a standards-compliant OIDC provider, optional domain allow-list, auto-provisioning policy, and safe group-to-role mappings. Requires recent interactive superadmin authentication.' },
+      { method: 'GET', path: '/panel/api/xray/rule-sets', summary: 'List cached rule-set catalogs. Pass entries=true to include normalized, reviewable entries.' },
+      { method: 'GET', path: '/panel/api/xray/rule-sets/:id', summary: 'Read one cached routing-list catalog and its entries.', params: [{ name: 'id', in: 'path', type: 'number' }] },
+      { method: 'POST', path: '/panel/api/xray/rule-sets', summary: 'Create a HTTPS-only, SSRF-protected remote domain or IP rule-set catalog.', body: '{ "name": "private-networks", "url": "https://example.com/rules.txt", "kind": "ip", "enabled": true, "refreshMinutes": 360 }' },
+      { method: 'POST', path: '/panel/api/xray/rule-sets/:id', summary: 'Update catalog metadata and refresh cadence.', params: [{ name: 'id', in: 'path', type: 'number' }] },
+      { method: 'POST', path: '/panel/api/xray/rule-sets/:id/refresh', summary: 'Fetch, validate, normalize, and atomically replace the cached entries while retaining the last good cache on failure.', params: [{ name: 'id', in: 'path', type: 'number' }] },
+      { method: 'DELETE', path: '/panel/api/xray/rule-sets/:id', summary: 'Delete one cached rule-set catalog.', params: [{ name: 'id', in: 'path', type: 'number' }] },
+      { method: 'POST', path: '/panel/api/xray/rule-sets/:id/del', summary: 'Axios-friendly alias for deleting one cached rule-set catalog.', params: [{ name: 'id', in: 'path', type: 'number' }] },
+    ],
+  },
+
+  {
     id: 'websocket',
     title: 'WebSocket',
     description:

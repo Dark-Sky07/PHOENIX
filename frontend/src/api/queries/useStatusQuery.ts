@@ -16,11 +16,11 @@ async function fetchStatus(): Promise<Status> {
   return new Status(validated.obj);
 }
 
-export function useStatusQuery() {
+export function useStatusQuery(refreshSeconds = 2) {
   const query = useQuery({
     queryKey: keys.server.status(),
     queryFn: fetchStatus,
-    refetchInterval: POLL_INTERVAL_MS,
+    refetchInterval: Math.max(2, Math.min(60, refreshSeconds)) * 1000 || POLL_INTERVAL_MS,
     refetchIntervalInBackground: false,
     staleTime: 0,
   });

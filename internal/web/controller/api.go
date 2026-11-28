@@ -81,8 +81,15 @@ func (a *APIController) checkAPIAuth(c *gin.Context) {
 
 // initRouter sets up the API routes for inbounds, server, and other endpoints.
 func (a *APIController) initRouter(g *gin.RouterGroup) {
+	// Prometheus uses its own bearer-token check rather than browser-session
+	// middleware, so a standard scraper can reach basePath/metrics.
+	g.GET("/metrics", a.prometheusMetrics)
+
 	// Main API group
 	api := g.Group("/panel/api")
+	// API alias for API explorers; the canonical scrape endpoint remains
+	// basePath/metrics so Prometheus configuration stays conventional.
+	api.GET("/metrics", a.prometheusMetrics)
 	api.Use(a.checkAPIAuth)
 	api.Use(middleware.CSRFMiddleware())
 	// Reseller (نمایندگی) sessions are confined to their own slice of the API.
@@ -119,6 +126,7 @@ func (a *APIController) initRouter(g *gin.RouterGroup) {
 	a.resellerController = NewResellerController(api.Group("/resellers"))
 	a.resellerSelfController = NewResellerSelfController(api.Group("/reseller"))
 	a.authController = NewAuthController(api.Group("/auth"), a.userService)
+	NewDashboardController(api)
 
 	// Extra routes
 	api.POST("/backuptotgbot", a.BackuptoTgbot)

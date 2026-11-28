@@ -53,6 +53,11 @@ type User struct {
 	Note        string `json:"note"`
 	CreatedAt   int64  `json:"createdAt" gorm:"default:0"`
 	LastLoginAt int64  `json:"lastLoginAt" gorm:"default:0"`
+	// OIDCIssuer and OIDCSubject identify a standards-based SSO identity.
+	// They are indexed separately rather than uniquely so AutoMigrate remains
+	// additive for installations that already have several empty legacy rows.
+	OIDCIssuer  string `json:"-" gorm:"column:oidc_issuer;size:2048;index"`
+	OIDCSubject string `json:"-" gorm:"column:oidc_subject;size:512;index"`
 }
 
 // Inbound represents an Xray inbound configuration with traffic statistics and settings.

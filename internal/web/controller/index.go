@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"context"
+	"crypto/subtle"
 	"net/http"
 	"text/template"
 	"time"
@@ -30,6 +32,7 @@ type IndexController struct {
 	settingService  service.SettingService
 	userService     panel.UserService
 	resellerService service.ResellerService
+	oidcService     service.OIDCService
 	tgbot           tgbot.Tgbot
 }
 
@@ -49,6 +52,11 @@ func (a *IndexController) initRouter(g *gin.RouterGroup) {
 	g.POST("/logout", middleware.CSRFMiddleware(), a.logout)
 	g.POST("/reauth", middleware.CSRFMiddleware(), a.reauth)
 	g.POST("/getTwoFactorEnable", middleware.CSRFMiddleware(), a.getTwoFactorEnable)
+	// Generic OIDC uses browser redirects and PKCE. It deliberately lives
+	// outside /panel/api so no pre-existing panel session is required.
+	g.GET("/sso/oidc/login", a.oidcLogin)
+	g.GET("/sso/oidc/callback", a.oidcCallback)
+	g.GET("/sso/oidc/status", a.oidcStatus)
 }
 
 // index handles the root route, redirecting logged-in users to the panel or showing the login page.
@@ -59,6 +67,92 @@ func (a *IndexController) index(c *gin.Context) {
 		return
 	}
 	serveDistPage(c, "login.html")
+}
+
+const (
+	oidcStateKey    = "OIDC_STATE"
+	oidcNonceKey    = "OIDC_NONCE"
+	oidcVerifierKey = "OIDC_VERIFIER"
+)
+
+func (a *IndexController) oidcRedirectURI(c *gin.Context) string {
+	scheme := "http"
+	if c.Request.TLS != nil || c.GetHeader("X-Forwarded-Proto") == "https" {
+		scheme = "https"
+	}
+	host, _ := a.settingService.GetWebDomain()
+	if host == "" {
+		host = c.Request.Host
+	}
+	basePath := c.GetString("base_path")
+	if basePath == "" {
+		basePath = "/"
+	}
+	return scheme + "://" + host + basePath + "sso/oidc/callback"
+}
+
+func (a *IndexController) oidcStatus(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
+	config, err := a.oidcService.GetConfig()
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"success": true, "obj": false})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "obj": config.Enabled})
+}
+
+func (a *IndexController) oidcLogin(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
+	defer cancel()
+	begin, err := a.oidcService.Begin(ctx, a.oidcRedirectURI(c))
+	if err != nil {
+		c.String(http.StatusBadRequest, "OIDC sign-in is unavailable: %v", err)
+		return
+	}
+	s := sessions.Default(c)
+	s.Set(oidcStateKey, begin.State)
+	s.Set(oidcNonceKey, begin.Nonce)
+	s.Set(oidcVerifierKey, begin.CodeVerifier)
+	if err := s.Save(); err != nil {
+		c.String(http.StatusInternalServerError, "Unable to prepare OIDC sign-in")
+		return
+	}
+	c.Redirect(http.StatusFound, begin.AuthorizationURL)
+}
+
+func (a *IndexController) oidcCallback(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
+	s := sessions.Default(c)
+	expectedState, _ := s.Get(oidcStateKey).(string)
+	nonce, _ := s.Get(oidcNonceKey).(string)
+	verifier, _ := s.Get(oidcVerifierKey).(string)
+	s.Delete(oidcStateKey)
+	s.Delete(oidcNonceKey)
+	s.Delete(oidcVerifierKey)
+	_ = s.Save() // consume state even when the provider sends an error
+
+	providedState := c.Query("state")
+	if expectedState == "" || subtle.ConstantTimeCompare([]byte(expectedState), []byte(providedState)) != 1 {
+		c.String(http.StatusBadRequest, "OIDC sign-in state was invalid or expired")
+		return
+	}
+	if reason := c.Query("error"); reason != "" {
+		c.String(http.StatusUnauthorized, "OIDC provider rejected sign-in: %s", reason)
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer cancel()
+	user, err := a.oidcService.Complete(ctx, a.oidcRedirectURI(c), c.Query("code"), nonce, verifier)
+	if err != nil {
+		c.String(http.StatusUnauthorized, "OIDC sign-in failed: %v", err)
+		return
+	}
+	if err := session.SetLoginUser(c, user); err != nil {
+		c.String(http.StatusInternalServerError, "Unable to create session")
+		return
+	}
+	c.Redirect(http.StatusFound, c.GetString("base_path")+"panel/")
 }
 
 // login handles user authentication and session creation.
