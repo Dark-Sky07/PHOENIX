@@ -47,7 +47,7 @@ type cloudflaredProviderConfig struct {
 
 const connectorStopGracePeriod = 10 * time.Second
 
-var tunnelUUIDRE = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{12}$`)
+var tunnelUUIDRE = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`)
 
 func newTunnelManager(dir, cloudflaredPath string) (*tunnelManager, error) {
 	if dir == "" {
